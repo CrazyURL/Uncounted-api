@@ -5,7 +5,9 @@ import './types' // Hono Context 타입 확장
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
+import { swaggerUI } from '@hono/swagger-ui'
 import { bodyDecryptMiddleware } from './lib/middleware'
+import { openApiSpec } from './openapi'
 import auth from './routes/auth'
 import sessions from './routes/sessions'
 import storage from './routes/storage'
@@ -43,6 +45,11 @@ app.get('/', (c) => {
 app.get('/health', (c) => {
   return c.json({ status: 'ok' })
 })
+
+// ── API 문서 ───────────────────────────────────────────────────────────
+
+app.get('/docs', swaggerUI({ url: '/openapi.json' }))
+app.get('/openapi.json', (c) => c.json(openApiSpec))
 
 // ── API 라우트 ─────────────────────────────────────────────────────────
 

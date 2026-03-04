@@ -2,192 +2,167 @@
 
 ## 📍 개요
 
-Supabase 직접 호출 로직을 **Hono 기반 백엔드 API**로 분리하여, 클라이언트와 서버의 관심사를 명확히 분리했습니다.
-
-## 🎯 분리 이유
-
-### Before (문제점)
-- ❌ 클라이언트 코드에 Supabase 로직 산재 (`sessionMapper`, `auth`, `storageUpload`)
-- ❌ `SUPABASE_SERVICE_ROLE_KEY`가 클라이언트 번들에 포함될 위험
-- ❌ RLS 우회 로직이 클라이언트에 노출
-- ❌ 관리 복잡도 증가 (여러 파일에서 supabase 직접 호출)
-
-### After (해결)
-- ✅ 백엔드 API가 Supabase와 통신 (service_role 키 안전)
-- ✅ 클라이언트는 REST API만 호출 (단일 책임)
-- ✅ 타입 안전성 유지 (TypeScript 타입 공유)
-- ✅ 배포 독립성 (프론트엔드/백엔드 분리 배포 가능)
+Supabase 직접 호출 로직을 **Hono 기반 백엔드 API**로 분리. 모든 요청/응답은 **AES-256-GCM** 암호화로 보호됩니다.
 
 ## 📁 프로젝트 구조
 
 ```
-uncounted-app/
-├── src/                       # 클라이언트 (기존)
-│   ├── pages/
-│   ├── components/
+uncounted-api/
+├── src/
+│   ├── index.ts          # 앱 진입점 (미들웨어 + 라우트)
+│   ├── dev.ts            # 개발 서버
+│   ├── types.ts          # Hono Context 타입 확장
 │   ├── lib/
-│   │   └── api/              # 🆕 백엔드 API 호출 레이어
-│   │       ├── client.ts     # fetch 래퍼
-│   │       ├── sessions.ts   # Sessions API
-│   │       └── storage.ts    # Storage API
-│   └── types/                # TypeScript 타입 (공유)
-│
-├── server/                   # 🆕 백엔드 API (Hono)
-│   ├── index.ts             # 진입점
-│   ├── dev.ts               # 개발 서버
-│   ├── routes/
-│   │   ├── sessions.ts      # Sessions CRUD
-│   │   └── storage.ts       # Storage 업로드/삭제
-│   ├── lib/
-│   │   ├── supabase.ts      # Admin 클라이언트
-│   │   └── middleware.ts    # 인증 미들웨어
-│   └── README.md            # API 문서
-│
-├── .env.example             # 환경변수 템플릿
-├── tsconfig.server.json     # 서버 전용 TS 설정
-└── package.json             # 통합 빌드 스크립트
+│   │   ├── supabase.ts   # Admin 클라이언트
+│   │   ├── crypto.ts     # AES-256-GCM 암호화/복호화
+│   │   └── middleware.ts # 인증 + 바디 복호화 미들웨어
+│   └── routes/
+│       ├── auth.ts       # 인증 API
+│       ├── sessions.ts   # 세션 CRUD
+│       ├── storage.ts    # 스토리지 업로드/삭제
+│       ├── transcripts.ts# 트랜스크립트 관리
+│       ├── logging.ts    # 퍼널/에러 로깅
+│       └── admin.ts      # 어드민 API
+├── .env.example
+├── tsconfig.json
+└── package.json
 ```
 
-## 🚀 사용법
+## 🔐 암호화 시스템
 
-### 1. 환경변수 설정
+### 요청 암호화
+클라이언트가 민감한 요청 바디를 암호화하여 전송:
+```json
+{ "enc_data": "<base64url(IV|AuthTag|Ciphertext)>" }
+```
+서버의 `bodyDecryptMiddleware`가 자동으로 복호화 → `c.get('body')`에 저장.
+
+### 응답 암호화
+민감 필드(ID, URL 등)를 `encryptId()`로 암호화하여 반환:
+```
+"<base64url(IV|AuthTag|Ciphertext)>@enc_uncounted"
+```
+
+### 키 설정
+```bash
+# .env
+ENCRYPTION_KEY=<32-byte hex>
+
+# 키 생성
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+## 🔑 인증
+
+모든 `/api/*` 엔드포인트는 Supabase JWT 인증 필요:
+
+```
+Authorization: Bearer {access_token}
+# 또는
+Cookie: uncounted_session={token}
+```
+
+- **httpOnly 쿠키**: 로그인 시 자동 설정 (1시간 만료)
+- **리프레시 토큰 쿠키**: 90일 만료
+
+## 🚀 환경변수
 
 ```bash
-# .env 파일에 추가
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 PORT=3001
 CORS_ORIGIN=http://localhost:5173
-VITE_API_URL=http://localhost:3001
-```
-
-### 2. 개발 서버 실행
-
-```bash
-# 백엔드만 실행
-npm run dev:server
-
-# 프론트엔드 + 백엔드 동시 실행
-npm run dev:all
-```
-
-### 3. API 사용 (클라이언트)
-
-```typescript
-// src/lib/api/sessions.ts
-import { fetchSessions, saveSessions } from './api/sessions'
-
-// 세션 목록 조회
-const { data, error } = await fetchSessions()
-
-// 세션 배치 저장
-const { data, error } = await saveSessions([session1, session2])
+ENCRYPTION_KEY=your-32-byte-hex-key
 ```
 
 ## 🔌 API 엔드포인트
 
-### Sessions API
+### Auth API `/api/auth`
+
+| Method | Endpoint | 인증 | 설명 |
+|--------|----------|------|------|
+| POST | `/signin` | - | 이메일/비밀번호 로그인 (쿠키 설정) |
+| POST | `/signup` | - | 회원가입 |
+| POST | `/signout` | 필수 | 로그아웃 (쿠키 삭제) |
+| GET | `/session` | 필수 | 현재 세션 정보 |
+| GET | `/me` | 필수 | 인증된 사용자 정보 |
+| POST | `/refresh` | - | 액세스 토큰 갱신 |
+| POST | `/session` | - | OAuth 콜백 처리 (쿠키 설정) |
+| GET | `/oauth/google` | - | Google OAuth 시작 |
+| POST | `/link-pid` | 선택 | 가명 ID ↔ 사용자 연결 |
+
+### Sessions API `/api/sessions`
 
 | Method | Endpoint | 설명 |
 |--------|----------|------|
-| GET | `/api/sessions` | 세션 목록 조회 (페이징) |
-| GET | `/api/sessions/:id` | 세션 상세 조회 |
-| POST | `/api/sessions/batch` | 세션 배치 저장 (최대 500건) |
-| PUT | `/api/sessions/:id/labels` | 라벨 업데이트 |
-| PUT | `/api/sessions/:id/visibility` | 공개 상태 업데이트 |
-| DELETE | `/api/sessions/:id` | 세션 삭제 |
+| GET | `/` | 세션 목록 조회 (페이징) |
+| GET | `/:id` | 세션 상세 조회 |
+| POST | `/batch` | 세션 배치 저장 (최대 500건) |
+| PUT | `/:id/labels` | 라벨 업데이트 |
+| PUT | `/:id/visibility` | 공개 상태 업데이트 |
+| DELETE | `/:id` | 세션 삭제 |
 
-### Storage API
+### Storage API `/api/storage`
 
 | Method | Endpoint | 설명 |
 |--------|----------|------|
-| POST | `/api/storage/audio` | 정제된 오디오 업로드 |
-| POST | `/api/storage/meta` | 메타 JSONL 업로드 |
-| POST | `/api/storage/audio/signed-url` | Signed URL 발급 |
-| DELETE | `/api/storage/user` | 사용자 파일 전체 삭제 |
+| POST | `/audio` | 정제된 오디오(WAV) 업로드 |
+| POST | `/meta` | 메타 JSONL 업로드 |
+| POST | `/audio/signed-url` | 재생용 Signed URL 발급 |
+| DELETE | `/user` | 사용자 파일 전체 삭제 |
 
-## 🔐 인증
+### Transcripts API `/api/transcripts`
 
-모든 API는 Supabase JWT 인증이 필요합니다:
+| Method | Endpoint | 설명 |
+|--------|----------|------|
+| POST | `/:sessionId` | 트랜스크립트 저장/수정 |
+| GET | `/:sessionId` | 특정 트랜스크립트 조회 |
+| GET | `/` | 전체 트랜스크립트 목록 |
+| DELETE | `/:sessionId` | 트랜스크립트 삭제 |
 
-```typescript
-// 클라이언트에서 자동 처리
-import { apiFetch } from './lib/api/client'
+### Logging API `/api/logging`
 
-// getAccessToken()으로 토큰 자동 주입
-const response = await apiFetch('/api/sessions')
-```
+| Method | Endpoint | 인증 | 설명 |
+|--------|----------|------|------|
+| POST | `/funnel` | 선택 | 퍼널 이벤트 배치 업로드 |
+| POST | `/errors` | 선택 | 에러 로그 배치 업로드 |
 
-## 🌐 배포
+### Admin API `/api/admin`
 
-### Cloudflare Workers (추천)
-
-```bash
-npm install -g wrangler
-wrangler init
-wrangler deploy
-```
-
-무료 티어: 월 10만 요청
-
-### Vercel Edge Functions
-
-```bash
-npm install -g vercel
-vercel
-```
-
-`vercel.json`:
-```json
-{
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/server/index" }
-  ]
-}
-```
-
-### Railway / Render
-
-Docker 배포 또는 Node.js 직접 실행
-
-```bash
-npm run build:server
-node dist/server/dev.js
-```
-
-## 📝 다음 단계
-
-### 클라이언트 마이그레이션 (점진적)
-
-1. ✅ **백엔드 API 구축 완료**
-2. ⏳ 클라이언트 코드 마이그레이션:
-   - `src/lib/sessionMapper.ts` → `src/lib/api/sessions.ts` 사용
-   - `src/lib/storageUpload.ts` → `src/lib/api/storage.ts` 사용
-3. ⏳ 기존 Supabase 직접 호출 제거
-4. ⏳ 프로덕션 배포
-
-### 점진적 마이그레이션 전략
-
-```typescript
-// Before (Supabase 직접 호출)
-import { supabase } from './supabase'
-const { data } = await supabase.from('sessions').select('*')
-
-// After (백엔드 API 호출)
-import { fetchSessions } from './api/sessions'
-const { data } = await fetchSessions()
-```
+| Method | Endpoint | 설명 |
+|--------|----------|------|
+| GET/POST/DELETE | `/clients` | 클라이언트 관리 |
+| GET/POST/DELETE | `/delivery-profiles` | 납품 프로필 관리 |
+| GET/POST/DELETE | `/sku-rules` | SKU 규칙 관리 |
+| GET/POST/DELETE | `/sku-presets` | SKU 프리셋 관리 |
+| GET/POST/DELETE | `/export-jobs` | 내보내기 작업 관리 |
+| POST | `/export-jobs/:id/logs` | 작업 로그 추가 |
+| GET/POST | `/billable-units` | 청구 단위 조회/배치 저장 |
+| POST | `/billable-units/lock` | 단위 잠금 |
+| POST | `/billable-units/unlock` | 잠금 해제 |
+| POST | `/billable-units/mark-delivered` | 납품 완료 처리 |
+| GET | `/sessions` | 전체 세션 조회 (어드민) |
+| GET | `/transcripts` | 전체 트랜스크립트 조회 (어드민) |
+| DELETE | `/reset-all` | 전체 데이터 초기화 ⚠️ |
 
 ## 🛠️ 기술 스택
 
-- **Hono** - 경량 웹 프레임워크 (Edge 지원)
-- **TypeScript** - 타입 안전성
-- **Supabase JS Client** - DB/Storage/Auth
-- **tsx** - TypeScript 실행
-- **concurrently** - 병렬 개발 서버
+- **Hono** — 경량 웹 프레임워크 (Edge 지원)
+- **TypeScript** — 타입 안전성
+- **Supabase JS Client** — DB/Storage/Auth
+- **Node.js crypto** — AES-256-GCM 암호화
+- **tsx** — TypeScript 실행 (개발)
 
-## 📚 참고 문서
+## 🌐 개발 실행
 
-- [Hono 공식 문서](https://hono.dev/)
-- [Supabase Auth](https://supabase.com/docs/guides/auth)
-- [server/README.md](./server/README.md) - API 상세 문서
+```bash
+# 개발 서버 (핫 리로드)
+npm run dev
+
+# 프로덕션 빌드
+npm run build
+npm start
+
+# 헬스 체크
+curl http://localhost:3001/health
+```
