@@ -3,6 +3,7 @@
 
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase'
+import { getBody } from '../lib/middleware'
 
 const logging = new Hono()
 
@@ -16,7 +17,7 @@ const logging = new Hono()
  * 퍼널 이벤트 배치 전송
  */
 logging.post('/funnel', async (c) => {
-  const { events } = await c.req.json()
+  const { events } = getBody<{ events: any[] }>(c)
 
   if (!Array.isArray(events) || events.length === 0) {
     return c.json({ error: 'Events array is required' }, 400)
@@ -56,7 +57,7 @@ logging.post('/funnel', async (c) => {
  * 에러 로그 배치 전송
  */
 logging.post('/errors', async (c) => {
-  const { logs } = await c.req.json()
+  const { logs } = getBody<{ logs: any[] }>(c)
 
   if (!Array.isArray(logs) || logs.length === 0) {
     return c.json({ error: 'Logs array is required' }, 400)

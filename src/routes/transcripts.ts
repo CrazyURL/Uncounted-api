@@ -3,7 +3,8 @@
 
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase'
-import { authMiddleware } from '../lib/middleware'
+import { authMiddleware, getBody } from '../lib/middleware'
+import { encryptId } from '../lib/crypto'
 
 const transcripts = new Hono()
 
@@ -28,7 +29,7 @@ type TranscriptWord = {
 transcripts.post('/:sessionId', async (c) => {
   const userId = c.get('userId') as string
   const sessionId = c.req.param('sessionId')
-  const { text, summary, words, source } = await c.req.json()
+  const { text, summary, words, source } = getBody<{ text: string; summary?: string; words?: unknown[]; source?: string }>(c)
 
   if (!text || typeof text !== 'string') {
     return c.json({ error: 'Text is required' }, 400)
@@ -58,9 +59,9 @@ transcripts.post('/:sessionId', async (c) => {
 
     return c.json({
       data: {
-        sessionId,
-        text: data.text,
-        summary: data.summary ?? undefined,
+        sessionId: encryptId(sessionId),
+        text: encryptId(data.text),
+        summary: data.summary ? encryptId(data.summary) : undefined,
         words: data.words ?? undefined,
         createdAt: data.created_at,
       },
@@ -95,8 +96,8 @@ transcripts.get('/:sessionId', async (c) => {
 
     return c.json({
       data: {
-        text: data.text,
-        summary: data.summary ?? undefined,
+        text: encryptId(data.text),
+        summary: data.summary ? encryptId(data.summary) : undefined,
         words: data.words ?? undefined,
         createdAt: data.created_at,
       },
@@ -125,9 +126,9 @@ transcripts.get('/', async (c) => {
     }
 
     const transcripts = (data ?? []).map((row) => ({
-      sessionId: row.session_id,
-      text: row.text,
-      summary: row.summary ?? undefined,
+      sessionId: encryptId(row.session_id),
+      text: encryptId(row.text),
+      summary: row.summary ? encryptId(row.summary) : undefined,
       words: row.words ?? undefined,
       createdAt: row.created_at,
     }))

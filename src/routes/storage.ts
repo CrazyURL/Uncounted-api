@@ -3,7 +3,7 @@
 
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase'
-import { authMiddleware } from '../lib/middleware'
+import { authMiddleware, getBody } from '../lib/middleware'
 
 const storage = new Hono()
 
@@ -20,7 +20,7 @@ const META_BUCKET = 'meta-jsonl'
  */
 storage.post('/audio', async (c) => {
   const userId = c.get('userId') as string
-  const { sessionId, wavData } = await c.req.json()
+  const { sessionId, wavData } = getBody<{ sessionId: string; wavData: string }>(c)
 
   if (!sessionId || !wavData) {
     return c.json({ error: 'Missing sessionId or wavData' }, 400)
@@ -60,7 +60,7 @@ storage.post('/audio', async (c) => {
  */
 storage.post('/meta', async (c) => {
   const userId = c.get('userId') as string
-  const { batchId, content } = await c.req.json()
+  const { batchId, content } = getBody<{ batchId: string; content: string }>(c)
 
   if (!batchId || !content) {
     return c.json({ error: 'Missing batchId or content' }, 400)
@@ -92,7 +92,7 @@ storage.post('/meta', async (c) => {
  * Body: { storagePath: string, expiresIn?: number }
  */
 storage.post('/audio/signed-url', async (c) => {
-  const { storagePath, expiresIn = 3600 } = await c.req.json()
+  const { storagePath, expiresIn = 3600 } = getBody<{ storagePath: string; expiresIn?: number }>(c)
 
   if (!storagePath) {
     return c.json({ error: 'Missing storagePath' }, 400)

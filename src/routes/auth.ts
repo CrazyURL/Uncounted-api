@@ -6,6 +6,7 @@ import { setCookie, getCookie, deleteCookie } from 'hono/cookie'
 import type { Context } from 'hono'
 import { supabaseAdmin } from '../lib/supabase'
 import { encryptId } from '../lib/crypto'
+import { getBody } from '../lib/middleware'
 
 const auth = new Hono()
 const IS_PROD = process.env.NODE_ENV === 'production'
@@ -41,7 +42,7 @@ function clearAuthCookies(c: Context) {
  * 이메일/비밀번호 로그인 → httpOnly 쿠키 설정
  */
 auth.post('/signin', async (c) => {
-  const { email, password } = await c.req.json()
+  const { email, password } = getBody<{ email: string; password: string }>(c)
 
   if (!email || !password) {
     return c.json({ error: 'Email and password are required' }, 400)
@@ -63,8 +64,14 @@ auth.post('/signin', async (c) => {
 
     return c.json({
       data: {
-        session: data.session,
-        user: data.user,
+        session: data.session ? {
+          access_token: encryptId(data.session.access_token),
+          refresh_token: encryptId(data.session.refresh_token),
+        } : null,
+        user: data.user ? {
+          id: encryptId(data.user.id),
+          email: data.user.email ? encryptId(data.user.email) : null,
+        } : null,
       },
     })
   } catch (err: any) {
@@ -77,7 +84,7 @@ auth.post('/signin', async (c) => {
  * 회원가입 (이메일 확인 자동 처리)
  */
 auth.post('/signup', async (c) => {
-  const { email, password } = await c.req.json()
+  const { email, password } = getBody<{ email: string; password: string }>(c)
 
   if (!email || !password) {
     return c.json({ error: 'Email and password are required' }, 400)
@@ -96,7 +103,10 @@ auth.post('/signup', async (c) => {
 
     return c.json({
       data: {
-        user: data.user,
+        user: data.user ? {
+          id: encryptId(data.user.id),
+          email: data.user.email ? encryptId(data.user.email) : null,
+        } : null,
       },
     })
   } catch (err: any) {
@@ -154,8 +164,11 @@ auth.get('/session', async (c) => {
     return c.json({
       data: {
         session: {
-          access_token: token,
-          user,
+          access_token: encryptId(token),
+          user: {
+            id: encryptId(user.id),
+            email: user.email ? encryptId(user.email) : null,
+          },
         },
       },
       error: null,
@@ -185,7 +198,7 @@ auth.get('/me', async (c) => {
       return c.json({ error: 'Invalid or expired session' }, 401)
     }
 
-    return c.json({ data: { user: { id: encryptId(user.id), email: user.email } } })
+    return c.json({ data: { user: { id: encryptId(user.id), email: user.email ? encryptId(user.email) : null } } })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
@@ -197,7 +210,7 @@ auth.get('/me', async (c) => {
  * body 또는 쿠키에서 refresh_token 읽기
  */
 auth.post('/refresh', async (c) => {
-  const body = await c.req.json().catch(() => ({}))
+  const body = getBody<{ refresh_token?: string }>(c)
   const refresh_token = body.refresh_token || getCookie(c, 'uncounted_refresh')
 
   if (!refresh_token) {
@@ -219,7 +232,10 @@ auth.post('/refresh', async (c) => {
 
     return c.json({
       data: {
-        session: data.session,
+        session: data.session ? {
+          access_token: encryptId(data.session.access_token),
+          refresh_token: data.session.refresh_token ? encryptId(data.session.refresh_token) : null,
+        } : null,
       },
     })
   } catch (err: any) {
@@ -232,7 +248,7 @@ auth.post('/refresh', async (c) => {
  * OAuth 콜백 후 프론트엔드에서 토큰 전달 → 쿠키 설정
  */
 auth.post('/session', async (c) => {
-  const { access_token, refresh_token } = await c.req.json()
+  const { access_token, refresh_token } = getBody<{ access_token: string; refresh_token: string }>(c)
 
   if (!access_token || !refresh_token) {
     return c.json({ error: 'access_token and refresh_token are required' }, 400)
@@ -250,8 +266,11 @@ auth.post('/session', async (c) => {
     return c.json({
       data: {
         session: {
-          access_token,
-          user: { id: user.id, email: user.email },
+          access_token: encryptId(access_token),
+          user: {
+            id: encryptId(user.id),
+            email: user.email ? encryptId(user.email) : null,
+          },
         },
       },
     })
@@ -297,7 +316,7 @@ auth.post('/link-pid', async (c) => {
     return c.json({ error: 'Authorization required' }, 401)
   }
 
-  const { pid } = await c.req.json()
+  const { pid } = getBody<{ pid: string }>(c)
 
   if (!pid) {
     return c.json({ error: 'Pseudo ID is required' }, 400)

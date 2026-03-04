@@ -5,6 +5,7 @@ import './types' // Hono Context 타입 확장
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
+import { bodyDecryptMiddleware } from './lib/middleware'
 import auth from './routes/auth'
 import sessions from './routes/sessions'
 import storage from './routes/storage'
@@ -24,6 +25,9 @@ app.use('/*', cors({
 
 // 로깅
 app.use('/*', logger())
+
+// request body 복호화 (enc_data → plaintext body)
+app.use('/api/*', bodyDecryptMiddleware)
 
 // ── 헬스 체크 ──────────────────────────────────────────────────────────
 

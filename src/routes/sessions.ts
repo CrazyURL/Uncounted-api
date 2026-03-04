@@ -3,7 +3,8 @@
 
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase'
-import { authMiddleware } from '../lib/middleware'
+import { authMiddleware, getBody } from '../lib/middleware'
+import { encryptId } from '../lib/crypto'
 
 const sessions = new Hono()
 
@@ -13,8 +14,19 @@ sessions.use('/*', authMiddleware)
 // ── 타입 변환 헬퍼 ──────────────────────────────────────────────────────
 
 function sessionFromRow(row: Record<string, unknown>) {
+  const rawId = row.id as string
+  const rawUserId = (row.user_id as string) ?? null
+  const rawPeerId = (row.peer_id as string) ?? null
+  const rawAudioUrl = (row.audio_url as string) ?? null
+  const rawCallRecordId = (row.call_record_id as string) ?? null
+  const rawDupGroupId = (row.dup_group_id as string) ?? null
+  const rawFileHash = (row.file_hash_sha256 as string) ?? null
+  const rawAudioFP = (row.audio_fingerprint as string) ?? null
+  const rawWavPath = (row.local_sanitized_wav_path as string) ?? null
+  const rawTextPreview = (row.local_sanitized_text_preview as string) ?? null
+
   return {
-    id: row.id as string,
+    id: encryptId(rawId),
     title: row.title as string,
     date: row.date as string,
     duration: row.duration as number,
@@ -32,13 +44,13 @@ function sessionFromRow(row: Record<string, unknown>) {
     status: ((row.status as any) === 'pending' ? 'uploaded' : (row.status as any)) ?? 'uploaded',
     isPiiCleaned: (row.is_pii_cleaned as boolean) ?? false,
     chunkCount: (row.chunk_count as number) ?? 0,
-    audioUrl: (row.audio_url as string) ?? undefined,
-    callRecordId: (row.call_record_id as string) ?? undefined,
+    audioUrl: rawAudioUrl ? encryptId(rawAudioUrl) : undefined,
+    callRecordId: rawCallRecordId ? encryptId(rawCallRecordId) : undefined,
     dupStatus: (row.dup_status as any) ?? 'none',
-    dupGroupId: (row.dup_group_id as string) ?? null,
+    dupGroupId: rawDupGroupId ? encryptId(rawDupGroupId) : null,
     dupConfidence: (row.dup_confidence as number) ?? null,
-    fileHashSha256: (row.file_hash_sha256 as string) ?? null,
-    audioFingerprint: (row.audio_fingerprint as string) ?? null,
+    fileHashSha256: rawFileHash ? encryptId(rawFileHash) : null,
+    audioFingerprint: rawAudioFP ? encryptId(rawAudioFP) : null,
     dupRepresentative: (row.dup_representative as boolean) ?? null,
     uploadStatus: (row.upload_status as any) ?? 'LOCAL',
     piiStatus: (row.pii_status as any) ?? 'CLEAR',
@@ -48,12 +60,12 @@ function sessionFromRow(row: Record<string, unknown>) {
     lockReason: (row.lock_reason as Record<string, unknown>) ?? null,
     lockStartMs: (row.lock_start_ms as number) ?? null,
     lockEndMs: (row.lock_end_ms as number) ?? null,
-    localSanitizedWavPath: (row.local_sanitized_wav_path as string) ?? null,
-    localSanitizedTextPreview: (row.local_sanitized_text_preview as string) ?? null,
+    localSanitizedWavPath: rawWavPath ? encryptId(rawWavPath) : null,
+    localSanitizedTextPreview: rawTextPreview ? encryptId(rawTextPreview) : null,
     consentStatus: (row.consent_status as any) ?? 'locked',
     verifiedSpeaker: (row.verified_speaker as boolean) ?? false,
-    userId: (row.user_id as string) ?? null,
-    peerId: (row.peer_id as string) ?? null,
+    userId: rawUserId ? encryptId(rawUserId) : null,
+    peerId: rawPeerId ? encryptId(rawPeerId) : null,
     labelStatus: (row.label_status as any) ?? null,
     labelSource: (row.label_source as any) ?? null,
     labelConfidence: typeof row.label_confidence === 'number' ? row.label_confidence : null,
@@ -172,8 +184,7 @@ sessions.get('/:id', async (c) => {
  */
 sessions.post('/batch', async (c) => {
   const userId = c.get('userId') as string
-  const body = await c.req.json()
-  const sessionsData = body.sessions as any[]
+  const { sessions: sessionsData } = getBody<{ sessions: any[] }>(c)
 
   if (!Array.isArray(sessionsData) || sessionsData.length === 0) {
     return c.json({ error: 'Invalid or empty sessions array' }, 400)
@@ -219,7 +230,7 @@ sessions.post('/batch', async (c) => {
 sessions.put('/:id/labels', async (c) => {
   const userId = c.get('userId') as string
   const sessionId = c.req.param('id')
-  const { labels } = await c.req.json()
+  const { labels } = getBody<{ labels: unknown }>(c)
 
   if (!labels) {
     return c.json({ error: 'Missing labels field' }, 400)
@@ -260,7 +271,13 @@ sessions.put('/:id/visibility', async (c) => {
     visibilitySource,
     visibilityConsentVersion,
     visibilityChangedAt,
-  } = await c.req.json()
+  } = getBody<{
+    isPublic: boolean
+    visibilityStatus: string
+    visibilitySource: string
+    visibilityConsentVersion: string
+    visibilityChangedAt: string
+  }>(c)
 
   try {
     const { data, error } = await supabaseAdmin

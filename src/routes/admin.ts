@@ -3,7 +3,7 @@
 
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase'
-import { authMiddleware } from '../lib/middleware'
+import { authMiddleware, getBody } from '../lib/middleware'
 
 const admin = new Hono()
 
@@ -27,7 +27,7 @@ admin.get('/clients', async (c) => {
 })
 
 admin.post('/clients', async (c) => {
-  const client = await c.req.json()
+  const client = getBody(c)
 
   try {
     const { error } = await supabaseAdmin.from('clients').upsert(client)
@@ -72,7 +72,7 @@ admin.get('/delivery-profiles', async (c) => {
 })
 
 admin.post('/delivery-profiles', async (c) => {
-  const profile = await c.req.json()
+  const profile = getBody(c)
 
   try {
     const { error } = await supabaseAdmin.from('delivery_profiles').upsert(profile)
@@ -118,7 +118,7 @@ admin.get('/client-sku-rules', async (c) => {
 })
 
 admin.post('/client-sku-rules', async (c) => {
-  const rule = await c.req.json()
+  const rule = getBody(c)
 
   try {
     const { error } = await supabaseAdmin.from('client_sku_rules').upsert(rule)
@@ -158,7 +158,7 @@ admin.get('/sku-presets', async (c) => {
 })
 
 admin.post('/sku-presets', async (c) => {
-  const preset = await c.req.json()
+  const preset = getBody(c)
 
   try {
     const { error } = await supabaseAdmin.from('sku_presets').upsert(preset)
@@ -222,7 +222,7 @@ admin.get('/export-jobs/:id', async (c) => {
 })
 
 admin.post('/export-jobs', async (c) => {
-  const job = await c.req.json()
+  const job = getBody(c)
 
   try {
     const { error } = await supabaseAdmin.from('export_jobs').upsert(job)
@@ -235,7 +235,7 @@ admin.post('/export-jobs', async (c) => {
 
 admin.post('/export-jobs/:id/logs', async (c) => {
   const id = c.req.param('id')
-  const { log } = await c.req.json()
+  const { log } = getBody<{ log: unknown }>(c)
 
   try {
     // 기존 job 조회
@@ -324,7 +324,7 @@ admin.get('/billable-units', async (c) => {
 })
 
 admin.post('/billable-units', async (c) => {
-  const { units } = await c.req.json()
+  const { units } = getBody<{ units: any[] }>(c)
 
   if (!Array.isArray(units) || units.length === 0) {
     return c.json({ error: 'Units array is required' }, 400)
@@ -347,7 +347,7 @@ admin.post('/billable-units', async (c) => {
 })
 
 admin.post('/billable-units/lock', async (c) => {
-  const { unitIds, jobId } = await c.req.json()
+  const { unitIds, jobId } = getBody<{ unitIds: string[]; jobId: string }>(c)
 
   if (!Array.isArray(unitIds) || !jobId) {
     return c.json({ error: 'unitIds and jobId are required' }, 400)
@@ -376,7 +376,7 @@ admin.post('/billable-units/lock', async (c) => {
 })
 
 admin.post('/billable-units/unlock', async (c) => {
-  const { jobId } = await c.req.json()
+  const { jobId } = getBody<{ jobId: string }>(c)
 
   if (!jobId) {
     return c.json({ error: 'jobId is required' }, 400)
@@ -396,7 +396,7 @@ admin.post('/billable-units/unlock', async (c) => {
 })
 
 admin.post('/billable-units/mark-delivered', async (c) => {
-  const { jobId } = await c.req.json()
+  const { jobId } = getBody<{ jobId: string }>(c)
 
   if (!jobId) {
     return c.json({ error: 'jobId is required' }, 400)

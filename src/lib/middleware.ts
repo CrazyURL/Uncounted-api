@@ -1,9 +1,38 @@
-// ── Authentication Middleware ──────────────────────────────────────────
+// ── Authentication & Body Decryption Middleware ────────────────────────
 // Bearer 토큰 또는 httpOnly Cookie(uncounted_session)에서 JWT 검증
+// request body AES-256-GCM 복호화 (enc_data 포맷)
 
 import { Context, Next } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { supabaseAdmin } from './supabase'
+import { decryptData } from './crypto'
+
+/**
+ * POST/PUT/PATCH/DELETE 요청의 body를 읽어 컨텍스트에 저장한다.
+ * enc_data 필드가 있으면 AES-256-GCM 복호화 후 저장, 없으면 raw body 저장 (하위 호환).
+ * 이후 route handler에서 getBody(c)로 접근.
+ */
+export async function bodyDecryptMiddleware(c: Context, next: Next) {
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(c.req.method)) {
+    try {
+      const raw = await c.req.json()
+      if (raw && typeof raw === 'object' && 'enc_data' in raw) {
+        c.set('body', decryptData(raw.enc_data as string))
+      } else {
+        c.set('body', raw)
+      }
+    } catch { /* body 없음 또는 non-JSON — 그대로 통과 */ }
+  }
+  await next()
+}
+
+/**
+ * bodyDecryptMiddleware가 파싱한 body를 꺼낸다.
+ * body가 없는 경우 빈 객체 반환 (refresh 등 optional body 처리 호환).
+ */
+export function getBody<T>(c: Context): T {
+  return (c.get('body') ?? {}) as T
+}
 
 /**
  * Authorization: Bearer {JWT} 헤더 또는 uncounted_session 쿠키에서 토큰 추출
