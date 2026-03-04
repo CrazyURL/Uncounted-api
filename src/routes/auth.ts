@@ -1,16 +1,44 @@
 // ── Auth API Routes ────────────────────────────────────────────────────
-// Supabase Auth 작업을 백엔드 API로 처리
+// Supabase Auth 작업을 백엔드 API로 처리 (httpOnly Cookie 기반)
 
 import { Hono } from 'hono'
+import { setCookie, getCookie, deleteCookie } from 'hono/cookie'
+import type { Context } from 'hono'
 import { supabaseAdmin } from '../lib/supabase'
+import { encryptId } from '../lib/crypto'
 
 const auth = new Hono()
+const IS_PROD = process.env.NODE_ENV === 'production'
+
+// ── 쿠키 헬퍼 ────────────────────────────────────────────────────────────
+
+function setAuthCookies(c: Context, accessToken: string, refreshToken: string) {
+  setCookie(c, 'uncounted_session', accessToken, {
+    httpOnly: true,
+    secure: IS_PROD,
+    sameSite: 'Lax',  // Strict는 OAuth 리다이렉트 후 쿠키 차단 가능
+    path: '/',
+    maxAge: 60 * 60,  // 1시간 (Supabase 기본 만료와 동일)
+  })
+  setCookie(c, 'uncounted_refresh', refreshToken, {
+    httpOnly: true,
+    secure: IS_PROD,
+    sameSite: 'Lax',
+    path: '/',
+    maxAge: 60 * 60 * 24 * 90,  // 90일 (Supabase 기본값)
+  })
+}
+
+function clearAuthCookies(c: Context) {
+  deleteCookie(c, 'uncounted_session', { path: '/' })
+  deleteCookie(c, 'uncounted_refresh', { path: '/' })
+}
 
 // ── API 엔드포인트 ──────────────────────────────────────────────────────
 
 /**
  * POST /auth/signin
- * 이메일/비밀번호 로그인
+ * 이메일/비밀번호 로그인 → httpOnly 쿠키 설정
  */
 auth.post('/signin', async (c) => {
   const { email, password } = await c.req.json()
@@ -29,6 +57,10 @@ auth.post('/signin', async (c) => {
       return c.json({ error: error.message }, 401)
     }
 
+    if (data.session?.access_token && data.session?.refresh_token) {
+      setAuthCookies(c, data.session.access_token, data.session.refresh_token)
+    }
+
     return c.json({
       data: {
         session: data.session,
@@ -42,7 +74,7 @@ auth.post('/signin', async (c) => {
 
 /**
  * POST /auth/signup
- * 회원가입
+ * 회원가입 (이메일 확인 자동 처리)
  */
 auth.post('/signup', async (c) => {
   const { email, password } = await c.req.json()
@@ -74,31 +106,26 @@ auth.post('/signup', async (c) => {
 
 /**
  * POST /auth/signout
- * 로그아웃 (세션 무효화)
+ * 로그아웃 (쿠키 삭제 + Supabase 세션 무효화)
  */
 auth.post('/signout', async (c) => {
   const authHeader = c.req.header('Authorization')
-  const token = authHeader?.replace('Bearer ', '')
+  const bearerToken = authHeader?.replace('Bearer ', '') || null
+  const cookieToken = getCookie(c, 'uncounted_session')
+  const token = bearerToken || cookieToken
+
+  // 토큰 없어도 쿠키 삭제 후 성공 반환 (이미 로그아웃 상태)
+  clearAuthCookies(c)
 
   if (!token) {
-    return c.json({ error: 'No authorization token provided' }, 401)
+    return c.json({ data: { success: true } })
   }
 
   try {
-    // 토큰으로 사용자 확인
     const { data: { user }, error: userError } = await supabaseAdmin.auth.getUser(token)
-
-    if (userError || !user) {
-      return c.json({ error: 'Invalid token' }, 401)
+    if (!userError && user) {
+      await supabaseAdmin.auth.admin.signOut(user.id)
     }
-
-    // 사용자의 모든 세션 무효화
-    const { error } = await supabaseAdmin.auth.admin.signOut(user.id)
-
-    if (error) {
-      return c.json({ error: error.message }, 500)
-    }
-
     return c.json({ data: { success: true } })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
@@ -107,7 +134,7 @@ auth.post('/signout', async (c) => {
 
 /**
  * GET /auth/session
- * 현재 세션 정보 조회
+ * 현재 세션 정보 조회 (기존 호환 유지)
  */
 auth.get('/session', async (c) => {
   const authHeader = c.req.header('Authorization')
@@ -139,11 +166,39 @@ auth.get('/session', async (c) => {
 })
 
 /**
+ * GET /auth/me
+ * 쿠키 기반 현재 사용자 조회
+ */
+auth.get('/me', async (c) => {
+  const authHeader = c.req.header('Authorization')
+  const token = authHeader?.replace('Bearer ', '')
+
+  if (!token) {
+    return c.json({ error: 'Not authenticated' }, 401)
+  }
+
+  try {
+    const { data: { user }, error } = await supabaseAdmin.auth.getUser(token)
+
+    if (error || !user) {
+      clearAuthCookies(c)
+      return c.json({ error: 'Invalid or expired session' }, 401)
+    }
+
+    return c.json({ data: { user: { id: encryptId(user.id), email: user.email } } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
  * POST /auth/refresh
  * 리프레시 토큰으로 새 액세스 토큰 발급
+ * body 또는 쿠키에서 refresh_token 읽기
  */
 auth.post('/refresh', async (c) => {
-  const { refresh_token } = await c.req.json()
+  const body = await c.req.json().catch(() => ({}))
+  const refresh_token = body.refresh_token || getCookie(c, 'uncounted_refresh')
 
   if (!refresh_token) {
     return c.json({ error: 'Refresh token is required' }, 400)
@@ -158,11 +213,73 @@ auth.post('/refresh', async (c) => {
       return c.json({ error: error.message }, 401)
     }
 
+    if (data.session?.access_token && data.session?.refresh_token) {
+      setAuthCookies(c, data.session.access_token, data.session.refresh_token)
+    }
+
     return c.json({
       data: {
         session: data.session,
       },
     })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * POST /auth/session
+ * OAuth 콜백 후 프론트엔드에서 토큰 전달 → 쿠키 설정
+ */
+auth.post('/session', async (c) => {
+  const { access_token, refresh_token } = await c.req.json()
+
+  if (!access_token || !refresh_token) {
+    return c.json({ error: 'access_token and refresh_token are required' }, 400)
+  }
+
+  try {
+    const { data: { user }, error } = await supabaseAdmin.auth.getUser(access_token)
+
+    if (error || !user) {
+      return c.json({ error: 'Invalid token' }, 401)
+    }
+
+    setAuthCookies(c, access_token, refresh_token)
+
+    return c.json({
+      data: {
+        session: {
+          access_token,
+          user: { id: user.id, email: user.email },
+        },
+      },
+    })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * GET /auth/oauth/google
+ * Google OAuth 플로우 시작 → Google 로그인 페이지로 리다이렉트
+ */
+auth.get('/oauth/google', async (c) => {
+  const redirect = c.req.query('redirect') || 'http://localhost:5173/auth'
+
+  try {
+    const { data, error } = await supabaseAdmin.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: redirect,
+      },
+    })
+
+    if (error || !data.url) {
+      return c.json({ error: error?.message || 'OAuth URL 생성 실패' }, 500)
+    }
+
+    return c.redirect(data.url)
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
@@ -187,14 +304,12 @@ auth.post('/link-pid', async (c) => {
   }
 
   try {
-    // 토큰으로 사용자 확인
     const { data: { user }, error: userError } = await supabaseAdmin.auth.getUser(token)
 
     if (userError || !user) {
       return c.json({ error: 'Invalid token' }, 401)
     }
 
-    // RPC 호출
     const { error } = await supabaseAdmin.rpc('link_pid_to_user', {
       p_pid: pid,
       p_user_id: user.id,
