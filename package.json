@@ -1,0 +1,21 @@
+{
+  "name": "uncounted-api",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/dev.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/dev.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.9",
+    "@supabase/supabase-js": "^2.97.0",
+    "dotenv": "^17.3.1",
+    "hono": "^4.12.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "tsx": "^4.21.0",
+    "typescript": "~5.7.2"
+  }
+}

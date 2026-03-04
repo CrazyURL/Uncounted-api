@@ -1,0 +1,71 @@
+// ── Hono Backend API Entry Point ───────────────────────────────────────
+// Uncounted Backend API — Supabase 로직 분리
+
+import './types' // Hono Context 타입 확장
+import { Hono } from 'hono'
+import { cors } from 'hono/cors'
+import { logger } from 'hono/logger'
+import auth from './routes/auth'
+import sessions from './routes/sessions'
+import storage from './routes/storage'
+import admin from './routes/admin'
+import logging from './routes/logging'
+import transcripts from './routes/transcripts'
+
+const app = new Hono()
+
+// ── 미들웨어 ────────────────────────────────────────────────────────────
+
+// CORS (프론트엔드 origin 허용)
+app.use('/*', cors({
+  origin: process.env.CORS_ORIGIN || '*',
+  credentials: true,
+}))
+
+// 로깅
+app.use('/*', logger())
+
+// ── 헬스 체크 ──────────────────────────────────────────────────────────
+
+app.get('/', (c) => {
+  return c.json({
+    service: 'Uncounted Backend API',
+    version: '1.0.0',
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+  })
+})
+
+app.get('/health', (c) => {
+  return c.json({ status: 'ok' })
+})
+
+// ── API 라우트 ─────────────────────────────────────────────────────────
+
+app.route('/api/auth', auth)
+app.route('/api/sessions', sessions)
+app.route('/api/storage', storage)
+app.route('/api/admin', admin)
+app.route('/api/logging', logging)
+app.route('/api/transcripts', transcripts)
+
+// ── 404 핸들러 ─────────────────────────────────────────────────────────
+
+app.notFound((c) => {
+  return c.json({ error: 'Not Found' }, 404)
+})
+
+// ── 에러 핸들러 ────────────────────────────────────────────────────────
+
+app.onError((err, c) => {
+  console.error('Server Error:', err)
+  return c.json(
+    {
+      error: 'Internal Server Error',
+      message: err.message,
+    },
+    500
+  )
+})
+
+export default app
