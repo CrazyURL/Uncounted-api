@@ -195,7 +195,7 @@ sessions.post('/batch', async (c) => {
 
     const { data, error } = await supabaseAdmin
       .from('sessions')
-      .upsert(rows)
+      .upsert(rows, { onConflict: 'id' })
       .select()
 
     if (error) {
