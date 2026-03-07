@@ -35,7 +35,7 @@ logging.post('/funnel', async (c) => {
 
     const { error } = await supabaseAdmin
       .from('funnel_events')
-      .insert(rows)
+      .upsert(rows, { onConflict: 'id' })
 
     if (error) {
       return c.json({ error: error.message }, 500)
