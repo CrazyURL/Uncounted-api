@@ -77,6 +77,15 @@ ENCRYPTION_KEY=your-32-byte-hex-key
 
 ## 🔌 API 엔드포인트
 
+### Root
+
+| Method | Endpoint | 설명 |
+|--------|----------|------|
+| GET | `/` | 서비스 정보 (이름, 버전, 상태) |
+| GET | `/health` | 헬스 체크 |
+| GET | `/docs` | Swagger UI 문서 |
+| GET | `/openapi.json` | OpenAPI 스펙 |
+
 ### Auth API `/api/auth`
 
 | Method | Endpoint | 인증 | 설명 |
@@ -88,7 +97,8 @@ ENCRYPTION_KEY=your-32-byte-hex-key
 | GET | `/me` | 필수 | 인증된 사용자 정보 |
 | POST | `/refresh` | - | 액세스 토큰 갱신 |
 | POST | `/session` | - | OAuth 콜백 처리 (쿠키 설정) |
-| GET | `/oauth/google` | - | Google OAuth 시작 |
+| GET | `/oauth/google` | - | Google OAuth 시작 (PKCE) |
+| GET | `/oauth/callback` | - | OAuth 콜백 코드 수신 → 토큰 교환 |
 | POST | `/link-pid` | 선택 | 가명 ID ↔ 사용자 연결 |
 
 ### Sessions API `/api/sessions`
@@ -133,14 +143,20 @@ ENCRYPTION_KEY=your-32-byte-hex-key
 |--------|----------|------|
 | GET/POST/DELETE | `/clients` | 클라이언트 관리 |
 | GET/POST/DELETE | `/delivery-profiles` | 납품 프로필 관리 |
-| GET/POST/DELETE | `/sku-rules` | SKU 규칙 관리 |
+| GET/POST/DELETE | `/client-sku-rules` | 클라이언트 SKU 규칙 관리 (`clientId` 필수) |
 | GET/POST/DELETE | `/sku-presets` | SKU 프리셋 관리 |
-| GET/POST/DELETE | `/export-jobs` | 내보내기 작업 관리 |
+| GET/POST | `/export-jobs` | 내보내기 작업 목록/생성 |
+| GET | `/export-jobs/:id` | 내보내기 작업 상세 조회 |
+| DELETE | `/export-jobs/:id` | 내보내기 작업 삭제 |
 | POST | `/export-jobs/:id/logs` | 작업 로그 추가 |
 | GET/POST | `/billable-units` | 청구 단위 조회/배치 저장 |
 | POST | `/billable-units/lock` | 단위 잠금 |
 | POST | `/billable-units/unlock` | 잠금 해제 |
 | POST | `/billable-units/mark-delivered` | 납품 완료 처리 |
+| GET/POST | `/ledger-entries` | 원장 항목 조회/배치 upsert |
+| POST | `/ledger-entries/update-status` | 원장 항목 상태 업데이트 (confirmed/withdrawable/paid) |
+| POST | `/ledger-entries/confirm-job` | 작업 확정 및 지급 분배 |
+| GET/POST | `/delivery-records` | 납품 기록 조회/배치 생성 (`clientId` 필수) |
 | GET | `/sessions` | 전체 세션 조회 (어드민) |
 | GET | `/transcripts` | 전체 트랜스크립트 조회 (어드민) |
 | DELETE | `/reset-all` | 전체 데이터 초기화 ⚠️ |
@@ -165,4 +181,7 @@ npm start
 
 # 헬스 체크
 curl http://localhost:3001/health
+
+# Swagger UI
+open http://localhost:3001/docs
 ```
