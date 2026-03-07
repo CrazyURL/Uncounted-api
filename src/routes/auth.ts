@@ -4,12 +4,24 @@
 import { Hono } from 'hono'
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie'
 import type { Context } from 'hono'
+import { createHash, randomBytes, randomUUID } from 'crypto'
 import { supabaseAdmin } from '../lib/supabase'
 import { encryptId } from '../lib/crypto'
 import { getBody } from '../lib/middleware'
 
 const auth = new Hono()
 const IS_PROD = process.env.NODE_ENV === 'production'
+
+// ── PKCE 상태 저장소 (메모리) ─────────────────────────────────────────────
+type PkceState = { codeVerifier: string; frontendRedirect: string; expiresAt: number }
+const pkceStore = new Map<string, PkceState>()
+
+setInterval(() => {
+  const now = Date.now()
+  for (const [key, val] of pkceStore) {
+    if (val.expiresAt < now) pkceStore.delete(key)
+  }
+}, 60_000)
 
 // ── 쿠키 헬퍼 ────────────────────────────────────────────────────────────
 
@@ -184,7 +196,7 @@ auth.get('/session', async (c) => {
  */
 auth.get('/me', async (c) => {
   const authHeader = c.req.header('Authorization')
-  const token = authHeader?.replace('Bearer ', '')
+  const token = authHeader?.replace('Bearer ', '') || getCookie(c, 'uncounted_session')
 
   if (!token) {
     return c.json({ error: 'Not authenticated' }, 401)
@@ -281,27 +293,106 @@ auth.post('/session', async (c) => {
 
 /**
  * GET /auth/oauth/google
- * Google OAuth 플로우 시작 → Google 로그인 페이지로 리다이렉트
+ * Google OAuth 플로우 시작 (PKCE + 백엔드 콜백)
+ * - PKCE code_verifier/challenge 생성 후 서버 메모리에 저장
+ * - Supabase redirect_to = 백엔드 콜백 URL (프론트 URL 불필요)
  */
-auth.get('/oauth/google', async (c) => {
-  const redirect = c.req.query('redirect') || 'http://localhost:5173/auth'
+auth.get('/oauth/google', (c) => {
+  const frontendRedirect = c.req.query('redirect') || 'http://localhost:5173/auth'
 
-  try {
-    const { data, error } = await supabaseAdmin.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        redirectTo: redirect,
-      },
-    })
+  console.log("frontendRedirect:", frontendRedirect);
 
-    if (error || !data.url) {
-      return c.json({ error: error?.message || 'OAuth URL 생성 실패' }, 500)
-    }
+  // PKCE 생성
+  const codeVerifier = randomBytes(32).toString('base64url')
+  const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url')
+  const flowId = randomUUID()
 
-    return c.redirect(data.url)
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
+  pkceStore.set(flowId, {
+    codeVerifier,
+    frontendRedirect,
+    expiresAt: Date.now() + 5 * 60 * 1000, // 5분
+  })
+
+  // flowId를 httpOnly 쿠키로 전달 (redirect_to URL에 쿼리로 넣으면 Supabase code 파라미터와 충돌 가능)
+  setCookie(c, 'pkce_flow_id', flowId, {
+    httpOnly: true,
+    secure: IS_PROD,
+    sameSite: 'Lax',
+    path: '/',
+    maxAge: 60 * 5, // 5분
+  })
+
+  // redirect_to = 프론트엔드 /auth (쿼리 파라미터 없이 clean URL)
+  // const appUrl = process.env.VITE_APP_URL || 'http://localhost:5173'
+  const appUrl = 'http://localhost:5173'
+  const frontendCallback = `${appUrl}/auth`
+
+  const authUrl = new URL(`${process.env.SUPABASE_URL}/auth/v1/authorize`)
+  authUrl.searchParams.set('provider', 'google')
+  authUrl.searchParams.set('redirect_to', frontendCallback)
+  authUrl.searchParams.set('code_challenge', codeChallenge)
+  authUrl.searchParams.set('code_challenge_method', 's256')
+
+  console.log("url:", authUrl.toString());
+
+  return c.redirect(authUrl.toString())
+})
+
+/**
+ * GET /auth/oauth/callback
+ * Supabase OAuth 콜백 수신 → PKCE 코드 교환 → 쿠키 설정 → 프론트로 리다이렉트
+ */
+auth.get('/oauth/callback', async (c) => {
+  const code = c.req.query('code')
+  const errorParam = c.req.query('error')
+
+  if (errorParam) {
+    return c.json({ error: errorParam }, 400)
   }
+
+  // flowId는 /oauth/google에서 설정한 쿠키에서 읽기
+  const flowId = getCookie(c, 'pkce_flow_id')
+  deleteCookie(c, 'pkce_flow_id', { path: '/' })
+
+  if (!code || !flowId) {
+    return c.json({ error: 'missing_params' }, 400)
+  }
+
+  const pkceState = pkceStore.get(flowId)
+  if (!pkceState || pkceState.expiresAt < Date.now()) {
+    pkceStore.delete(flowId)
+    return c.json({ error: 'invalid_state' }, 400)
+  }
+  pkceStore.delete(flowId)
+
+  // Supabase PKCE 토큰 교환
+  const tokenRes = await fetch(
+    `${process.env.SUPABASE_URL}/auth/v1/token?grant_type=pkce`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': process.env.SUPABASE_SERVICE_ROLE_KEY!,
+        'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+      body: JSON.stringify({
+        auth_code: code,
+        code_verifier: pkceState.codeVerifier,
+      }),
+    }
+  )
+
+  if (!tokenRes.ok) {
+    const errText = await tokenRes.text()
+    console.error('PKCE token exchange failed:', errText)
+    return c.json({ error: 'token_exchange_failed' }, 400)
+  }
+
+  const { access_token, refresh_token } = await tokenRes.json() as { access_token: string; refresh_token: string }
+
+  // httpOnly 쿠키 설정 후 JSON 반환 (프론트엔드가 fetch로 호출)
+  setAuthCookies(c, access_token, refresh_token)
+  return c.json({ success: true })
 })
 
 /**

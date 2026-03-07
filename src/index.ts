@@ -20,8 +20,18 @@ const app = new Hono()
 // ── 미들웨어 ────────────────────────────────────────────────────────────
 
 // CORS (프론트엔드 origin 허용)
+// CORS_ORIGIN 환경변수는 콤마로 구분된 복수 origin 지원
+// 예: CORS_ORIGIN=http://localhost:5173,https://app.example.com
+const allowedOrigins = (process.env.CORS_ORIGIN || '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean)
+
 app.use('/*', cors({
-  origin: process.env.CORS_ORIGIN || '*',
+  origin: (origin) => {
+    if (!allowedOrigins.length) return '*'
+    return allowedOrigins.includes(origin) ? origin : allowedOrigins[0]
+  },
   credentials: true,
 }))
 

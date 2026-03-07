@@ -1,7 +1,7 @@
-# 2. DB 스키마 정의서 (v1.3)
+# 2. DB 스키마 정의서 (v1.4)
 
-> Uncounted Client — CTO 인수인계 문서 (2026-03-02)
-> v1.3 — 물리 DB 대조 기반 보완: 레거시 테이블 11개 추가, 미적용 Migration 참조
+> Uncounted Client — CTO 인수인계 문서 (2026-03-07)
+> v1.4 — 정산 시스템 추가: user_asset_ledger 활성화, delivery_records 신규, export_jobs.status 확장
 
 ---
 
@@ -9,13 +9,13 @@
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                      Supabase (20 테이블)                  │
+│                      Supabase (22 테이블)                  │
 │                                                            │
 │  ── 활성 (코드 사용) ──────────────────────────────────── │
 │  │  sessions          │  clients           │  transcripts │
 │  │  billable_units    │  delivery_profiles │  error_logs  │
 │  │  export_jobs       │  client_sku_rules  │  funnel_events│
-│  │                    │  sku_presets       │              │
+│  │  user_asset_ledger │  delivery_records  │  sku_presets │
 │  ├─────────────────────────────────────────────────────── │
 │  ── 레거시 (코드 미사용, Migration 001/002) ───────────── │
 │  │  campaigns         │  peers             │  consents    │
@@ -221,7 +221,7 @@
 | `actual_units` | INTEGER | 0 | 실제 추출 수 |
 | `sampling_strategy` | TEXT | | 'all' \| 'random' \| 'quality_first' \| 'stratified' |
 | `filters` | JSONB | | 필터 조건 (아래 구조) |
-| `status` | TEXT | 'draft' | 'draft' \| 'queued' \| 'running' \| 'completed' \| 'failed' \| 'cancelled' |
+| `status` | TEXT | 'draft' | 'draft' \| 'queued' \| 'running' \| 'completed' \| 'failed' \| 'cancelled' \| 'delivered' |
 | `selection_manifest` | TEXT[] | NULL | 선택된 BU ID 목록 |
 | `output_format` | TEXT | | 출력 포맷 |
 | `logs` | JSONB[] | | 작업 로그 [{timestamp, level, message}] |
@@ -245,7 +245,78 @@
 
 ---
 
-### 8. transcripts (STT 텍스트 테이블)
+### 8. user_asset_ledger (정산 원장)
+
+> Migration 005에서 정의, Migration 008에서 확장 (META_EVENT_BASE + voided)
+
+| 컬럼명 | 타입 | 기본값 | 설명 |
+|--------|------|--------|------|
+| `id` | TEXT | PK | 원장 ID |
+| `user_id` | TEXT | NOT NULL | 사용자 ID |
+| `bu_id` | TEXT | NULL | BU 연결 (캠페인/판매는 NULL 가능) |
+| `session_id` | TEXT | NULL | 세션 참조 |
+| `ledger_type` | TEXT | NOT NULL | 아래 참조 |
+| `amount_low` | INTEGER | 0 | 보수적 추정 (원) |
+| `amount_high` | INTEGER | 0 | 낙관적 추정 (원) |
+| `amount_confirmed` | INTEGER | NULL | 판매 확정 시 실제 금액 (NULL=미확정) |
+| `status` | TEXT | 'estimated' | 'estimated' \| 'confirmed' \| 'withdrawable' \| 'paid' \| 'voided' |
+| `export_job_id` | TEXT | NULL | 판매 연동 시 export job 참조 |
+| `campaign_id` | TEXT | NULL | 캠페인 보상 시 참조 |
+| `metadata` | JSONB | NULL | 추가 정보 (multiplier 값 등) |
+| `created_at` | TIMESTAMPTZ | now() | 생성일 |
+| `confirmed_at` | TIMESTAMPTZ | NULL | estimated -> confirmed 시점 |
+| `withdrawable_at` | TIMESTAMPTZ | NULL | confirmed -> withdrawable 시점 |
+| `paid_at` | TIMESTAMPTZ | NULL | withdrawable -> paid 시점 |
+
+**ledger_type 값:**
+`VOICE_BASE`, `LABEL_BONUS`, `COMPLIANCE_BONUS`, `PROFILE_BONUS`, `TIER_BONUS`, `CAMPAIGN_REWARD`, `SALE_BONUS`, `META_EVENT_BASE`
+
+**status 전환 규칙:**
+- `estimated` -> `confirmed` (납품 확정 시, 비례 배분)
+- `estimated` -> `voided` (취소)
+- `confirmed` -> `withdrawable` (배치 전환)
+- `withdrawable` -> `paid` (지급 완료)
+- 역방향 전환 불가
+
+**인덱스:**
+- `idx_ledger_user` ON user_asset_ledger(user_id)
+- `idx_ledger_status` ON user_asset_ledger(status)
+- `idx_ledger_job` ON user_asset_ledger(export_job_id)
+
+**데이터 흐름:**
+- **생성:** `adminStore.ts:upsertLedgerEntries()` — BuildWizard에서 빌드 실행 시
+- **확정:** `adminStore.ts:confirmJobLedgerEntries()` — AdminExportJobDetailPage 납품 확정
+- **상태 전환:** `adminStore.ts:updateLedgerStatus()` — AdminSettlementPage 배치 전환
+- **읽기:** `adminStore.ts:loadLedgerEntries()` — ValuePage + AdminSettlementPage
+
+---
+
+### 9. delivery_records (Per-client 납품 이력)
+
+> Migration 008에서 생성. 동일 BU의 동일 client 재납품 방지.
+
+| 컬럼명 | 타입 | 기본값 | 설명 |
+|--------|------|--------|------|
+| `id` | TEXT | PK (UUID) | 기록 ID |
+| `bu_id` | TEXT | NOT NULL | BU ID |
+| `client_id` | TEXT | NOT NULL | FK -> clients.id |
+| `export_job_id` | TEXT | NOT NULL | FK -> export_jobs.id |
+| `delivered_at` | TIMESTAMPTZ | now() | 납품 시각 |
+
+**제약조건:** `UNIQUE(bu_id, client_id)` — 동일 BU + 동일 client 재납품 차단
+
+**인덱스:**
+- `idx_delivery_client` ON delivery_records(client_id)
+- `idx_delivery_bu` ON delivery_records(bu_id)
+- `idx_delivery_job` ON delivery_records(export_job_id)
+
+**데이터 흐름:**
+- **생성:** `adminStore.ts:insertDeliveryRecords()` — BuildWizard 빌드 실행 시
+- **조회:** `adminStore.ts:loadDeliveredBuIdsForClient()` — BuildWizard 시뮬레이션에서 기납품 제외
+
+---
+
+### 10. transcripts (STT 텍스트 테이블)
 
 | 컬럼명 | 타입 | 기본값 | 설명 |
 |--------|------|--------|------|
@@ -385,15 +456,15 @@
 ## ER 다이어그램 (관계도)
 
 ```
-sessions ──────< billable_units
-    │                   │
-    │                   │ (locked_by_job_id)
-    │                   ▼
-    │             export_jobs ──── clients
-    │                              │
-    │                              ├──< delivery_profiles
-    │                              │
-    │                              └──< client_sku_rules ──── sku_presets
+sessions ──────< billable_units ──────< delivery_records
+    │                   │                     │
+    │                   │ (locked_by_job_id)   │ (client_id)
+    │                   ▼                     ▼
+    │             export_jobs ──────── clients
+    │                   │                │
+    │                   │                ├──< delivery_profiles
+    │                   ▼                │
+    │          user_asset_ledger         └──< client_sku_rules ──── sku_presets
     │
     ├──< transcripts
     │
@@ -402,12 +473,16 @@ sessions ──────< billable_units
     └──< funnel_events
 ```
 
-- sessions → billable_units: 1:N (1세션 = N분 유닛)
-- clients → delivery_profiles: 1:N
-- clients → client_sku_rules: 1:N
-- client_sku_rules → sku_presets: N:1 (선택적)
-- export_jobs → clients: N:1 (선택적, NULL=내부)
-- export_jobs → billable_units: N:M (selection_manifest)
+- sessions -> billable_units: 1:N (1세션 = N분 유닛)
+- billable_units -> delivery_records: 1:N (per-client 납품 이력)
+- clients -> delivery_records: 1:N
+- clients -> delivery_profiles: 1:N
+- clients -> client_sku_rules: 1:N
+- client_sku_rules -> sku_presets: N:1 (선택적)
+- export_jobs -> clients: N:1 (선택적, NULL=내부)
+- export_jobs -> billable_units: N:M (selection_manifest)
+- export_jobs -> user_asset_ledger: 1:N (export_job_id)
+- export_jobs -> delivery_records: 1:N
 
 ---
 
@@ -578,8 +653,9 @@ sessions ──────< billable_units
 > 아래 테이블은 migration SQL 파일에 정의되어 있으나 물리 DB에 미적용.
 > 현재 소스코드에서도 사용하지 않으므로, 해당 기능 개발 시 적용 예정.
 
-- **Migration 005** (`005_asset_ledger.sql`): user_asset_ledger, daily_asset_stats, monthly_asset_stats, campaigns(v2), campaign_progress
+- **Migration 005** (`005_asset_ledger.sql`): user_asset_ledger, daily_asset_stats, monthly_asset_stats, campaigns(v2), campaign_progress — **user_asset_ledger는 v1.4에서 활성화**
 - **Migration 006** (`006_device_event_units.sql`): device_event_units, device_event_stats
+- **Migration 008** (`008_delivery_records_and_ledger_update.sql`): delivery_records 신규, user_asset_ledger 제약조건 확장 (META_EVENT_BASE + voided), export_jobs.status 확장 (delivered)
 
 ---
 
