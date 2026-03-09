@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: uncounted-api-dev
+    runtime: node
+    branch: develop
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: development
+      - key: PORT
+        value: 3001
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: CORS_ORIGIN
+        value: http://my-ip-domain:5173,http://my-ip-domain:15173,http://localhost:5173,http://localhost:15173
+
+  - type: web
+    name: uncounted-api-live
+    runtime: node
+    branch: main
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: CORS_ORIGIN
+        value: http://my-ip-domain:5173,http://my-ip-domain:15173,http://localhost:5173,http://localhost:15173
