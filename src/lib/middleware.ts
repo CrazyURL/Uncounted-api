@@ -4,8 +4,8 @@
 
 import { Context, Next } from 'hono'
 import { getCookie } from 'hono/cookie'
-import { supabaseAdmin } from './supabase'
-import { decryptData } from './crypto'
+import { supabaseAdmin } from './supabase.js'
+import { decryptData } from './crypto.js'
 
 /**
  * POST/PUT/PATCH/DELETE 요청의 body를 읽어 컨텍스트에 저장한다.

@@ -1,19 +1,19 @@
 // ── Hono Backend API Entry Point ───────────────────────────────────────
 // Uncounted Backend API — Supabase 로직 분리
 
-import './types' // Hono Context 타입 확장
+import './types.js' // Hono Context 타입 확장
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
 import { swaggerUI } from '@hono/swagger-ui'
-import { bodyDecryptMiddleware } from './lib/middleware'
-import { openApiSpec } from './openapi'
-import auth from './routes/auth'
-import sessions from './routes/sessions'
-import storage from './routes/storage'
-import admin from './routes/admin'
-import logging from './routes/logging'
-import transcripts from './routes/transcripts'
+import { bodyDecryptMiddleware } from './lib/middleware.js'
+import { openApiSpec } from './openapi.js'
+import auth from './routes/auth.js'
+import sessions from './routes/sessions.js'
+import storage from './routes/storage.js'
+import admin from './routes/admin.js'
+import logging from './routes/logging.js'
+import transcripts from './routes/transcripts.js'
 
 const app = new Hono()
 

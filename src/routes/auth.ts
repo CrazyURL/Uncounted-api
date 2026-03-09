@@ -5,9 +5,9 @@ import { Hono } from 'hono'
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie'
 import type { Context } from 'hono'
 import { createHash, randomBytes, randomUUID } from 'crypto'
-import { supabaseAdmin } from '../lib/supabase'
-import { encryptId } from '../lib/crypto'
-import { getBody } from '../lib/middleware'
+import { supabaseAdmin } from '../lib/supabase.js'
+import { encryptId } from '../lib/crypto.js'
+import { getBody } from '../lib/middleware.js'
 
 const auth = new Hono()
 const IS_PROD = process.env.NODE_ENV === 'production'

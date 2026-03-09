@@ -2,8 +2,8 @@
 // Supabase Storage 업로드/삭제 로직을 백엔드 API로 분리
 
 import { Hono } from 'hono'
-import { supabaseAdmin } from '../lib/supabase'
-import { authMiddleware, getBody } from '../lib/middleware'
+import { supabaseAdmin } from '../lib/supabase.js'
+import { authMiddleware, getBody } from '../lib/middleware.js'
 
 const storage = new Hono()
 

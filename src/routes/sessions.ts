@@ -2,9 +2,9 @@
 // sessionMapper.ts 로직을 백엔드 API로 분리
 
 import { Hono } from 'hono'
-import { supabaseAdmin } from '../lib/supabase'
-import { authMiddleware, getBody } from '../lib/middleware'
-import { encryptId } from '../lib/crypto'
+import { supabaseAdmin } from '../lib/supabase.js'
+import { authMiddleware, getBody } from '../lib/middleware.js'
+import { encryptId } from '../lib/crypto.js'
 
 const sessions = new Hono()
 

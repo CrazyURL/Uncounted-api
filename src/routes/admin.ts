@@ -2,9 +2,9 @@
 // 관리자 페이지 전용 API (Clients, DeliveryProfiles, SKU Rules, Export Jobs, Billable Units)
 
 import { Hono } from 'hono'
-import { supabaseAdmin } from '../lib/supabase'
-import { authMiddleware, getBody } from '../lib/middleware'
-import { encryptId } from '../lib/crypto'
+import { supabaseAdmin } from '../lib/supabase.js'
+import { authMiddleware, getBody } from '../lib/middleware.js'
+import { encryptId } from '../lib/crypto.js'
 
 const admin = new Hono()
 

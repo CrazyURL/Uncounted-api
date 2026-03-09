@@ -2,9 +2,9 @@
 // STT 전사 데이터 관리 API
 
 import { Hono } from 'hono'
-import { supabaseAdmin } from '../lib/supabase'
-import { authMiddleware, getBody } from '../lib/middleware'
-import { encryptId } from '../lib/crypto'
+import { supabaseAdmin } from '../lib/supabase.js'
+import { authMiddleware, getBody } from '../lib/middleware.js'
+import { encryptId } from '../lib/crypto.js'
 
 const transcripts = new Hono()
 

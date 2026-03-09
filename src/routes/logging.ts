@@ -2,8 +2,8 @@
 // 퍼널 이벤트 및 에러 로그 배치 전송 API
 
 import { Hono } from 'hono'
-import { supabaseAdmin } from '../lib/supabase'
-import { getBody } from '../lib/middleware'
+import { supabaseAdmin } from '../lib/supabase.js'
+import { getBody } from '../lib/middleware.js'
 
 const logging = new Hono()
 
