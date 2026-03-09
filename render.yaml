@@ -2,9 +2,9 @@ services:
   - type: web
     name: uncounted-api-dev
     runtime: node
-    branch: develop
-    buildCommand: npm ci && npm run build
-    startCommand: npm start
+    branch: main
+    buildCommand: yarn --frozen-lockfile install; yarn build
+    startCommand: yarn start
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
@@ -21,11 +21,11 @@ services:
         value: http://my-ip-domain:5173,http://my-ip-domain:15173,http://localhost:5173,http://localhost:15173
 
   - type: web
-    name: uncounted-api-live
+    name: uncounted-api-prod
     runtime: node
-    branch: main
-    buildCommand: npm ci && npm run build
-    startCommand: npm start
+    branch: 1.0.0
+    buildCommand: yarn --frozen-lockfile install; yarn build
+    startCommand: yarn start
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV

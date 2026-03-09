@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "tsx watch src/dev.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/dev.js"
+    "start": "node dist/dev.js",
+    "deploy:dev": "render deploys create srv-d6ndi2kr85hc73efrnu0",
+    "deploy:prod": "render deploys create srv-d6ndrri4d50c73dfrt40"        
   },
   "dependencies": {
     "@hono/node-server": "^1.19.9",
