@@ -293,77 +293,90 @@ auth.post('/session', async (c) => {
 
 /**
  * GET /auth/oauth/google
- * Google OAuth 플로우 시작 (PKCE + 백엔드 콜백)
- * - PKCE code_verifier/challenge 생성 후 서버 메모리에 저장
- * - Supabase redirect_to = 백엔드 콜백 URL (프론트 URL 불필요)
+ * Google OAuth 플로우 시작 (PKCE)
+ * - 클라이언트가 code_challenge를 제공하면 그대로 사용 (네이티브 플로우)
+ * - code_challenge 없으면 서버에서 생성 후 쿠키로 매핑 (웹 플로우)
  */
 auth.get('/oauth/google', (c) => {
   const frontendRedirect = c.req.query('redirect') || 'http://localhost:5173/auth'
+  const clientCodeChallenge = c.req.query('code_challenge')
 
-  console.log("frontendRedirect:", frontendRedirect);
+  let codeChallenge: string
 
-  // PKCE 생성
-  const codeVerifier = randomBytes(32).toString('base64url')
-  const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url')
-  const flowId = randomUUID()
+  if (clientCodeChallenge) {
+    // 네이티브 플로우: 클라이언트가 PKCE를 직접 생성/보관
+    codeChallenge = clientCodeChallenge
+  } else {
+    // 웹 플로우: 서버에서 PKCE 생성 후 쿠키로 flowId 매핑
+    const codeVerifier = randomBytes(32).toString('base64url')
+    codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url')
+    const flowId = randomUUID()
 
-  pkceStore.set(flowId, {
-    codeVerifier,
-    frontendRedirect,
-    expiresAt: Date.now() + 5 * 60 * 1000, // 5분
-  })
+    pkceStore.set(flowId, {
+      codeVerifier,
+      frontendRedirect,
+      expiresAt: Date.now() + 5 * 60 * 1000,
+    })
 
-  // flowId를 httpOnly 쿠키로 전달 (redirect_to URL에 쿼리로 넣으면 Supabase code 파라미터와 충돌 가능)
-  setCookie(c, 'pkce_flow_id', flowId, {
-    httpOnly: true,
-    secure: IS_PROD,
-    sameSite: 'Lax',
-    path: '/',
-    maxAge: 60 * 5, // 5분
-  })
-
-  // redirect_to = 프론트엔드 /auth (쿼리 파라미터 없이 clean URL)
-  // const appUrl = process.env.VITE_APP_URL || 'http://localhost:5173'
-  const appUrl = 'http://localhost:5173'
-  const frontendCallback = `${appUrl}/auth`
+    setCookie(c, 'pkce_flow_id', flowId, {
+      httpOnly: true,
+      secure: IS_PROD,
+      sameSite: 'Lax',
+      path: '/',
+      maxAge: 60 * 5,
+    })
+  }
 
   const authUrl = new URL(`${process.env.SUPABASE_URL}/auth/v1/authorize`)
   authUrl.searchParams.set('provider', 'google')
-  authUrl.searchParams.set('redirect_to', frontendCallback)
+  authUrl.searchParams.set('redirect_to', frontendRedirect)
   authUrl.searchParams.set('code_challenge', codeChallenge)
   authUrl.searchParams.set('code_challenge_method', 's256')
-
-  console.log("url:", authUrl.toString());
 
   return c.redirect(authUrl.toString())
 })
 
 /**
  * GET /auth/oauth/callback
- * Supabase OAuth 콜백 수신 → PKCE 코드 교환 → 쿠키 설정 → 프론트로 리다이렉트
+ * Supabase OAuth 콜백 수신 → PKCE 코드 교환 → 쿠키 설정
+ * - 네이티브 플로우: 클라이언트가 code_verifier를 쿼리 파라미터로 전달
+ * - 웹 플로우: 쿠키의 pkce_flow_id로 서버 저장 code_verifier 조회
  */
 auth.get('/oauth/callback', async (c) => {
   const code = c.req.query('code')
   const errorParam = c.req.query('error')
+  const clientCodeVerifier = c.req.query('code_verifier')
 
   if (errorParam) {
     return c.json({ error: errorParam }, 400)
   }
 
-  // flowId는 /oauth/google에서 설정한 쿠키에서 읽기
-  const flowId = getCookie(c, 'pkce_flow_id')
-  deleteCookie(c, 'pkce_flow_id', { path: '/' })
-
-  if (!code || !flowId) {
+  if (!code) {
     return c.json({ error: 'missing_params' }, 400)
   }
 
-  const pkceState = pkceStore.get(flowId)
-  if (!pkceState || pkceState.expiresAt < Date.now()) {
+  let codeVerifier: string
+
+  if (clientCodeVerifier) {
+    // 네이티브 플로우: 클라이언트가 code_verifier를 직접 전달
+    codeVerifier = clientCodeVerifier
+  } else {
+    // 웹 플로우: 쿠키로 flowId 조회 후 서버 저장 code_verifier 사용
+    const flowId = getCookie(c, 'pkce_flow_id')
+    deleteCookie(c, 'pkce_flow_id', { path: '/' })
+
+    if (!flowId) {
+      return c.json({ error: 'missing_params' }, 400)
+    }
+
+    const pkceState = pkceStore.get(flowId)
+    if (!pkceState || pkceState.expiresAt < Date.now()) {
+      pkceStore.delete(flowId)
+      return c.json({ error: 'invalid_state' }, 400)
+    }
     pkceStore.delete(flowId)
-    return c.json({ error: 'invalid_state' }, 400)
+    codeVerifier = pkceState.codeVerifier
   }
-  pkceStore.delete(flowId)
 
   // Supabase PKCE 토큰 교환
   const tokenRes = await fetch(
@@ -377,7 +390,7 @@ auth.get('/oauth/callback', async (c) => {
       },
       body: JSON.stringify({
         auth_code: code,
-        code_verifier: pkceState.codeVerifier,
+        code_verifier: codeVerifier,
       }),
     }
   )
@@ -390,7 +403,6 @@ auth.get('/oauth/callback', async (c) => {
 
   const { access_token, refresh_token } = await tokenRes.json() as { access_token: string; refresh_token: string }
 
-  // httpOnly 쿠키 설정 후 JSON 반환 (프론트엔드가 fetch로 호출)
   setAuthCookies(c, access_token, refresh_token)
   return c.json({ success: true })
 })

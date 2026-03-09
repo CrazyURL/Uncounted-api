@@ -4,11 +4,32 @@
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase'
 import { authMiddleware, getBody } from '../lib/middleware'
+import { encryptId } from '../lib/crypto'
 
 const admin = new Hono()
 
 // 모든 라우트에 인증 필수 (추후 관리자 권한 체크 추가 가능)
 admin.use('/*', authMiddleware)
+
+// ── Admin Me ─────────────────────────────────────────────────────────────
+
+admin.get('/me', async (c) => {
+  const userId = c.get('userId')
+
+  try {
+    const { data: { user }, error } = await supabaseAdmin.auth.admin.getUserById(userId)
+
+    if (error || !user) return c.json({ error: 'forbidden' }, 403)
+
+    if (user.app_metadata?.role !== 'admin') {
+      return c.json({ error: 'forbidden' }, 403)
+    }
+
+    return c.json({ user: { id: encryptId(user.id), email: encryptId(user.email!) } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
 
 // ── Clients ─────────────────────────────────────────────────────────────
 

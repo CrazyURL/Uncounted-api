@@ -141,6 +141,7 @@ ENCRYPTION_KEY=your-32-byte-hex-key
 
 | Method | Endpoint | 설명 |
 |--------|----------|------|
+| GET | `/me` | 어드민 본인 확인 (admin role 검증) |
 | GET/POST/DELETE | `/clients` | 클라이언트 관리 |
 | GET/POST/DELETE | `/delivery-profiles` | 납품 프로필 관리 |
 | GET/POST/DELETE | `/client-sku-rules` | 클라이언트 SKU 규칙 관리 (`clientId` 필수) |

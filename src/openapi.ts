@@ -893,6 +893,39 @@ export const openApiSpec = {
       },
     },
 
+    // ── Admin - Me ───────────────────────────────────────────────────
+    '/api/admin/me': {
+      get: {
+        tags: ['admin'],
+        summary: '어드민 본인 확인',
+        description: 'JWT 검증 후 Supabase app_metadata.role === "admin" 서버 확인. 200 응답의 id/email은 AES-256-GCM 암호화된 값.',
+        security: [{ BearerAuth: [] }, { CookieAuth: [] }],
+        responses: {
+          200: {
+            description: '어드민 확인 성공',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    user: {
+                      type: 'object',
+                      properties: {
+                        id: { $ref: '#/components/schemas/EncryptedString' },
+                        email: { $ref: '#/components/schemas/EncryptedString' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: '미인증', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          403: { description: '어드민 권한 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
     // ── Admin - Clients ────────────────────────────────────────────────
     '/api/admin/clients': {
       get: {
