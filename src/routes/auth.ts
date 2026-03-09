@@ -29,14 +29,14 @@ function setAuthCookies(c: Context, accessToken: string, refreshToken: string) {
   setCookie(c, 'uncounted_session', accessToken, {
     httpOnly: true,
     secure: IS_PROD,
-    sameSite: 'Lax',  // Strict는 OAuth 리다이렉트 후 쿠키 차단 가능
+    sameSite: 'none',  // Strict는 OAuth 리다이렉트 후 쿠키 차단 가능
     path: '/',
     maxAge: 60 * 60,  // 1시간 (Supabase 기본 만료와 동일)
   })
   setCookie(c, 'uncounted_refresh', refreshToken, {
     httpOnly: true,
     secure: IS_PROD,
-    sameSite: 'Lax',
+    sameSite: 'none',
     path: '/',
     maxAge: 60 * 60 * 24 * 90,  // 90일 (Supabase 기본값)
   })
