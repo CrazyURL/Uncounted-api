@@ -321,7 +321,7 @@ auth.get('/oauth/google', (c) => {
     setCookie(c, 'pkce_flow_id', flowId, {
       httpOnly: true,
       secure: IS_PROD,
-      sameSite: 'Lax',
+      sameSite: 'none',
       path: '/',
       maxAge: 60 * 5,
     })
