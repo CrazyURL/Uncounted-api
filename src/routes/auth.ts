@@ -347,8 +347,6 @@ auth.get('/oauth/callback', async (c) => {
   const errorParam = c.req.query('error')
   const clientCodeVerifier = c.req.query('code_verifier')
 
-  console.log("params:", code, errorParam )
-
   if (errorParam) {
     return c.json({ error: errorParam }, 400)
   }
