@@ -404,7 +404,15 @@ auth.get('/oauth/callback', async (c) => {
   const { access_token, refresh_token } = await tokenRes.json() as { access_token: string; refresh_token: string }
 
   setAuthCookies(c, access_token, refresh_token)
-  return c.json({ success: true })
+  return c.json({
+    success: true,
+    data: {
+      session: {
+        access_token: encryptId(access_token),
+        refresh_token: encryptId(refresh_token),
+      },
+    },
+  })
 })
 
 /**

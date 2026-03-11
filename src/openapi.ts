@@ -539,7 +539,7 @@ export const openApiSpec = {
       get: {
         tags: ['auth'],
         summary: 'Google OAuth 시작',
-        description: 'Google 로그인 페이지로 리다이렉트합니다.',
+        description: 'Google 로그인 페이지로 리다이렉트합니다.\n\n- **웹 플로우**: `code_challenge` 없이 호출하면 서버에서 PKCE 생성 후 `pkce_flow_id` 쿠키로 관리합니다.\n- **네이티브 플로우**: 클라이언트가 직접 생성한 `code_challenge`를 전달합니다.',
         security: [],
         parameters: [
           {
@@ -548,10 +548,73 @@ export const openApiSpec = {
             description: 'OAuth 완료 후 리다이렉트 URL',
             schema: { type: 'string', example: 'http://localhost:5173/auth' },
           },
+          {
+            name: 'code_challenge',
+            in: 'query',
+            description: 'PKCE code_challenge (S256). 네이티브 플로우에서 클라이언트가 직접 생성한 값 전달. 웹 플로우에서는 생략.',
+            schema: { type: 'string' },
+          },
         ],
         responses: {
           302: { description: 'Google 로그인 페이지로 리다이렉트' },
           500: { description: 'OAuth URL 생성 실패', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/auth/oauth/callback': {
+      get: {
+        tags: ['auth'],
+        summary: 'Google OAuth 콜백',
+        description: 'Supabase OAuth 인증 완료 후 리다이렉트되는 콜백 엔드포인트입니다. PKCE 코드 교환 후 `uncounted_session` 및 `uncounted_refresh` 쿠키를 설정합니다.\n\n- **웹 플로우**: `pkce_flow_id` 쿠키로 서버 저장 code_verifier 조회\n- **네이티브 플로우**: `code_verifier` 쿼리 파라미터로 직접 전달',
+        security: [],
+        parameters: [
+          {
+            name: 'code',
+            in: 'query',
+            required: true,
+            description: 'Supabase OAuth 인증 코드',
+            schema: { type: 'string' },
+          },
+          {
+            name: 'code_verifier',
+            in: 'query',
+            description: 'PKCE code_verifier (네이티브 플로우에서만 전달)',
+            schema: { type: 'string' },
+          },
+          {
+            name: 'error',
+            in: 'query',
+            description: 'OAuth 오류 코드 (실패 시)',
+            schema: { type: 'string' },
+          },
+        ],
+        responses: {
+          200: {
+            description: '인증 완료 및 쿠키 설정',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean' },
+                    data: {
+                      type: 'object',
+                      properties: {
+                        session: {
+                          type: 'object',
+                          properties: {
+                            access_token: { $ref: '#/components/schemas/EncryptedString' },
+                            refresh_token: { $ref: '#/components/schemas/EncryptedString' },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          400: { description: 'OAuth 오류 또는 파라미터 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
     },
@@ -1378,6 +1441,212 @@ export const openApiSpec = {
         },
       },
     },
+    // ── Admin - Ledger Entries ──────────────────────────────────────────
+    '/api/admin/ledger-entries': {
+      get: {
+        tags: ['admin'],
+        summary: '원장 항목 조회',
+        description: '`user_asset_ledger` 테이블을 전체 페이지네이션으로 조회합니다.',
+        parameters: [
+          { name: 'userId', in: 'query', schema: { type: 'string' }, description: '사용자 ID 필터' },
+          { name: 'status', in: 'query', schema: { type: 'string', enum: ['estimated', 'confirmed', 'withdrawable', 'paid'] } },
+          { name: 'exportJobId', in: 'query', schema: { type: 'string' } },
+          { name: 'buIds', in: 'query', schema: { type: 'string' }, description: '콤마 구분 BU ID 목록' },
+        ],
+        responses: {
+          200: { description: '원장 항목 목록', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'array', items: { type: 'object' } } } } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+      post: {
+        tags: ['admin'],
+        summary: '원장 항목 일괄 upsert',
+        description: '배치당 500건씩 처리합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['entries'],
+                properties: {
+                  entries: { type: 'array', items: { type: 'object' } },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'Upsert 완료',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: {
+                      type: 'object',
+                      properties: {
+                        count: { type: 'integer' },
+                        success: { type: 'boolean' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          400: { description: '유효성 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/ledger-entries/update-status': {
+      post: {
+        tags: ['admin'],
+        summary: '원장 항목 상태 일괄 변경',
+        description: '여러 항목의 status를 한 번에 변경합니다. `confirmed` 시 `confirmed_at`, `withdrawable` 시 `withdrawable_at`, `paid` 시 `paid_at`이 자동 설정됩니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['ids', 'status'],
+                properties: {
+                  ids: { type: 'array', items: { type: 'string' }, description: '변경할 항목 ID 목록' },
+                  status: { type: 'string', enum: ['estimated', 'confirmed', 'withdrawable', 'paid'] },
+                  confirmedAmount: { type: 'number', description: '확정 금액 (status=confirmed일 때 선택)' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '변경 완료',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: {
+                      type: 'object',
+                      properties: { updated: { type: 'integer' } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          400: { description: '파라미터 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/ledger-entries/confirm-job': {
+      post: {
+        tags: ['admin'],
+        summary: '익스포트 작업 정산 확정',
+        description: '특정 export_job에 속한 `estimated` 상태의 원장 항목들을 `confirmed`로 변경하고, `totalPayment`를 `amount_high` 비율로 배분합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['exportJobId', 'totalPayment'],
+                properties: {
+                  exportJobId: { type: 'string' },
+                  totalPayment: { type: 'number', description: '총 정산 금액' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '확정 완료',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: {
+                      type: 'object',
+                      properties: { confirmed: { type: 'integer', description: '확정된 항목 수' } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          400: { description: '파라미터 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    // ── Admin - Delivery Records ─────────────────────────────────────────
+    '/api/admin/delivery-records': {
+      get: {
+        tags: ['admin'],
+        summary: '납품 기록 조회',
+        parameters: [
+          { name: 'clientId', in: 'query', required: true, schema: { type: 'string' }, description: '클라이언트 ID (필수)' },
+        ],
+        responses: {
+          200: { description: '납품 기록 목록', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'array', items: { type: 'object' } } } } } } },
+          400: { description: 'clientId 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+      post: {
+        tags: ['admin'],
+        summary: '납품 기록 생성',
+        description: 'BU ID 목록을 특정 클라이언트/익스포트 작업에 납품 기록으로 등록합니다. 배치당 500건 처리. `bu_id + client_id` 중복 시 무시(idempotent).\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['buIds', 'clientId', 'exportJobId'],
+                properties: {
+                  buIds: { type: 'array', items: { type: 'string' }, description: '납품할 BU ID 목록' },
+                  clientId: { type: 'string' },
+                  exportJobId: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '납품 기록 생성 완료',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: {
+                      type: 'object',
+                      properties: {
+                        count: { type: 'integer' },
+                        success: { type: 'boolean' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          400: { description: '파라미터 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
     '/api/admin/reset-all': {
       delete: {
         tags: ['admin'],
