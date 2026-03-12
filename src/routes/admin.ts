@@ -409,6 +409,32 @@ admin.delete('/export-jobs/:id', async (c) => {
 
 // ── Billable Units ──────────────────────────────────────────────────────
 
+function billableUnitFromRow(row: Record<string, unknown>) {
+  const rawId = row.id as string
+  const rawSessionId = (row.session_id ?? row.sessionId) as string
+  const rawUserId = (row.user_id ?? row.userId) as string
+
+  return {
+    id:               encryptId(rawId),
+    sessionId:        rawUserId ? encryptId(rawSessionId) : null,
+    minuteIndex:      (row.minute_index ?? row.minuteIndex) as number,
+    effectiveSeconds: Number(row.effective_seconds ?? row.effectiveSeconds ?? 0),
+    qualityGrade:     ((row.quality_grade ?? row.qualityGrade) as 'A' | 'B' | 'C') ?? 'C',
+    qaScore:          Number(row.qa_score ?? row.qaScore ?? 0),
+    qualityTier:      ((row.quality_tier ?? row.qualityTier) as string) ?? 'basic',
+    labelSource:      ((row.label_source ?? row.labelSource) as string) ?? null,
+    hasLabels:        ((row.has_labels ?? row.hasLabels) as boolean) ?? false,
+    consentStatus:    ((row.consent_status ?? row.consentStatus) as string) ?? 'PRIVATE',
+    piiStatus:        ((row.pii_status ?? row.piiStatus) as string) ?? 'CLEAR',
+    lockStatus:       ((row.lock_status ?? row.lockStatus) as string) ?? 'available',
+    lockedByJobId:    ((row.locked_by_job_id ?? row.lockedByJobId) as string) ?? null,
+    sessionDate:      ((row.session_date ?? row.sessionDate) as string) ?? '',
+    userId:           rawUserId ? encryptId(rawUserId) : null,
+    sourceSessionIds: ((row.source_session_ids ?? row.sourceSessionIds) as string[]) ?? undefined,
+    deviceContext:    ((row.device_context ?? row.deviceContext) as any) ?? undefined,
+  }
+}
+
 admin.get('/billable-units', async (c) => {
   const qualityGrade = c.req.query('qualityGrade')?.split(',')
   const qualityTier = c.req.query('qualityTier')?.split(',')
@@ -417,38 +443,28 @@ admin.get('/billable-units', async (c) => {
   const userId = c.req.query('userId')
   const dateFrom = c.req.query('dateFrom')
   const dateTo = c.req.query('dateTo')
+  const limit = Math.min(parseInt(c.req.query('limit') ?? '200', 10), 1000)
+  const offset = parseInt(c.req.query('offset') ?? '0', 10)
 
   try {
-    const PAGE = 1000
-    const all: any[] = []
-    let from = 0
+    let query = supabaseAdmin
+      .from('billable_units')
+      .select('*', { count: 'exact' })
+      .order('session_date', { ascending: false })
+      .range(offset, offset + limit - 1)
 
-    while (true) {
-      let query = supabaseAdmin
-        .from('billable_units')
-        .select('*')
-        .order('session_date', { ascending: false })
-        .range(from, from + PAGE - 1)
-
-      if (qualityGrade?.length) query = query.in('quality_grade', qualityGrade)
-      if (qualityTier?.length) query = query.in('quality_tier', qualityTier)
-      if (consentStatus) query = query.eq('consent_status', consentStatus)
-      if (lockStatus) query = query.eq('lock_status', lockStatus)
-      if (userId) query = query.eq('user_id', userId)
-      if (dateFrom && dateTo) {
-        query = query.gte('session_date', dateFrom).lte('session_date', dateTo)
-      }
-
-      const { data, error } = await query
-      if (error) break
-      if (!data || data.length === 0) break
-
-      all.push(...data)
-      if (data.length < PAGE) break
-      from += PAGE
+    if (qualityGrade?.length) query = query.in('quality_grade', qualityGrade)
+    if (qualityTier?.length) query = query.in('quality_tier', qualityTier)
+    if (consentStatus) query = query.eq('consent_status', consentStatus)
+    if (lockStatus) query = query.eq('lock_status', lockStatus)
+    if (userId) query = query.eq('user_id', userId)
+    if (dateFrom && dateTo) {
+      query = query.gte('session_date', dateFrom).lte('session_date', dateTo)
     }
 
-    return c.json({ data: all })
+    const { data, error, count } = await query
+    if (error) return c.json({ error: error.message }, 500)
+    return c.json({ data: (data ?? []).map(billableUnitFromRow), count: count ?? 0 })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
