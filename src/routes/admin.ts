@@ -11,6 +11,116 @@ const admin = new Hono()
 // 모든 라우트에 인증 필수 (추후 관리자 권한 체크 추가 가능)
 admin.use('/*', authMiddleware)
 
+// ── 세션 행 → camelCase 변환 (sessions.ts의 sessionFromRow와 동일) ──────────
+
+function sessionFromRow(row: Record<string, unknown>) {
+  const rawId = row.id as string
+  const rawUserId = (row.user_id as string) ?? null
+  const rawPeerId = (row.peer_id as string) ?? null
+  const rawAudioUrl = (row.audio_url as string) ?? null
+  const rawCallRecordId = (row.call_record_id as string) ?? null
+  const rawDupGroupId = (row.dup_group_id as string) ?? null
+  const rawFileHash = (row.file_hash_sha256 as string) ?? null
+  const rawAudioFP = (row.audio_fingerprint as string) ?? null
+  const rawWavPath = (row.local_sanitized_wav_path as string) ?? null
+  const rawTextPreview = (row.local_sanitized_text_preview as string) ?? null
+
+  return {
+    id: encryptId(rawId),
+    title: row.title as string,
+    date: row.date as string,
+    duration: row.duration as number,
+    qaScore: (row.qa_score as number) ?? 0,
+    contributionScore: (row.contribution_score as number) ?? 0,
+    labels: row.labels as any,
+    strategyLocked: (row.strategy_locked as boolean) ?? false,
+    assetType: (row.asset_type as any) ?? '업무/회의',
+    audioMetrics: null,
+    isPublic: (row.is_public as boolean) ?? false,
+    visibilityStatus: (row.visibility_status as any) ?? 'PRIVATE',
+    visibilitySource: (row.visibility_source as any) ?? 'MANUAL',
+    visibilityConsentVersion: (row.visibility_consent_version as string) ?? null,
+    visibilityChangedAt: (row.visibility_changed_at as string) ?? null,
+    status: ((row.status as any) === 'pending' ? 'uploaded' : (row.status as any)) ?? 'uploaded',
+    isPiiCleaned: (row.is_pii_cleaned as boolean) ?? false,
+    hasDiarization: (row.has_diarization as boolean) ?? false,
+    chunkCount: (row.chunk_count as number) ?? 0,
+    audioUrl: rawAudioUrl ? encryptId(rawAudioUrl) : undefined,
+    callRecordId: rawCallRecordId ? encryptId(rawCallRecordId) : undefined,
+    dupStatus: (row.dup_status as any) ?? 'none',
+    dupGroupId: rawDupGroupId ? encryptId(rawDupGroupId) : null,
+    dupConfidence: (row.dup_confidence as number) ?? null,
+    fileHashSha256: rawFileHash ? encryptId(rawFileHash) : null,
+    audioFingerprint: rawAudioFP ? encryptId(rawAudioFP) : null,
+    dupRepresentative: (row.dup_representative as boolean) ?? null,
+    uploadStatus: (row.upload_status as any) ?? 'LOCAL',
+    piiStatus: (row.pii_status as any) ?? 'CLEAR',
+    shareScope: (row.share_scope as any) ?? 'PRIVATE',
+    eligibleForShare: (row.eligible_for_share as boolean) ?? false,
+    reviewAction: (row.review_action as any) ?? null,
+    lockReason: (row.lock_reason as Record<string, unknown>) ?? null,
+    lockStartMs: (row.lock_start_ms as number) ?? null,
+    lockEndMs: (row.lock_end_ms as number) ?? null,
+    localSanitizedWavPath: rawWavPath ? encryptId(rawWavPath) : null,
+    localSanitizedTextPreview: rawTextPreview ? encryptId(rawTextPreview) : null,
+    consentStatus: (row.consent_status as any) ?? 'locked',
+    verifiedSpeaker: (row.verified_speaker as boolean) ?? false,
+    userId: rawUserId ? encryptId(rawUserId) : null,
+    peerId: rawPeerId ? encryptId(rawPeerId) : null,
+    labelStatus: (row.label_status as any) ?? null,
+    labelSource: (row.label_source as any) ?? null,
+    labelConfidence: typeof row.label_confidence === 'number' ? row.label_confidence : null,
+  }
+}
+
+// ── 세션 필터 쿼리 빌더 (sessions + users/stats 공유) ─────────────────────
+
+type SessionFilterParams = {
+  domains: string[]
+  qualityGrades: string[]
+  labelStatus?: string
+  publicStatus?: string
+  piiCleanedOnly: boolean
+  hasAudioUrl: boolean
+  diarizationStatus?: string
+  transcriptSessionIds: string[] | null
+  transcriptStatus?: string
+  uploadStatuses: string[]
+  dateFrom?: string
+  dateTo?: string
+}
+
+function applySessionFilters(query: any, f: SessionFilterParams) {
+  if (f.domains.length) {
+    query = query.or(f.domains.map((d: string) => `labels->>domain.eq.${d}`).join(','))
+  }
+  if (f.qualityGrades.length) {
+    const gradeConds: string[] = []
+    if (f.qualityGrades.includes('A')) gradeConds.push('qa_score.gte.80')
+    if (f.qualityGrades.includes('B')) gradeConds.push('and(qa_score.gte.60,qa_score.lt.80)')
+    if (f.qualityGrades.includes('C')) gradeConds.push('qa_score.lt.60')
+    if (gradeConds.length) query = query.or(gradeConds.join(','))
+  }
+  if (f.labelStatus === 'labeled') query = query.not('labels', 'is', null)
+  else if (f.labelStatus === 'unlabeled') query = query.is('labels', null)
+  if (f.publicStatus === 'public') query = query.eq('is_public', true)
+  else if (f.publicStatus === 'private') query = query.eq('is_public', false)
+  if (f.piiCleanedOnly) query = query.eq('is_pii_cleaned', true)
+  if (f.hasAudioUrl) query = query.not('audio_url', 'is', null)
+  if (f.diarizationStatus === 'done') query = query.eq('has_diarization', true)
+  else if (f.diarizationStatus === 'none') query = query.eq('has_diarization', false)
+  if (f.transcriptStatus === 'done' && f.transcriptSessionIds) {
+    if (f.transcriptSessionIds.length) query = query.in('id', f.transcriptSessionIds)
+    else query = query.eq('id', '__no_match__')
+  } else if (f.transcriptStatus === 'none' && f.transcriptSessionIds) {
+    if (f.transcriptSessionIds.length) query = query.not('id', 'in', `(${f.transcriptSessionIds.join(',')})`)
+  }
+  if (f.uploadStatuses.length) query = query.in('upload_status', f.uploadStatuses)
+  if (f.dateFrom) query = query.gte('date', f.dateFrom)
+  if (f.dateTo) query = query.lte('date', f.dateTo)
+  return query
+}
+
 // ── Admin Me ─────────────────────────────────────────────────────────────
 
 admin.get('/me', async (c) => {
@@ -440,24 +550,186 @@ admin.post('/billable-units/mark-delivered', async (c) => {
 
 /**
  * GET /admin/sessions
- * 전체 세션 조회 (어드민 전용, user_id 필터 없음)
+ * 전체 세션 조회 (어드민 전용) — 필터·정렬·페이징 지원
  * Query params:
- *   - limit?: number (default 1000, max 2000)
+ *   - limit?: number (default 100, max 200)
  *   - offset?: number (default 0)
+ *   - domains?: string[] (반복 append)
+ *   - qualityGrades?: string[] ('A'|'B'|'C', 반복 append)
+ *   - labelStatus?: 'labeled'|'unlabeled'
+ *   - publicStatus?: 'public'|'private'
+ *   - piiCleanedOnly?: 'true'
+ *   - hasAudioUrl?: 'true'
+ *   - diarizationStatus?: 'done'|'none'
+ *   - transcriptStatus?: 'done'|'none'
+ *   - uploadStatuses?: string[] (반복 append)
+ *   - dateFrom?, dateTo?: string (YYYY-MM-DD)
+ *   - sortBy?: 'date'|'qaScore'|'duration' (default 'date')
+ *   - sortDir?: 'asc'|'desc' (default 'desc')
  */
 admin.get('/sessions', async (c) => {
-  const limit = Math.min(Number(c.req.query('limit') ?? 1000), 2000)
+  const limit = Math.min(Number(c.req.query('limit') ?? 100), 200)
   const offset = Number(c.req.query('offset') ?? 0)
+  const domains = c.req.queries('domains') ?? []
+  const qualityGrades = c.req.queries('qualityGrades') ?? []
+  const labelStatus = c.req.query('labelStatus')
+  const publicStatus = c.req.query('publicStatus')
+  const piiCleanedOnly = c.req.query('piiCleanedOnly') === 'true'
+  const hasAudioUrl = c.req.query('hasAudioUrl') === 'true'
+  const diarizationStatus = c.req.query('diarizationStatus')
+  const transcriptStatus = c.req.query('transcriptStatus')
+  const uploadStatuses = c.req.queries('uploadStatuses') ?? []
+  const dateFrom = c.req.query('dateFrom')
+  const dateTo = c.req.query('dateTo')
+  const sortBy = c.req.query('sortBy') ?? 'date'
+  const sortDir = c.req.query('sortDir') ?? 'desc'
+
+  const sortColumn = sortBy === 'qaScore' ? 'qa_score' : sortBy === 'duration' ? 'duration' : 'date'
+  const ascending = sortDir === 'asc'
 
   try {
-    const { data, error, count } = await supabaseAdmin
+    // transcriptStatus 필터: transcripts 테이블에서 session_id 목록 사전 조회
+    let transcriptSessionIds: string[] | null = null
+    if (transcriptStatus === 'done' || transcriptStatus === 'none') {
+      const { data: tData } = await supabaseAdmin.from('transcripts').select('session_id')
+      transcriptSessionIds = (tData ?? []).map((r: any) => r.session_id as string)
+    }
+
+    const filterParams: SessionFilterParams = {
+      domains, qualityGrades, labelStatus, publicStatus,
+      piiCleanedOnly, hasAudioUrl, diarizationStatus,
+      transcriptSessionIds, transcriptStatus,
+      uploadStatuses, dateFrom, dateTo,
+    }
+
+    let query = supabaseAdmin
       .from('sessions')
       .select('*', { count: 'exact' })
-      .order('date', { ascending: false })
+      .order(sortColumn, { ascending })
       .range(offset, offset + limit - 1)
 
+    query = applySessionFilters(query, filterParams)
+
+    const { data, error, count } = await query
     if (error) return c.json({ error: error.message }, 500)
-    return c.json({ data: data ?? [], count: count ?? 0 })
+
+    return c.json({
+      data: (data ?? []).map(sessionFromRow),
+      count: count ?? 0,
+    })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * GET /admin/users/stats
+ * 사용자별 세션 집계 (필터·페이징 지원)
+ * Query params: 위 /sessions와 동일 필터 + sortBy: 'sessionCount'|'totalDuration'|'avgQaScore'
+ */
+admin.get('/users/stats', async (c) => {
+  const limit = Math.min(Number(c.req.query('limit') ?? 100), 200)
+  const offset = Number(c.req.query('offset') ?? 0)
+  const domains = c.req.queries('domains') ?? []
+  const qualityGrades = c.req.queries('qualityGrades') ?? []
+  const labelStatus = c.req.query('labelStatus')
+  const publicStatus = c.req.query('publicStatus')
+  const piiCleanedOnly = c.req.query('piiCleanedOnly') === 'true'
+  const hasAudioUrl = c.req.query('hasAudioUrl') === 'true'
+  const diarizationStatus = c.req.query('diarizationStatus')
+  const transcriptStatus = c.req.query('transcriptStatus')
+  const uploadStatuses = c.req.queries('uploadStatuses') ?? []
+  const dateFrom = c.req.query('dateFrom')
+  const dateTo = c.req.query('dateTo')
+  const userSortBy = c.req.query('sortBy') ?? 'sessionCount'
+  const sortDir = c.req.query('sortDir') ?? 'desc'
+  const ascending = sortDir === 'asc'
+
+  try {
+    // transcriptStatus 필터: session_id 목록 사전 조회
+    let transcriptSessionIds: string[] | null = null
+    if (transcriptStatus === 'done' || transcriptStatus === 'none') {
+      const { data: tData } = await supabaseAdmin.from('transcripts').select('session_id')
+      transcriptSessionIds = (tData ?? []).map((r: any) => r.session_id as string)
+    }
+
+    const filterParams: SessionFilterParams = {
+      domains, qualityGrades, labelStatus, publicStatus,
+      piiCleanedOnly, hasAudioUrl, diarizationStatus,
+      transcriptSessionIds, transcriptStatus,
+      uploadStatuses, dateFrom, dateTo,
+    }
+
+    // 필터 적용해 세션 전체 로드 (집계용, 페이징 없음)
+    const PAGE = 1000
+    const allSessions: any[] = []
+    let from = 0
+
+    while (true) {
+      let query = supabaseAdmin
+        .from('sessions')
+        .select('id, user_id, duration, qa_score, labels, is_public')
+        .range(from, from + PAGE - 1)
+
+      query = applySessionFilters(query, filterParams)
+
+      const { data, error } = await query
+      if (error) return c.json({ error: error.message }, 500)
+      if (!data?.length) break
+      allSessions.push(...data)
+      if (data.length < PAGE) break
+      from += PAGE
+    }
+
+    // userId별 집계
+    const groupMap = new Map<string, any[]>()
+    for (const s of allSessions) {
+      const key = s.user_id ?? '__null__'
+      if (!groupMap.has(key)) groupMap.set(key, [])
+      groupMap.get(key)!.push(s)
+    }
+
+    const groups = Array.from(groupMap.entries()).map(([key, sessions]) => {
+      const userId = key === '__null__' ? null : key
+      const totalDurationHours = sessions.reduce((sum: number, s: any) => sum + (s.duration ?? 0), 0) / 3600
+      const avgQaScore = sessions.length
+        ? Math.round(sessions.reduce((sum: number, s: any) => sum + (s.qa_score ?? 0), 0) / sessions.length)
+        : 0
+      const labeledRatio = sessions.length
+        ? sessions.filter((s: any) => s.labels !== null).length / sessions.length
+        : 0
+      const publicCount = sessions.filter((s: any) => s.is_public).length
+      const qualityDistribution = { A: 0, B: 0, C: 0 }
+      for (const s of sessions) {
+        const score = s.qa_score ?? 0
+        if (score >= 80) qualityDistribution.A++
+        else if (score >= 60) qualityDistribution.B++
+        else qualityDistribution.C++
+      }
+      return {
+        userId: userId ? encryptId(userId) : null,
+        displayId: userId ? `${userId.slice(0, 8)}...` : '미인증 사용자',
+        sessionCount: sessions.length,
+        totalDurationHours,
+        avgQaScore,
+        labeledRatio,
+        qualityDistribution,
+        publicCount,
+      }
+    })
+
+    // 정렬
+    groups.sort((a, b) => {
+      const dir = ascending ? 1 : -1
+      if (userSortBy === 'totalDuration') return (a.totalDurationHours - b.totalDurationHours) * dir
+      if (userSortBy === 'avgQaScore') return (a.avgQaScore - b.avgQaScore) * dir
+      return (a.sessionCount - b.sessionCount) * dir
+    })
+
+    const total = groups.length
+    const page = groups.slice(offset, offset + limit)
+
+    return c.json({ data: page, count: total })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }

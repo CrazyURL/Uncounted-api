@@ -50,3 +50,9 @@ BEGIN
   ALTER TABLE export_jobs DROP CONSTRAINT IF EXISTS export_jobs_status_check;
 EXCEPTION WHEN undefined_object THEN NULL;
 END $$;
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- 4. has_diarization 컬럼 추가 — 발음 상태 여부 추가
+-- ══════════════════════════════════════════════════════════════════════════════
+
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS has_diarization BOOLEAN DEFAULT false;
