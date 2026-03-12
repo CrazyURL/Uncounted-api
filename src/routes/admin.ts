@@ -700,6 +700,198 @@ admin.post('/delivery-records', async (c) => {
   }
 })
 
+// ── Admin Storage: WAV 목록 조회 ────────────────────────────────────────
+
+const AUDIO_BUCKET = 'sanitized-audio'
+
+/**
+ * GET /admin/storage/wavs
+ * 전체 유저 WAV 목록 조회 (어드민 전용, RLS 우회)
+ */
+admin.get('/storage/wavs', async (c) => {
+  try {
+    const { data: userFolders, error } = await supabaseAdmin.storage
+      .from(AUDIO_BUCKET)
+      .list('', { limit: 1000 })
+
+    if (error || !userFolders) {
+      return c.json({ error: error?.message ?? 'Failed to list storage' }, 500)
+    }
+
+    type StorageWavEntry = { userId: string; sessionId: string; path: string }
+    const result: StorageWavEntry[] = []
+
+    for (const folder of userFolders) {
+      if (!folder.name) continue
+      const userId = folder.name
+
+      const { data: files } = await supabaseAdmin.storage
+        .from(AUDIO_BUCKET)
+        .list(userId, { limit: 10000 })
+
+      if (!files) continue
+
+      for (const file of files) {
+        if (!file.name.endsWith('.wav')) continue
+        const sessionId = file.name.replace('.wav', '')
+        result.push({ userId, sessionId, path: `${userId}/${file.name}` })
+      }
+    }
+
+    return c.json({ data: result })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * POST /admin/storage/signed-url
+ * Admin signed URL 생성 (RLS 우회)
+ * Body: { storagePath: string, expiresIn?: number }
+ */
+admin.post('/storage/signed-url', async (c) => {
+  const { storagePath, expiresIn = 300 } = getBody<{ storagePath: string; expiresIn?: number }>(c)
+
+  if (!storagePath) {
+    return c.json({ error: 'Missing storagePath' }, 400)
+  }
+
+  try {
+    const { data, error } = await supabaseAdmin.storage
+      .from(AUDIO_BUCKET)
+      .createSignedUrl(storagePath, expiresIn)
+
+    if (error || !data?.signedUrl) {
+      return c.json({ error: error?.message ?? 'Failed to create signed URL' }, 500)
+    }
+
+    return c.json({ data: { signedUrl: data.signedUrl } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+// ── Admin Transcript: 필터용 ID 목록 + 일괄 조회 ─────────────────────
+
+/**
+ * GET /admin/transcript-ids
+ * transcript 있는 session_id 목록 반환
+ */
+admin.get('/transcript-ids', async (c) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('transcripts')
+      .select('session_id')
+
+    if (error) return c.json({ error: error.message }, 500)
+
+    const ids = (data ?? []).map((row) => row.session_id as string)
+    return c.json({ data: ids })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * POST /admin/transcripts/bulk
+ * 세션별 transcript 일괄 조회
+ * Body: { sessionIds: string[] }
+ */
+admin.post('/transcripts/bulk', async (c) => {
+  const { sessionIds } = getBody<{ sessionIds: string[] }>(c)
+
+  if (!Array.isArray(sessionIds) || sessionIds.length === 0) {
+    return c.json({ error: 'sessionIds array is required' }, 400)
+  }
+
+  try {
+    // Supabase .in() 최대 약 1000개 제한 → 배치 처리
+    const BATCH = 500
+    const all: any[] = []
+
+    for (let i = 0; i < sessionIds.length; i += BATCH) {
+      const batch = sessionIds.slice(i, i + BATCH)
+      const { data, error } = await supabaseAdmin
+        .from('transcripts')
+        .select('session_id, text, words, summary, source')
+        .in('session_id', batch)
+
+      if (error) return c.json({ error: error.message }, 500)
+      if (data) all.push(...data)
+    }
+
+    const result = all.map((row) => ({
+      sessionId: row.session_id,
+      text: row.text,
+      words: row.words ?? undefined,
+      summary: row.summary ?? undefined,
+      source: row.source ?? undefined,
+    }))
+
+    return c.json({ data: result })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+// ── Admin Storage-Session 동기화 ────────────────────────────────────────
+
+/**
+ * POST /admin/sync-audio-urls
+ * storage WAV 목록 → sessions.audio_url 동기화
+ */
+admin.post('/sync-audio-urls', async (c) => {
+  try {
+    // 1. Storage에서 WAV 목록 조회
+    const { data: userFolders, error: listErr } = await supabaseAdmin.storage
+      .from(AUDIO_BUCKET)
+      .list('', { limit: 1000 })
+
+    if (listErr || !userFolders) {
+      return c.json({ error: listErr?.message ?? 'Failed to list storage' }, 500)
+    }
+
+    type WavEntry = { sessionId: string; path: string }
+    const wavEntries: WavEntry[] = []
+
+    for (const folder of userFolders) {
+      if (!folder.name) continue
+      const userId = folder.name
+
+      const { data: files } = await supabaseAdmin.storage
+        .from(AUDIO_BUCKET)
+        .list(userId, { limit: 10000 })
+
+      if (!files) continue
+      for (const file of files) {
+        if (!file.name.endsWith('.wav')) continue
+        const sessionId = file.name.replace('.wav', '')
+        wavEntries.push({ sessionId, path: `${userId}/${file.name}` })
+      }
+    }
+
+    if (wavEntries.length === 0) {
+      return c.json({ data: { updated: 0, total: 0 } })
+    }
+
+    // 2. audio_url이 null인 세션만 업데이트
+    let updated = 0
+    for (const entry of wavEntries) {
+      const { error } = await supabaseAdmin
+        .from('sessions')
+        .update({ audio_url: entry.path })
+        .eq('id', entry.sessionId)
+        .is('audio_url', null)
+
+      if (!error) updated++
+    }
+
+    return c.json({ data: { updated, total: wavEntries.length } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
 // ── Reset All ───────────────────────────────────────────────────────────
 
 admin.delete('/reset-all', async (c) => {

@@ -43,6 +43,7 @@ function sessionFromRow(row: Record<string, unknown>) {
     visibilityChangedAt: (row.visibility_changed_at as string) ?? null,
     status: ((row.status as any) === 'pending' ? 'uploaded' : (row.status as any)) ?? 'uploaded',
     isPiiCleaned: (row.is_pii_cleaned as boolean) ?? false,
+    hasDiarization: (row.has_diarization as boolean) ?? false,
     chunkCount: (row.chunk_count as number) ?? 0,
     audioUrl: rawAudioUrl ? encryptId(rawAudioUrl) : undefined,
     callRecordId: rawCallRecordId ? encryptId(rawCallRecordId) : undefined,
@@ -90,6 +91,7 @@ function sessionToRow(s: any) {
     visibility_changed_at: s.visibilityChangedAt,
     status: s.status,
     is_pii_cleaned: s.isPiiCleaned,
+    has_diarization: s.hasDiarization ?? false,
     chunk_count: s.chunkCount,
     audio_url: s.audioUrl,
     call_record_id: s.callRecordId,
@@ -302,6 +304,34 @@ sessions.put('/:id/visibility', async (c) => {
     }
 
     return c.json({ data: sessionFromRow(data) })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * PATCH /sessions/:id/diarization
+ * 화자분리 상태 업데이트
+ * Body: { hasDiarization: boolean }
+ */
+sessions.patch('/:id/diarization', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const { hasDiarization } = getBody<{ hasDiarization: boolean }>(c)
+
+  if (typeof hasDiarization !== 'boolean') {
+    return c.json({ error: 'hasDiarization (boolean) is required' }, 400)
+  }
+
+  try {
+    const { error } = await supabaseAdmin
+      .from('sessions')
+      .update({ has_diarization: hasDiarization })
+      .eq('id', sessionId)
+      .eq('user_id', userId)
+
+    if (error) return c.json({ error: error.message }, 500)
+    return c.json({ data: { success: true } })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
