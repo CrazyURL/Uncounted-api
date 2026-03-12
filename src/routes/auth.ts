@@ -333,6 +333,8 @@ auth.get('/oauth/google', (c) => {
   authUrl.searchParams.set('code_challenge', codeChallenge)
   authUrl.searchParams.set('code_challenge_method', 's256')
 
+  console.log("authUrl:", authUrl.toString())
+
   return c.redirect(authUrl.toString())
 })
 
