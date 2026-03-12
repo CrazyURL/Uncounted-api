@@ -1,16 +1,17 @@
 {
-    "version": "0.2.0",
-    "configurations": [
-      {
-        "type": "node",
-        "request": "launch",
-        "name": "Debug API",
-        "runtimeExecutable": "npx",
-        "runtimeArgs": ["tsx", "${workspaceFolder}/src/dev.ts"],
-        "sourceMaps": true,
-        "env": {
-          "NODE_OPTIONS": "--enable-source-maps"
-        }
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug API",
+      "runtimeExecutable": "/usr/local/bin/node",
+      "program": "${workspaceFolder}/node_modules/tsx/dist/cli.mjs",
+      "args": ["${workspaceFolder}/src/dev.ts"],
+      "sourceMaps": true,
+      "env": {
+        "NODE_OPTIONS": "--enable-source-maps"
       }
-    ]
-  }
+    }
+  ]
+}

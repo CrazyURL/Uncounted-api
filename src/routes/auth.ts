@@ -321,7 +321,7 @@ auth.get('/oauth/google', (c) => {
     setCookie(c, 'pkce_flow_id', flowId, {
       httpOnly: true,
       secure: IS_PROD,
-      sameSite: 'none',
+      sameSite: IS_PROD ? 'none' : 'lax',
       path: '/',
       maxAge: 60 * 5,
     })
@@ -332,6 +332,8 @@ auth.get('/oauth/google', (c) => {
   authUrl.searchParams.set('redirect_to', frontendRedirect)
   authUrl.searchParams.set('code_challenge', codeChallenge)
   authUrl.searchParams.set('code_challenge_method', 's256')
+
+  console.log("auth:", authUrl.toString())
 
   return c.redirect(authUrl.toString())
 })
