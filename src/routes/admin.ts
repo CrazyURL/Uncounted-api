@@ -1101,7 +1101,7 @@ admin.post('/transcripts/bulk', async (c) => {
       const batch = sessionIds.slice(i, i + BATCH)
       const { data, error } = await supabaseAdmin
         .from('transcripts')
-        .select('session_id, text, words, summary, source')
+        .select('session_id, text, words, summary')
         .in('session_id', batch)
 
       if (error) return c.json({ error: error.message }, 500)
@@ -1113,7 +1113,6 @@ admin.post('/transcripts/bulk', async (c) => {
       text: row.text,
       words: row.words ?? undefined,
       summary: row.summary ?? undefined,
-      source: row.source ?? undefined,
     }))
 
     return c.json({ data: result })
