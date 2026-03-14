@@ -4,6 +4,7 @@
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, getBody } from '../lib/middleware.js'
+import { decryptData } from '../lib/crypto.js'
 
 const storage = new Hono()
 
@@ -81,6 +82,113 @@ storage.post('/meta', async (c) => {
     }
 
     return c.json({ path })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * POST /storage/audio/chunk
+ * WAV 청크 단위 업로드 — multipart/form-data
+ * - wavFile: WAV binary (Blob)
+ * - meta: AES-256-GCM 암호화된 JSON { sessionId, chunkIndex, startSec, endSec, durationSec, fileSizeBytes }
+ * 저장 경로: {userId}/{sessionId}/{sessionId}-001.wav
+ */
+storage.post('/audio/chunk', async (c) => {
+  const userId = c.get('userId') as string
+
+  try {
+    const form = await c.req.formData()
+    const wavFile = form.get('wavFile') as File | null
+    const metaRaw = form.get('meta') as string | null
+
+    if (!wavFile || !metaRaw) {
+      return c.json({ error: 'Missing wavFile or meta' }, 400)
+    }
+
+    const meta = decryptData(metaRaw) as {
+      sessionId: string
+      chunkIndex: number
+      startSec: number
+      endSec: number
+      durationSec: number
+      fileSizeBytes: number
+      text?: string
+    }
+
+    const { sessionId, chunkIndex, startSec, endSec, durationSec, fileSizeBytes, text } = meta
+
+    if (!sessionId || !chunkIndex) {
+      return c.json({ error: 'Missing required meta fields' }, 400)
+    }
+
+    const paddedIndex = String(chunkIndex).padStart(3, '0')
+    const storagePath = `${userId}/${sessionId}/${sessionId}-${paddedIndex}.wav`
+
+    // File → Uint8Array (base64 변환 없음)
+    const bytes = new Uint8Array(await wavFile.arrayBuffer())
+
+    // Supabase Storage 업로드
+    const { error: uploadError } = await supabaseAdmin.storage
+      .from(AUDIO_BUCKET)
+      .upload(storagePath, bytes, { contentType: 'audio/wav', upsert: true })
+
+    if (uploadError) {
+      return c.json({ error: uploadError.message }, 500)
+    }
+
+    // session_chunks INSERT (재시도 시 upsert)
+    const { data: chunkRow, error: dbError } = await supabaseAdmin
+      .from('session_chunks')
+      .upsert(
+        {
+          session_id:      sessionId,
+          user_id:         userId,
+          chunk_index:     chunkIndex,
+          storage_path:    storagePath,
+          start_sec:       startSec,
+          end_sec:         endSec,
+          duration_sec:    durationSec,
+          file_size_bytes: fileSizeBytes ?? bytes.byteLength,
+          sample_rate:     16000,
+          upload_status:   'uploaded',
+          transcript_text: text || null,
+          updated_at:      new Date().toISOString(),
+        },
+        { onConflict: 'session_id,chunk_index' },
+      )
+      .select('id')
+      .single()
+
+    if (dbError) {
+      return c.json({ error: dbError.message }, 500)
+    }
+
+    return c.json({ path: storagePath, chunkId: chunkRow.id })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * GET /storage/audio/chunks/:sessionId
+ * 세션의 청크 목록 조회
+ */
+storage.get('/audio/chunks/:sessionId', async (c) => {
+  const userId = c.get('userId') as string
+  const { sessionId } = c.req.param()
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('session_chunks')
+      .select('id, chunk_index, storage_path, start_sec, end_sec, duration_sec, upload_status')
+      .eq('session_id', sessionId)
+      .eq('user_id', userId)
+      .order('chunk_index', { ascending: true })
+
+    if (error) return c.json({ error: error.message }, 500)
+
+    return c.json({ chunks: data ?? [] })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }

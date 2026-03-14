@@ -316,6 +316,33 @@
 
 ---
 
+### transcript_chunks (청크별 STT 텍스트 + 오디오 통계)
+
+> Migration 011 + 012에서 생성/확장. session_chunks(오디오 파일)와 분리 — 텍스트 + 품질 지표 전용.
+
+| 컬럼명 | 타입 | 기본값 | 설명 |
+|--------|------|--------|------|
+| `id` | BIGSERIAL | PK | 자동 증가 |
+| `session_id` | TEXT | NOT NULL | FK → sessions.id (CASCADE) |
+| `user_id` | TEXT | NOT NULL | 사용자 ID (RLS용) |
+| `chunk_index` | INTEGER | NOT NULL | 1-based 청크 번호 |
+| `transcript_text` | TEXT | NULL | PII-masked STT 결과 |
+| `start_sec` | NUMERIC(10,3) | NOT NULL | 원본 파일 내 시작 시각(초) |
+| `end_sec` | NUMERIC(10,3) | NOT NULL | 원본 파일 내 종료 시각(초) |
+| `duration_sec` | NUMERIC(10,3) | NOT NULL | 청크 실제 재생 시간(초) |
+| `audio_stats` | JSONB | NULL | `{ rms, silenceRatio, clippingRatio, snrDb }` |
+| `words` | JSONB | NULL | `[{word, start, end, probability}]` — **청크 기준 상대 timestamp** (청크 시작 = 0초) |
+| `created_at` | TIMESTAMPTZ | now() | |
+| `updated_at` | TIMESTAMPTZ | now() | |
+
+**제약조건:** `UNIQUE(session_id, chunk_index)`
+
+**데이터 흐름:**
+- **쓰기:** `sttEngine.ts:processOneChunk()` → `saveTranscriptChunk()` → `POST /api/transcript-chunks`
+- **읽기:** 현재 어드민/분석 용도
+
+---
+
 ### 10. transcripts (STT 텍스트 테이블)
 
 | 컬럼명 | 타입 | 기본값 | 설명 |

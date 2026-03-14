@@ -14,14 +14,18 @@ import { decryptData } from './crypto.js'
  */
 export async function bodyDecryptMiddleware(c: Context, next: Next) {
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(c.req.method)) {
-    try {
-      const raw = await c.req.json()
-      if (raw && typeof raw === 'object' && 'enc_data' in raw) {
-        c.set('body', decryptData(raw.enc_data as string))
-      } else {
-        c.set('body', raw)
-      }
-    } catch { /* body 없음 또는 non-JSON — 그대로 통과 */ }
+    // multipart/form-data는 라우트 핸들러에서 직접 파싱 (c.req.formData())
+    const contentType = c.req.header('Content-Type') ?? ''
+    if (!contentType.startsWith('multipart/')) {
+      try {
+        const raw = await c.req.json()
+        if (raw && typeof raw === 'object' && 'enc_data' in raw) {
+          c.set('body', decryptData(raw.enc_data as string))
+        } else {
+          c.set('body', raw)
+        }
+      } catch { /* body 없음 또는 non-JSON — 그대로 통과 */ }
+    }
   }
   await next()
 }

@@ -14,6 +14,7 @@ import storage from './routes/storage.js'
 import admin from './routes/admin.js'
 import logging from './routes/logging.js'
 import transcripts from './routes/transcripts.js'
+import transcriptChunks from './routes/transcriptChunks.js'
 
 const app = new Hono()
 
@@ -69,6 +70,7 @@ app.route('/api/storage', storage)
 app.route('/api/admin', admin)
 app.route('/api/logging', logging)
 app.route('/api/transcripts', transcripts)
+app.route('/api/transcript-chunks', transcriptChunks)
 
 // ── 404 핸들러 ─────────────────────────────────────────────────────────
 

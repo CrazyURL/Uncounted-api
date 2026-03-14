@@ -51,6 +51,7 @@ export const openApiSpec = {
     { name: 'admin', description: '관리자 API (인증 필요)' },
     { name: 'logging', description: '이벤트/에러 로그 (인증 선택)' },
     { name: 'transcripts', description: 'STT 전사 데이터 (인증 필요)' },
+    { name: 'transcript-chunks', description: '청크별 전사 + 오디오 통계 (인증 필요)' },
   ],
   components: {
     securitySchemes: {
@@ -812,6 +813,71 @@ export const openApiSpec = {
           },
           401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           404: { description: '세션 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    '/api/sessions/{id}/diarization': {
+      patch: {
+        tags: ['sessions'],
+        summary: '화자분리 상태 수정',
+        description: '> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        security: [{ BearerAuth: [] }, { CookieAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['hasDiarization'],
+                properties: {
+                  hasDiarization: { type: 'boolean', description: '화자분리 완료 여부' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '수정 성공',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/Success' } } },
+          },
+          400: { description: '잘못된 요청', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    '/api/sessions/{id}/dup': {
+      patch: {
+        tags: ['sessions'],
+        summary: '중복 상태 수정',
+        description: '클라이언트 중복 감지 결과를 반영합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        security: [{ BearerAuth: [] }, { CookieAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['dupStatus'],
+                properties: {
+                  dupStatus: { type: 'string', enum: ['none', 'duplicate', 'representative'], description: '중복 상태' },
+                  dupGroupId: { type: 'string', format: 'uuid', nullable: true, description: '중복 그룹 ID' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '수정 성공',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/Success' } } },
+          },
+          400: { description: '잘못된 요청', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
     },
@@ -1908,6 +1974,79 @@ export const openApiSpec = {
         responses: {
           200: { description: '삭제 성공', content: { 'application/json': { schema: { $ref: '#/components/schemas/Success' } } } },
           401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    // ── Transcript Chunks ──────────────────────────────────────────────
+    '/api/transcript-chunks': {
+      post: {
+        tags: ['transcript-chunks'],
+        summary: '청크별 전사 + 오디오 통계 저장',
+        description: `세션 청크 단위의 전사 텍스트와 오디오 품질 지표를 저장합니다.
+\`session_id + chunk_index\` 충돌 시 upsert 처리됩니다.
+
+> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요`,
+        security: [{ BearerAuth: [] }, { CookieAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['sessionId', 'chunkIndex', 'startSec', 'endSec', 'durationSec'],
+                properties: {
+                  sessionId: { type: 'string', format: 'uuid', description: '세션 ID' },
+                  chunkIndex: { type: 'integer', description: '청크 순서 (1부터 시작)' },
+                  transcriptText: { type: 'string', nullable: true, description: '전사 텍스트' },
+                  startSec: { type: 'number', description: '청크 시작 시간 (초)' },
+                  endSec: { type: 'number', description: '청크 종료 시간 (초)' },
+                  durationSec: { type: 'number', description: '청크 길이 (초)' },
+                  audioStats: {
+                    type: 'object',
+                    nullable: true,
+                    description: '오디오 품질 지표',
+                    properties: {
+                      rms: { type: 'number', description: 'RMS 음량 (0~1)' },
+                      snrDb: { type: 'number', description: '신호 대 잡음비 (dB)' },
+                      silenceRatio: { type: 'number', description: '무음 구간 비율 (0~1)' },
+                      clippingRatio: { type: 'number', description: '클리핑 비율 (0~1)' },
+                    },
+                  },
+                  words: {
+                    type: 'array',
+                    nullable: true,
+                    description: '단어 타임스탬프 배열',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        word: { type: 'string' },
+                        start: { type: 'number' },
+                        end: { type: 'number' },
+                        probability: { type: 'number' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '저장 성공',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { ok: { type: 'boolean', example: true } },
+                },
+              },
+            },
+          },
+          400: { description: '필수 필드 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          500: { description: '서버 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
     },

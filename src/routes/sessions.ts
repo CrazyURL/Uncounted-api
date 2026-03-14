@@ -338,6 +338,37 @@ sessions.patch('/:id/diarization', async (c) => {
 })
 
 /**
+ * PATCH /sessions/:id/dup
+ * 중복 상태 업데이트 (클라이언트 측 중복 감지 결과 반영)
+ * Body: { dupStatus: 'none' | 'duplicate' | 'representative', dupGroupId?: string | null }
+ */
+sessions.patch('/:id/dup', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const { dupStatus, dupGroupId } = getBody<{
+    dupStatus: 'none' | 'duplicate' | 'representative'
+    dupGroupId?: string | null
+  }>(c)
+
+  if (!dupStatus) {
+    return c.json({ error: 'dupStatus is required' }, 400)
+  }
+
+  try {
+    const { error } = await supabaseAdmin
+      .from('sessions')
+      .update({ dup_status: dupStatus, dup_group_id: dupGroupId ?? null })
+      .eq('id', sessionId)
+      .eq('user_id', userId)
+
+    if (error) return c.json({ error: error.message }, 500)
+    return c.json({ data: { success: true } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
  * DELETE /sessions/:id
  * 세션 삭제
  */
