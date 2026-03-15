@@ -15,6 +15,7 @@ import admin from './routes/admin.js'
 import logging from './routes/logging.js'
 import transcripts from './routes/transcripts.js'
 import transcriptChunks from './routes/transcriptChunks.js'
+import sessionChunks from './routes/sessionChunks.js'
 
 const app = new Hono()
 
@@ -71,6 +72,7 @@ app.route('/api/admin', admin)
 app.route('/api/logging', logging)
 app.route('/api/transcripts', transcripts)
 app.route('/api/transcript-chunks', transcriptChunks)
+app.route('/api/session-chunks', sessionChunks)
 
 // ── 404 핸들러 ─────────────────────────────────────────────────────────
 
