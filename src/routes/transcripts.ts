@@ -29,7 +29,7 @@ type TranscriptWord = {
 transcripts.post('/:sessionId', async (c) => {
   const userId = c.get('userId') as string
   const sessionId = c.req.param('sessionId')
-  const { text, summary, words, source } = getBody<{ text: string; summary?: string; words?: unknown[]; source?: string }>(c)
+  const { text, summary, words } = getBody<{ text: string; summary?: string; words?: unknown[] }>(c)
 
   if (!text || typeof text !== 'string') {
     return c.json({ error: 'Text is required' }, 400)
@@ -45,7 +45,6 @@ transcripts.post('/:sessionId', async (c) => {
 
     if (summary) row.summary = summary
     if (words && Array.isArray(words)) row.words = words
-    if (source) row.source = source
 
     const { data, error } = await supabaseAdmin
       .from('transcripts')
