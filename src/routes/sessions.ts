@@ -226,6 +226,72 @@ sessions.post('/batch', async (c) => {
 })
 
 /**
+ * PATCH /sessions/:id
+ * STT 완료 후 transcript + audio_metrics 업데이트 (Android SttProcessingService 호출)
+ */
+sessions.patch('/:id', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const { transcript, audio_metrics } = getBody<{ transcript?: string; audio_metrics?: unknown }>(c)
+
+  try {
+    const updatePayload: Record<string, unknown> = {}
+    if (transcript !== undefined) updatePayload.transcript = transcript
+    if (audio_metrics !== undefined) updatePayload.audio_metrics = audio_metrics
+
+    if (Object.keys(updatePayload).length === 0) {
+      return c.json({ error: 'No fields to update' }, 400)
+    }
+
+    const { error } = await supabaseAdmin
+      .from('sessions')
+      .update(updatePayload)
+      .eq('id', sessionId)
+      .eq('user_id', userId)
+
+    if (error) return c.json({ error: error.message }, 500)
+    return c.json({ data: { ok: true } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * PUT /sessions/:id/label-status
+ * 자동 라벨링 신뢰도 + 상태 업데이트 (Android LabelApiClient / JS postSttPipeline 호출)
+ */
+sessions.put('/:id/label-status', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const { label_status, label_source, label_confidence } = getBody<{
+    label_status: 'AUTO' | 'RECOMMENDED' | 'REVIEW'
+    label_source?: string
+    label_confidence?: number
+  }>(c)
+
+  if (!label_status) {
+    return c.json({ error: 'label_status is required' }, 400)
+  }
+
+  try {
+    const { error } = await supabaseAdmin
+      .from('sessions')
+      .update({
+        label_status,
+        label_source: label_source ?? null,
+        label_confidence: label_confidence ?? null,
+      })
+      .eq('id', sessionId)
+      .eq('user_id', userId)
+
+    if (error) return c.json({ error: error.message }, 500)
+    return c.json({ data: { ok: true } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
  * PUT /sessions/:id/labels
  * 라벨 업데이트
  */
