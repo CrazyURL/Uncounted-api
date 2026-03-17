@@ -997,6 +997,100 @@ export const openApiSpec = {
         },
       },
     },
+    '/api/storage/audio/chunk': {
+      post: {
+        tags: ['storage'],
+        summary: 'WAV 청크 단위 업로드',
+        description: `WAV 파일을 청크 단위로 Supabase Storage에 업로드하고 \`session_chunks\` 테이블에 기록합니다.
+저장 경로: \`{userId}/{sessionId}/{sessionId}-001.wav\`
+
+**요청 형식**: \`multipart/form-data\`
+- \`wavFile\`: WAV 바이너리 (Blob)
+- \`meta\`: AES-256-GCM 암호화된 JSON`,
+        security: [{ BearerAuth: [] }, { CookieAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'multipart/form-data': {
+              schema: {
+                type: 'object',
+                required: ['wavFile', 'meta'],
+                properties: {
+                  wavFile: { type: 'string', format: 'binary', description: 'WAV 오디오 파일' },
+                  meta: {
+                    type: 'string',
+                    description: 'AES-256-GCM 암호화된 JSON 문자열. 복호화 후 형식: `{ sessionId, chunkIndex, startSec, endSec, durationSec, fileSizeBytes, text? }`',
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '업로드 성공',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    path: { type: 'string', description: 'Storage 저장 경로' },
+                    chunkId: { type: 'string', format: 'uuid', description: 'session_chunks 레코드 ID' },
+                  },
+                },
+              },
+            },
+          },
+          400: { description: 'wavFile 또는 meta 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          500: { description: '서버 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    '/api/storage/audio/chunks/{sessionId}': {
+      get: {
+        tags: ['storage'],
+        summary: '세션 청크 목록 조회',
+        description: '세션에 업로드된 WAV 청크 목록을 `chunk_index` 오름차순으로 반환합니다.',
+        security: [{ BearerAuth: [] }, { CookieAuth: [] }],
+        parameters: [
+          { name: 'sessionId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' }, description: '세션 ID' },
+        ],
+        responses: {
+          200: {
+            description: '청크 목록',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    chunks: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          id: { type: 'string', format: 'uuid' },
+                          chunk_index: { type: 'integer' },
+                          storage_path: { type: 'string' },
+                          start_sec: { type: 'number' },
+                          end_sec: { type: 'number' },
+                          duration_sec: { type: 'number' },
+                          upload_status: { type: 'string' },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          500: { description: '서버 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
     '/api/storage/user': {
       delete: {
         tags: ['storage'],

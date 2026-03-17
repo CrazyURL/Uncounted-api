@@ -21,9 +21,9 @@ sessionChunks.put('/:sessionId/:chunkIndex/labels', async (c) => {
     return c.json({ error: 'Missing labels or invalid chunkIndex' }, 400)
   }
 
-  const { error } = await supabaseAdmin
+  const { error, count } = await supabaseAdmin
     .from('session_chunks')
-    .update({ labels, updated_at: new Date().toISOString() })
+    .update({ labels, updated_at: new Date().toISOString() }, { count: 'exact' })
     .eq('session_id', sessionId)
     .eq('user_id', userId)
     .eq('chunk_index', chunkIndex)
@@ -31,6 +31,10 @@ sessionChunks.put('/:sessionId/:chunkIndex/labels', async (c) => {
   if (error) {
     console.error(`[sessionChunks] labels update error chunk=${chunkIndex}:`, error.message)
     return c.json({ error: error.message }, 500)
+  }
+  if (count === 0) {
+    console.warn(`[sessionChunks] labels update 0 rows | session=${sessionId} chunk=${chunkIndex}`)
+    return c.json({ error: 'Session chunk not found' }, 404)
   }
 
   return c.json({ ok: true })
