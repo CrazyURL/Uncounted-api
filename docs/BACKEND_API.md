@@ -20,9 +20,10 @@ uncounted-api/
 │       ├── auth.ts       # 인증 API
 │       ├── sessions.ts   # 세션 CRUD
 │       ├── storage.ts    # 스토리지 업로드/삭제
-│       ├── transcripts.ts# 트랜스크립트 관리
-│       ├── logging.ts    # 퍼널/에러 로깅
-│       └── admin.ts      # 어드민 API
+│       ├── transcripts.ts    # 트랜스크립트 관리
+│       ├── transcriptChunks.ts # 청크별 STT + 오디오 통계
+│       ├── logging.ts        # 퍼널/에러 로깅
+│       └── admin.ts          # 어드민 API
 ├── .env.example
 ├── tsconfig.json
 └── package.json
@@ -71,7 +72,7 @@ Cookie: uncounted_session={token}
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 PORT=3001
-CORS_ORIGIN=http://localhost:5173
+CORS_ORIGIN=http://localhost:5173,https://app.example.com  # 콤마로 복수 origin 지원
 ENCRYPTION_KEY=your-32-byte-hex-key
 ```
 
@@ -105,19 +106,23 @@ ENCRYPTION_KEY=your-32-byte-hex-key
 
 | Method | Endpoint | 설명 |
 |--------|----------|------|
-| GET | `/` | 세션 목록 조회 (페이징) |
+| GET | `/` | 세션 목록 조회 (페이징: `?page=1&limit=1000`) |
 | GET | `/:id` | 세션 상세 조회 |
 | POST | `/batch` | 세션 배치 저장 (최대 500건) |
 | PUT | `/:id/labels` | 라벨 업데이트 |
 | PUT | `/:id/visibility` | 공개 상태 업데이트 |
+| PATCH | `/:id/diarization` | 화자분리 상태 수정 (`hasDiarization: boolean`) |
+| PATCH | `/:id/dup` | 중복 상태 수정 (`dupStatus`, `dupGroupId`) |
 | DELETE | `/:id` | 세션 삭제 |
 
 ### Storage API `/api/storage`
 
 | Method | Endpoint | 설명 |
 |--------|----------|------|
-| POST | `/audio` | 정제된 오디오(WAV) 업로드 |
+| POST | `/audio` | 정제된 오디오(WAV) 전체 업로드 (base64) |
 | POST | `/meta` | 메타 JSONL 업로드 |
+| POST | `/audio/chunk` | WAV 청크 업로드 (multipart/form-data, `wavFile` + `meta`) |
+| GET | `/audio/chunks/:sessionId` | 세션 청크 목록 조회 |
 | POST | `/audio/signed-url` | 재생용 Signed URL 발급 |
 | DELETE | `/user` | 사용자 파일 전체 삭제 |
 
@@ -129,6 +134,12 @@ ENCRYPTION_KEY=your-32-byte-hex-key
 | GET | `/:sessionId` | 특정 트랜스크립트 조회 |
 | GET | `/` | 전체 트랜스크립트 목록 |
 | DELETE | `/:sessionId` | 트랜스크립트 삭제 |
+
+### Transcript Chunks API `/api/transcript-chunks`
+
+| Method | Endpoint | 인증 | 설명 |
+|--------|----------|------|------|
+| POST | `/` | 필수 | 청크별 STT 텍스트 + 오디오 통계 저장 (`session_id + chunk_index` upsert) |
 
 ### Logging API `/api/logging`
 
@@ -158,8 +169,14 @@ ENCRYPTION_KEY=your-32-byte-hex-key
 | POST | `/ledger-entries/update-status` | 원장 항목 상태 업데이트 (confirmed/withdrawable/paid) |
 | POST | `/ledger-entries/confirm-job` | 작업 확정 및 지급 분배 |
 | GET/POST | `/delivery-records` | 납품 기록 조회/배치 생성 (`clientId` 필수) |
-| GET | `/sessions` | 전체 세션 조회 (어드민) |
+| GET | `/sessions` | 전체 세션 조회 (필터·정렬·페이징) |
+| GET | `/users/stats` | 사용자별 세션 집계 (필터·페이징) |
 | GET | `/transcripts` | 전체 트랜스크립트 조회 (어드민) |
+| POST | `/transcripts/bulk` | 세션 ID 목록으로 트랜스크립트 일괄 조회 |
+| GET | `/transcript-ids` | 트랜스크립트 있는 session_id 목록 반환 |
+| GET | `/storage/wavs` | 전체 WAV 파일 목록 조회 (RLS 우회) |
+| POST | `/storage/signed-url` | Admin Signed URL 생성 (RLS 우회) |
+| POST | `/sync-audio-urls` | Storage WAV → sessions.audio_url 동기화 |
 | DELETE | `/reset-all` | 전체 데이터 초기화 ⚠️ |
 
 ## 🛠️ 기술 스택
