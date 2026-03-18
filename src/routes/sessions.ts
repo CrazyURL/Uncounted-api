@@ -95,7 +95,7 @@ function sessionToRow(s: any) {
     chunk_count: s.chunkCount,
     audio_url: s.audioUrl,
     call_record_id: s.callRecordId,
-    upload_status: s.uploadStatus ?? 'LOCAL',
+    // upload_status는 PATCH /api/sessions/:id 에서만 변경 (네이티브 처리 서비스)
     pii_status: s.piiStatus ?? 'CLEAR',
     share_scope: s.shareScope ?? 'PRIVATE',
     eligible_for_share: s.eligibleForShare ?? false,
@@ -232,24 +232,42 @@ sessions.post('/batch', async (c) => {
 sessions.patch('/:id', async (c) => {
   const userId = c.get('userId') as string
   const sessionId = c.req.param('id')
-  const { transcript, audio_metrics } = getBody<{ transcript?: string; audio_metrics?: unknown }>(c)
+  const { transcript, audio_metrics, upload_status } = getBody<{
+    transcript?: string
+    audio_metrics?: unknown
+    upload_status?: string
+  }>(c)
 
   try {
-    const updatePayload: Record<string, unknown> = {}
-    if (transcript !== undefined) updatePayload.transcript = transcript
-    if (audio_metrics !== undefined) updatePayload.audio_metrics = audio_metrics
-
-    if (Object.keys(updatePayload).length === 0) {
+    if (transcript === undefined && audio_metrics === undefined && upload_status === undefined) {
       return c.json({ error: 'No fields to update' }, 400)
     }
 
-    const { error } = await supabaseAdmin
-      .from('sessions')
-      .update(updatePayload)
-      .eq('id', sessionId)
-      .eq('user_id', userId)
+    // transcript / audio_metrics 업데이트 (조건 없음)
+    const updatePayload: Record<string, unknown> = {}
+    if (transcript !== undefined)    updatePayload.transcript    = transcript
+    if (audio_metrics !== undefined) updatePayload.audio_metrics = audio_metrics
 
-    if (error) return c.json({ error: error.message }, 500)
+    if (Object.keys(updatePayload).length > 0) {
+      const { error } = await supabaseAdmin
+        .from('sessions')
+        .update(updatePayload)
+        .eq('id', sessionId)
+        .eq('user_id', userId)
+      if (error) return c.json({ error: error.message }, 500)
+    }
+
+    // upload_status 별도 업데이트 — 이미 UPLOADED면 덮어씌우지 않음
+    if (upload_status !== undefined) {
+      await supabaseAdmin
+        .from('sessions')
+        .update({ upload_status })
+        .eq('id', sessionId)
+        .eq('user_id', userId)
+        .neq('upload_status', 'UPLOADED')
+      // 0 rows affected (이미 UPLOADED) 는 정상 — 에러 무시
+    }
+
     return c.json({ data: { ok: true } })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
