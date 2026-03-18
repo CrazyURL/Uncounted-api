@@ -1059,6 +1059,64 @@ admin.post('/storage/signed-url', async (c) => {
   }
 })
 
+// ── Session Chunks: 청크 Signed URL 일괄 반환 ────────────────────────
+
+/**
+ * POST /admin/session-chunks/batch-signed-urls
+ * session_chunks 테이블에서 세션별 청크 목록 조회 후 Signed URL 일괄 생성
+ * Body: { sessionIds: string[] }
+ * Response: { sessionId, minuteIndex, storagePath, signedUrl, durationSeconds }[]
+ */
+admin.post('/session-chunks/batch-signed-urls', async (c) => {
+  const { sessionIds } = getBody<{ sessionIds: string[] }>(c)
+
+  if (!Array.isArray(sessionIds) || sessionIds.length === 0) {
+    return c.json({ error: 'sessionIds must be a non-empty array' }, 400)
+  }
+
+  try {
+    // 1. session_chunks 조회
+    const { data: chunks, error: dbError } = await supabaseAdmin
+      .from('session_chunks')
+      .select('session_id, chunk_index, storage_path, duration_sec')
+      .in('session_id', sessionIds)
+      .order('session_id', { ascending: true })
+      .order('chunk_index', { ascending: true })
+
+    if (dbError) return c.json({ error: dbError.message }, 500)
+    if (!chunks || chunks.length === 0) return c.json({ data: [] })
+
+    // 2. storage_path 목록 추출 → createSignedUrls 배치 호출
+    const paths = chunks.map((r) => r.storage_path as string)
+    const { data: signedData, error: storageError } = await supabaseAdmin.storage
+      .from(AUDIO_BUCKET)
+      .createSignedUrls(paths, 600)
+
+    if (storageError) return c.json({ error: storageError.message }, 500)
+
+    // 3. path → signedUrl 매핑
+    const urlMap = new Map<string, string>()
+    for (const entry of signedData ?? []) {
+      if (entry.signedUrl && entry.path) urlMap.set(entry.path, entry.signedUrl)
+    }
+
+    // 4. 응답 조립 (signedUrl 없는 청크 제외)
+    const result = chunks
+      .filter((r) => urlMap.has(r.storage_path as string))
+      .map((r) => ({
+        sessionId: r.session_id as string,
+        minuteIndex: r.chunk_index as number,
+        storagePath: r.storage_path as string,
+        signedUrl: urlMap.get(r.storage_path as string)!,
+        durationSeconds: r.duration_sec as number,
+      }))
+
+    return c.json({ data: result })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
 // ── Admin Transcript: 필터용 ID 목록 + 일괄 조회 ─────────────────────
 
 /**

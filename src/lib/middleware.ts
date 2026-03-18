@@ -74,7 +74,7 @@ export async function authMiddleware(c: Context, next: Next) {
  * 선택적 인증 미들웨어 (토큰 있으면 검증, 없으면 통과)
  * Bearer 토큰 또는 쿠키 모두 지원
  */
-function truncateArrays(value: unknown, limit = 10): unknown {
+function truncateArrays(value: unknown, limit = 5): unknown {
   if (Array.isArray(value)) {
     const sliced = value.slice(0, limit).map(item => truncateArrays(item, limit))
     if (value.length > limit) {
