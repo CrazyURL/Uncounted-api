@@ -24,6 +24,9 @@ export async function bodyDecryptMiddleware(c: Context, next: Next) {
         } else {
           c.set('body', raw)
         }
+        if (process.env.NODE_ENV !== 'production') {
+          console.log('[REQ BODY]', JSON.stringify(c.get('body'), null, 2))
+        }
       } catch { /* body 없음 또는 non-JSON — 그대로 통과 */ }
     }
   }
@@ -71,6 +74,37 @@ export async function authMiddleware(c: Context, next: Next) {
  * 선택적 인증 미들웨어 (토큰 있으면 검증, 없으면 통과)
  * Bearer 토큰 또는 쿠키 모두 지원
  */
+function truncateArrays(value: unknown, limit = 10): unknown {
+  if (Array.isArray(value)) {
+    const sliced = value.slice(0, limit).map(item => truncateArrays(item, limit))
+    if (value.length > limit) {
+      return [...sliced, `... (${value.length - limit} more)`]
+    }
+    return sliced
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, truncateArrays(v, limit)])
+    )
+  }
+  return value
+}
+
+/**
+ * 개발 환경 전용 — 응답 바디를 콘솔에 출력한다.
+ * 배열 항목이 10개를 초과하면 처음 10개만 표시한다.
+ * production에서는 아무 동작도 하지 않는다.
+ */
+export async function devBodyLogger(c: Context, next: Next) {
+  await next()
+  if (process.env.NODE_ENV === 'production') return
+  try {
+    const cloned = c.res.clone()
+    const body = await cloned.json()
+    console.log('[RES BODY]', JSON.stringify(truncateArrays(body), null, 2))
+  } catch { /* non-JSON 응답은 스킵 */ }
+}
+
 export async function optionalAuthMiddleware(c: Context, next: Next) {
   const authHeader = c.req.header('Authorization')
   const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null

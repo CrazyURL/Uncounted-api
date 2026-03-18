@@ -6,7 +6,7 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
 import { swaggerUI } from '@hono/swagger-ui'
-import { bodyDecryptMiddleware } from './lib/middleware.js'
+import { bodyDecryptMiddleware, devBodyLogger } from './lib/middleware.js'
 import { openApiSpec } from './openapi.js'
 import auth from './routes/auth.js'
 import sessions from './routes/sessions.js'
@@ -42,6 +42,9 @@ app.use('/*', logger())
 
 // request body 복호화 (enc_data → plaintext body)
 app.use('/api/*', bodyDecryptMiddleware)
+
+// 개발 환경 전용 — request/response body 로깅
+app.use('/api/*', devBodyLogger)
 
 // ── 헬스 체크 ──────────────────────────────────────────────────────────
 
