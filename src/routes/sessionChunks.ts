@@ -37,6 +37,18 @@ sessionChunks.put('/:sessionId/:chunkIndex/labels', async (c) => {
     return c.json({ error: 'Session chunk not found' }, 404)
   }
 
+  // sessions.labels가 NULL인 경우에만 자동 라벨로 채움 (사용자 확정 라벨 보호)
+  const { error: sessionLabelError } = await supabaseAdmin
+    .from('sessions')
+    .update({ labels, label_source: 'auto', updated_at: new Date().toISOString() })
+    .eq('id', sessionId)
+    .eq('user_id', userId)
+    .is('labels', null)
+
+  if (sessionLabelError) {
+    console.warn(`[sessionChunks] session labels 자동 업데이트 실패 | session=${sessionId}:`, sessionLabelError.message)
+  }
+
   return c.json({ ok: true })
 })
 
