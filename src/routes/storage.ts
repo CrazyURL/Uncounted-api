@@ -27,7 +27,7 @@ storage.post('/audio', async (c) => {
     return c.json({ error: 'Missing sessionId or wavData' }, 400)
   }
 
-  const path = `${userId}/${sessionId}.wav`
+  const path = `${userId}/${sessionId}/${sessionId}.wav`
 
   try {
     // base64 디코딩
