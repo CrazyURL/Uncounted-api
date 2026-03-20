@@ -52,6 +52,8 @@ export const openApiSpec = {
     { name: 'logging', description: '이벤트/에러 로그 (인증 선택)' },
     { name: 'transcripts', description: 'STT 전사 데이터 (인증 필요)' },
     { name: 'transcript-chunks', description: '청크별 전사 + 오디오 통계 (인증 필요)' },
+    { name: 'session-chunks', description: '청크별 세션 라벨 (인증 필요)' },
+    { name: 'user', description: '사용자 프로필/동의 관리 (인증 필요)' },
   ],
   components: {
     securitySchemes: {
@@ -116,16 +118,28 @@ export const openApiSpec = {
           visibilityChangedAt: { type: 'string', format: 'date-time', nullable: true },
           status: { type: 'string', enum: ['uploaded', 'processing', 'done', 'error'] },
           isPiiCleaned: { type: 'boolean' },
+          hasDiarization: { type: 'boolean' },
           chunkCount: { type: 'integer' },
           audioUrl: { $ref: '#/components/schemas/EncryptedString' },
-          dupStatus: { type: 'string', enum: ['none', 'duplicate', 'original'] },
+          callRecordId: { $ref: '#/components/schemas/EncryptedString' },
+          dupStatus: { type: 'string', enum: ['none', 'duplicate', 'representative'] },
           dupGroupId: { $ref: '#/components/schemas/EncryptedString' },
           dupConfidence: { type: 'number', nullable: true },
+          fileHashSha256: { $ref: '#/components/schemas/EncryptedString' },
+          audioFingerprint: { $ref: '#/components/schemas/EncryptedString' },
+          dupRepresentative: { type: 'boolean', nullable: true },
           uploadStatus: { type: 'string', enum: ['LOCAL', 'UPLOADED', 'FAILED'] },
           piiStatus: { type: 'string', enum: ['CLEAR', 'PENDING', 'FLAGGED'] },
           shareScope: { type: 'string', enum: ['PRIVATE', 'PUBLIC', 'TEAM'] },
           eligibleForShare: { type: 'boolean' },
+          reviewAction: { type: 'string', nullable: true },
+          lockReason: { type: 'object', nullable: true },
+          lockStartMs: { type: 'number', nullable: true },
+          lockEndMs: { type: 'number', nullable: true },
+          localSanitizedWavPath: { $ref: '#/components/schemas/EncryptedString' },
+          localSanitizedTextPreview: { $ref: '#/components/schemas/EncryptedString' },
           consentStatus: { type: 'string', enum: ['locked', 'consented', 'denied'] },
+          consentedAt: { type: 'string', format: 'date-time', nullable: true },
           verifiedSpeaker: { type: 'boolean' },
           userId: { $ref: '#/components/schemas/EncryptedString' },
           peerId: { $ref: '#/components/schemas/EncryptedString' },
@@ -725,7 +739,7 @@ export const openApiSpec = {
       get: {
         tags: ['sessions'],
         summary: '세션 상세 조회',
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
           200: {
             description: '세션 상세',
@@ -742,12 +756,73 @@ export const openApiSpec = {
           404: { description: '세션 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
+      patch: {
+        tags: ['sessions'],
+        summary: '세션 부분 수정 (STT 처리)',
+        description: 'transcript, audio_metrics, upload_status를 개별 업데이트합니다. upload_status는 현재 값이 UPLOADED가 아닐 때만 변경됩니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  transcript: { type: 'string', description: '전사 텍스트' },
+                  audio_metrics: { type: 'object', description: '오디오 메트릭' },
+                  upload_status: { type: 'string', enum: ['LOCAL', 'UPLOADED', 'FAILED'] },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '수정 성공',
+            content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object', properties: { ok: { type: 'boolean' } } } } } } },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          500: { description: '서버 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
       delete: {
         tags: ['sessions'],
         summary: '세션 삭제',
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
           200: { description: '삭제 성공', content: { 'application/json': { schema: { type: 'object', properties: { success: { type: 'boolean' } } } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/sessions/{id}/label-status': {
+      put: {
+        tags: ['sessions'],
+        summary: '세션 레이블 상태 수정',
+        description: '> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['label_status'],
+                properties: {
+                  label_status: { type: 'string', enum: ['AUTO', 'RECOMMENDED', 'REVIEW'] },
+                  label_source: { type: 'string', description: 'auto | user | user_confirmed | multi_confirmed' },
+                  label_confidence: { type: 'number', minimum: 0, maximum: 1 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '수정 성공',
+            content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object', properties: { ok: { type: 'boolean' } } } } } } },
+          },
+          400: { description: '잘못된 요청', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
@@ -1537,10 +1612,23 @@ export const openApiSpec = {
       get: {
         tags: ['admin'],
         summary: '전체 세션 조회 (어드민)',
-        description: '사용자 필터 없이 전체 세션을 조회합니다.',
+        description: '사용자 필터 없이 전체 세션을 조회합니다. 다양한 필터를 조합할 수 있습니다.',
         parameters: [
-          { name: 'limit', in: 'query', schema: { type: 'integer', default: 1000, maximum: 2000 } },
+          { name: 'limit', in: 'query', schema: { type: 'integer', default: 100, maximum: 200 } },
           { name: 'offset', in: 'query', schema: { type: 'integer', default: 0 } },
+          { name: 'domains', in: 'query', schema: { type: 'array', items: { type: 'string' } }, description: '도메인 필터 (복수 선택)' },
+          { name: 'qualityGrades', in: 'query', schema: { type: 'array', items: { type: 'string', enum: ['A', 'B', 'C'] } } },
+          { name: 'labelStatus', in: 'query', schema: { type: 'string', enum: ['labeled', 'unlabeled'] } },
+          { name: 'publicStatus', in: 'query', schema: { type: 'string', enum: ['public', 'private'] } },
+          { name: 'piiCleanedOnly', in: 'query', schema: { type: 'string', enum: ['true'] } },
+          { name: 'hasAudioUrl', in: 'query', schema: { type: 'string', enum: ['true'] } },
+          { name: 'diarizationStatus', in: 'query', schema: { type: 'string', enum: ['done', 'none'] } },
+          { name: 'transcriptStatus', in: 'query', schema: { type: 'string', enum: ['done', 'none'] } },
+          { name: 'uploadStatuses', in: 'query', schema: { type: 'array', items: { type: 'string' } } },
+          { name: 'dateFrom', in: 'query', schema: { type: 'string', format: 'date' } },
+          { name: 'dateTo', in: 'query', schema: { type: 'string', format: 'date' } },
+          { name: 'sortBy', in: 'query', schema: { type: 'string', enum: ['date', 'qaScore', 'duration'], default: 'date' } },
+          { name: 'sortDir', in: 'query', schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' } },
         ],
         responses: {
           200: {
@@ -2141,6 +2229,367 @@ export const openApiSpec = {
           400: { description: '필수 필드 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
           500: { description: '서버 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    // ── Session Chunks ───────────────────────────────────────────────
+    '/api/session-chunks/{sessionId}/{chunkIndex}/labels': {
+      put: {
+        tags: ['session-chunks'],
+        summary: '청크 라벨 업데이트',
+        description: '특정 청크의 labels를 업데이트합니다. sessions.labels가 NULL인 경우 자동으로 동기화됩니다 (사용자 확정 라벨 보호).\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        security: [{ BearerAuth: [] }, { CookieAuth: [] }],
+        parameters: [
+          { name: 'sessionId', in: 'path', required: true, schema: { type: 'string' }, description: '세션 ID' },
+          { name: 'chunkIndex', in: 'path', required: true, schema: { type: 'integer' }, description: '청크 인덱스' },
+        ],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['labels'],
+                properties: {
+                  labels: { type: 'object', description: '레이블 데이터 (tone, noise, purpose 등)' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '업데이트 성공',
+            content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' } } } } },
+          },
+          400: { description: '파라미터 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          404: { description: '청크 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    // ── User ─────────────────────────────────────────────────────────
+    '/api/user/consent': {
+      get: {
+        tags: ['user'],
+        summary: '사용자 동의 상태 조회',
+        description: '현재 사용자의 데이터 수집/제3자 제공/철회 동의 상태를 조회합니다.',
+        security: [{ BearerAuth: [] }, { CookieAuth: [] }],
+        responses: {
+          200: {
+            description: '동의 상태',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    collect_consent: { type: 'boolean' },
+                    collect_consent_updated_at: { type: 'string', format: 'date-time', nullable: true },
+                    third_party_consent: { type: 'boolean' },
+                    third_party_consent_updated_at: { type: 'string', format: 'date-time', nullable: true },
+                    consent_withdrawn: { type: 'boolean' },
+                    consent_withdrawn_updated_at: { type: 'string', format: 'date-time', nullable: true },
+                    sku_consents: { type: 'object', additionalProperties: { type: 'boolean' } },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+      put: {
+        tags: ['user'],
+        summary: '사용자 동의 상태 수정',
+        description: '부분 업데이트 가능. 기존 값과 병합됩니다. 프로필 행이 없으면 자동 생성.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        security: [{ BearerAuth: [] }, { CookieAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  collect_consent: { type: 'boolean' },
+                  third_party_consent: { type: 'boolean' },
+                  consent_withdrawn: { type: 'boolean' },
+                  sku_consents: { type: 'object', additionalProperties: { type: 'boolean' } },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '수정된 동의 상태',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: { type: 'object', description: '병합된 동의 필드 + updated_at' },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          500: { description: '서버 오류', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    // ── Admin - Additional endpoints ─────────────────────────────────
+    '/api/admin/users/stats': {
+      get: {
+        tags: ['admin'],
+        summary: '사용자별 통계 (어드민)',
+        description: '사용자별 세션 수, 총 시간, 평균 QA, 라벨 비율, 품질 분포를 조회합니다.',
+        parameters: [
+          { name: 'limit', in: 'query', schema: { type: 'integer', default: 100, maximum: 200 } },
+          { name: 'offset', in: 'query', schema: { type: 'integer', default: 0 } },
+          { name: 'sortBy', in: 'query', schema: { type: 'string', enum: ['sessionCount', 'totalDuration', 'avgQaScore'] } },
+          { name: 'sortDir', in: 'query', schema: { type: 'string', enum: ['asc', 'desc'], default: 'desc' } },
+        ],
+        responses: {
+          200: {
+            description: '사용자 통계 목록',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          userId: { $ref: '#/components/schemas/EncryptedString' },
+                          displayId: { type: 'string' },
+                          sessionCount: { type: 'integer' },
+                          totalDurationHours: { type: 'number' },
+                          avgQaScore: { type: 'number' },
+                          labeledRatio: { type: 'number' },
+                          qualityDistribution: {
+                            type: 'object',
+                            properties: { A: { type: 'integer' }, B: { type: 'integer' }, C: { type: 'integer' } },
+                          },
+                          publicCount: { type: 'integer' },
+                        },
+                      },
+                    },
+                    count: { type: 'integer' },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/transcript-ids': {
+      get: {
+        tags: ['admin'],
+        summary: '전사 보유 세션 ID 목록',
+        description: '전사 데이터가 있는 세션 ID 목록을 반환합니다.',
+        responses: {
+          200: {
+            description: '세션 ID 목록',
+            content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'array', items: { type: 'string' } } } } } },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/transcripts/bulk': {
+      post: {
+        tags: ['admin'],
+        summary: '전사 데이터 일괄 조회',
+        description: '세션 ID 목록으로 전사 데이터를 일괄 조회합니다. 배치당 500건.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['sessionIds'],
+                properties: {
+                  sessionIds: { type: 'array', items: { type: 'string' } },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '전사 데이터 목록',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          sessionId: { type: 'string' },
+                          text: { type: 'string' },
+                          words: { type: 'array', items: { type: 'object' } },
+                          summary: { type: 'string' },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          400: { description: 'sessionIds 누락', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/storage/wavs': {
+      get: {
+        tags: ['admin'],
+        summary: '전체 WAV 파일 목록 (어드민)',
+        description: 'sanitized-audio 버킷의 모든 WAV 파일을 반환합니다.',
+        responses: {
+          200: {
+            description: 'WAV 파일 목록',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          userId: { type: 'string' },
+                          sessionId: { type: 'string' },
+                          path: { type: 'string' },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/storage/signed-url': {
+      post: {
+        tags: ['admin'],
+        summary: '서명 URL 발급 (어드민)',
+        description: '어드민용 스토리지 서명 URL.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['storagePath'],
+                properties: {
+                  storagePath: { type: 'string' },
+                  expiresIn: { type: 'integer', default: 300 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '서명 URL',
+            content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object', properties: { signedUrl: { type: 'string' } } } } } } },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/session-chunks/batch-signed-urls': {
+      post: {
+        tags: ['admin'],
+        summary: '세션 청크 일괄 서명 URL',
+        description: '세션 ID 목록으로 청크별 서명 URL을 일괄 발급합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['sessionIds'],
+                properties: {
+                  sessionIds: { type: 'array', items: { type: 'string' } },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '청크별 서명 URL 목록',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          sessionId: { type: 'string' },
+                          minuteIndex: { type: 'integer' },
+                          storagePath: { type: 'string' },
+                          signedUrl: { type: 'string' },
+                          durationSeconds: { type: 'number' },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/sync-audio-urls': {
+      post: {
+        tags: ['admin'],
+        summary: '오디오 URL 동기화',
+        description: '스토리지를 스캔하여 sessions.audio_url이 NULL인 세션의 URL을 자동 설정합니다.',
+        responses: {
+          200: {
+            description: '동기화 결과',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: {
+                      type: 'object',
+                      properties: {
+                        updated: { type: 'integer' },
+                        total: { type: 'integer' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
     },
