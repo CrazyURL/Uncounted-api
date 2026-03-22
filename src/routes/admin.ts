@@ -5,6 +5,13 @@ import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, getBody } from '../lib/middleware.js'
 import { encryptId } from '../lib/crypto.js'
+import {
+  listObjects,
+  listFolders,
+  getSignedUrl,
+  getSignedUrls,
+  S3_AUDIO_BUCKET,
+} from '../lib/s3.js'
 
 const admin = new Hono()
 
@@ -990,39 +997,28 @@ admin.post('/delivery-records', async (c) => {
 
 // ── Admin Storage: WAV 목록 조회 ────────────────────────────────────────
 
-const AUDIO_BUCKET = 'sanitized-audio'
-
 /**
  * GET /admin/storage/wavs
- * 전체 유저 WAV 목록 조회 (어드민 전용, RLS 우회)
+ * 전체 유저 WAV 목록 조회 (어드민 전용)
  */
 admin.get('/storage/wavs', async (c) => {
   try {
-    const { data: userFolders, error } = await supabaseAdmin.storage
-      .from(AUDIO_BUCKET)
-      .list('', { limit: 1000 })
-
-    if (error || !userFolders) {
-      return c.json({ error: error?.message ?? 'Failed to list storage' }, 500)
-    }
+    // 최상위 "폴더" (userId) 목록 조회
+    const userPrefixes = await listFolders(S3_AUDIO_BUCKET, '')
 
     type StorageWavEntry = { userId: string; sessionId: string; path: string }
     const result: StorageWavEntry[] = []
 
-    for (const folder of userFolders) {
-      if (!folder.name) continue
-      const userId = folder.name
+    for (const prefix of userPrefixes) {
+      const userId = prefix.replace(/\/$/, '')
 
-      const { data: files } = await supabaseAdmin.storage
-        .from(AUDIO_BUCKET)
-        .list(userId, { limit: 10000 })
-
-      if (!files) continue
+      const files = await listObjects(S3_AUDIO_BUCKET, prefix, 10000)
 
       for (const file of files) {
-        if (!file.name.endsWith('.wav')) continue
-        const sessionId = file.name.replace('.wav', '')
-        result.push({ userId, sessionId, path: `${userId}/${file.name}` })
+        if (!file.key.endsWith('.wav')) continue
+        const fileName = file.key.split('/').pop() ?? ''
+        const sessionId = fileName.replace('.wav', '')
+        result.push({ userId, sessionId, path: file.key })
       }
     }
 
@@ -1045,15 +1041,9 @@ admin.post('/storage/signed-url', async (c) => {
   }
 
   try {
-    const { data, error } = await supabaseAdmin.storage
-      .from(AUDIO_BUCKET)
-      .createSignedUrl(storagePath, expiresIn)
+    const signedUrl = await getSignedUrl(S3_AUDIO_BUCKET, storagePath, expiresIn)
 
-    if (error || !data?.signedUrl) {
-      return c.json({ error: error?.message ?? 'Failed to create signed URL' }, 500)
-    }
-
-    return c.json({ data: { signedUrl: data.signedUrl } })
+    return c.json({ data: { signedUrl } })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
@@ -1086,19 +1076,9 @@ admin.post('/session-chunks/batch-signed-urls', async (c) => {
     if (dbError) return c.json({ error: dbError.message }, 500)
     if (!chunks || chunks.length === 0) return c.json({ data: [] })
 
-    // 2. storage_path 목록 추출 → createSignedUrls 배치 호출
+    // 2. storage_path 목록 추출 → presigned URL 배치 생성
     const paths = chunks.map((r) => r.storage_path as string)
-    const { data: signedData, error: storageError } = await supabaseAdmin.storage
-      .from(AUDIO_BUCKET)
-      .createSignedUrls(paths, 600)
-
-    if (storageError) return c.json({ error: storageError.message }, 500)
-
-    // 3. path → signedUrl 매핑
-    const urlMap = new Map<string, string>()
-    for (const entry of signedData ?? []) {
-      if (entry.signedUrl && entry.path) urlMap.set(entry.path, entry.signedUrl)
-    }
+    const urlMap = await getSignedUrls(S3_AUDIO_BUCKET, paths, 600)
 
     // 4. 응답 조립 (signedUrl 없는 청크 제외)
     const result = chunks
@@ -1187,31 +1167,20 @@ admin.post('/transcripts/bulk', async (c) => {
  */
 admin.post('/sync-audio-urls', async (c) => {
   try {
-    // 1. Storage에서 WAV 목록 조회
-    const { data: userFolders, error: listErr } = await supabaseAdmin.storage
-      .from(AUDIO_BUCKET)
-      .list('', { limit: 1000 })
-
-    if (listErr || !userFolders) {
-      return c.json({ error: listErr?.message ?? 'Failed to list storage' }, 500)
-    }
+    // 1. S3에서 WAV 목록 조회
+    const userPrefixes = await listFolders(S3_AUDIO_BUCKET, '')
 
     type WavEntry = { sessionId: string; path: string }
     const wavEntries: WavEntry[] = []
 
-    for (const folder of userFolders) {
-      if (!folder.name) continue
-      const userId = folder.name
+    for (const prefix of userPrefixes) {
+      const files = await listObjects(S3_AUDIO_BUCKET, prefix, 10000)
 
-      const { data: files } = await supabaseAdmin.storage
-        .from(AUDIO_BUCKET)
-        .list(userId, { limit: 10000 })
-
-      if (!files) continue
       for (const file of files) {
-        if (!file.name.endsWith('.wav')) continue
-        const sessionId = file.name.replace('.wav', '')
-        wavEntries.push({ sessionId, path: `${userId}/${file.name}` })
+        if (!file.key.endsWith('.wav')) continue
+        const fileName = file.key.split('/').pop() ?? ''
+        const sessionId = fileName.replace('.wav', '')
+        wavEntries.push({ sessionId, path: file.key })
       }
     }
 

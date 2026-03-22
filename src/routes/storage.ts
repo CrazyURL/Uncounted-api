@@ -1,18 +1,23 @@
 // ── Storage API Routes ─────────────────────────────────────────────────
-// Supabase Storage 업로드/삭제 로직을 백엔드 API로 분리
+// S3 호환 스토리지 (iwinv) 업로드/삭제 로직
 
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, getBody } from '../lib/middleware.js'
 import { decryptData } from '../lib/crypto.js'
+import {
+  uploadObject,
+  deleteObjects,
+  listObjects,
+  getSignedUrl,
+  S3_AUDIO_BUCKET,
+  S3_META_BUCKET,
+} from '../lib/s3.js'
 
 const storage = new Hono()
 
 // 모든 라우트에 인증 필수
 storage.use('/*', authMiddleware)
-
-const AUDIO_BUCKET = 'sanitized-audio'
-const META_BUCKET = 'meta-jsonl'
 
 /**
  * POST /storage/audio
@@ -37,16 +42,7 @@ storage.post('/audio', async (c) => {
       bytes[i] = binaryString.charCodeAt(i)
     }
 
-    const { error } = await supabaseAdmin.storage
-      .from(AUDIO_BUCKET)
-      .upload(path, bytes, {
-        contentType: 'audio/wav',
-        upsert: true,
-      })
-
-    if (error) {
-      return c.json({ error: error.message }, 500)
-    }
+    await uploadObject(S3_AUDIO_BUCKET, path, bytes, 'audio/wav')
 
     return c.json({ path })
   } catch (err: any) {
@@ -70,16 +66,7 @@ storage.post('/meta', async (c) => {
   const path = `${userId}/${batchId}.jsonl`
 
   try {
-    const { error } = await supabaseAdmin.storage
-      .from(META_BUCKET)
-      .upload(path, content, {
-        contentType: 'application/x-ndjson',
-        upsert: true,
-      })
-
-    if (error) {
-      return c.json({ error: error.message }, 500)
-    }
+    await uploadObject(S3_META_BUCKET, path, content, 'application/x-ndjson')
 
     return c.json({ path })
   } catch (err: any) {
@@ -128,14 +115,8 @@ storage.post('/audio/chunk', async (c) => {
     // File → Uint8Array (base64 변환 없음)
     const bytes = new Uint8Array(await wavFile.arrayBuffer())
 
-    // Supabase Storage 업로드
-    const { error: uploadError } = await supabaseAdmin.storage
-      .from(AUDIO_BUCKET)
-      .upload(storagePath, bytes, { contentType: 'audio/wav', upsert: true })
-
-    if (uploadError) {
-      return c.json({ error: uploadError.message }, 500)
-    }
+    // S3 업로드
+    await uploadObject(S3_AUDIO_BUCKET, storagePath, bytes, 'audio/wav')
 
     // session_chunks INSERT (재시도 시 upsert)
     const { data: chunkRow, error: dbError } = await supabaseAdmin
@@ -207,15 +188,9 @@ storage.post('/audio/signed-url', async (c) => {
   }
 
   try {
-    const { data, error } = await supabaseAdmin.storage
-      .from(AUDIO_BUCKET)
-      .createSignedUrl(storagePath, expiresIn)
+    const signedUrl = await getSignedUrl(S3_AUDIO_BUCKET, storagePath, expiresIn)
 
-    if (error || !data?.signedUrl) {
-      return c.json({ error: error?.message ?? 'Failed to create signed URL' }, 500)
-    }
-
-    return c.json({ signedUrl: data.signedUrl })
+    return c.json({ signedUrl })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
@@ -230,26 +205,18 @@ storage.delete('/user', async (c) => {
 
   try {
     // 오디오 파일 삭제
-    const { data: audioFiles } = await supabaseAdmin.storage
-      .from(AUDIO_BUCKET)
-      .list(userId)
-
-    if (audioFiles && audioFiles.length > 0) {
-      const audioPaths = audioFiles.map((f) => `${userId}/${f.name}`)
-      await supabaseAdmin.storage.from(AUDIO_BUCKET).remove(audioPaths)
+    const audioFiles = await listObjects(S3_AUDIO_BUCKET, `${userId}/`)
+    if (audioFiles.length > 0) {
+      await deleteObjects(S3_AUDIO_BUCKET, audioFiles.map((f) => f.key))
     }
 
     // 메타 파일 삭제
-    const { data: metaFiles } = await supabaseAdmin.storage
-      .from(META_BUCKET)
-      .list(userId)
-
-    if (metaFiles && metaFiles.length > 0) {
-      const metaPaths = metaFiles.map((f) => `${userId}/${f.name}`)
-      await supabaseAdmin.storage.from(META_BUCKET).remove(metaPaths)
+    const metaFiles = await listObjects(S3_META_BUCKET, `${userId}/`)
+    if (metaFiles.length > 0) {
+      await deleteObjects(S3_META_BUCKET, metaFiles.map((f) => f.key))
     }
 
-    return c.json({ success: true, deletedFiles: (audioFiles?.length ?? 0) + (metaFiles?.length ?? 0) })
+    return c.json({ success: true, deletedFiles: audioFiles.length + metaFiles.length })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }

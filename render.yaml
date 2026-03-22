@@ -18,7 +18,7 @@ services:
       - key: ENCRYPTION_KEY
         sync: false
       - key: CORS_ORIGIN
-        value: http://my-ip-domain:5173,http://my-ip-domain:15173,http://localhost:5173,http://localhost:15173
+        value: https://uncounted-admin-dev.onrender.com,http://localhost:5173,http://localhost:15173
 
   - type: web
     name: uncounted-api-prod
@@ -39,4 +39,4 @@ services:
       - key: ENCRYPTION_KEY
         sync: false
       - key: CORS_ORIGIN
-        value: http://my-ip-domain:5173,http://my-ip-domain:15173,http://localhost:5173,http://localhost:15173
+        value: https://uncounted-admin-prod.onrender.com

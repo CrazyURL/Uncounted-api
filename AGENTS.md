@@ -76,6 +76,48 @@ config/
 요청 → CORS → Logger → bodyDecryptMiddleware(/api/*) → authMiddleware(라우트별) → 핸들러
 ```
 
+## 코딩 규칙
+
+- **불변성**: 객체를 직접 수정하지 말고, 스프레드 연산자로 새 객체를 생성할 것
+- **파일 크기**: 800줄 이하 유지, 함수는 50줄 이하
+- **에러 처리**: try/catch로 모든 에러를 처리하고, 사용자 친화적 메시지 반환
+- **입력 검증**: 시스템 경계에서 반드시 검증 (zod 등)
+- **시크릿**: 절대 하드코딩하지 말 것. 항상 `process.env` 사용
+- **수술적 변경**: 요청된 변경만 수행. 인접 코드 "개선" 금지
+- **커밋 포맷**: `<type>: <description>` (feat, fix, refactor, docs, test, chore, perf, ci)
+
+## 암호화 패턴
+
+| 방향 | 형식 | 처리 |
+|------|------|------|
+| 요청 | `{ enc_data: "<base64url>" }` | `bodyDecryptMiddleware`가 자동 복호화 → `c.get('body')` |
+| 응답 | `base64url(IV\|AuthTag\|Ciphertext)@enc_uncounted` | `encryptId()`로 민감 필드 암호화 후 반환 |
+
+## 인증
+
+- **헤더**: `Authorization: Bearer {JWT}`
+- **쿠키**: `uncounted_session` (httpOnly, SameSite=Lax, 1h) / `uncounted_refresh` (90d)
+- `authMiddleware` — 필수 (401 반환)
+- `optionalAuthMiddleware` — 선택적 (없어도 통과)
+- 어드민: `app_metadata.role === 'admin'` 확인
+
+## 주요 패턴
+
+```typescript
+// 라우트에서 body 읽기
+const body = getBody<MyType>(c)
+
+// ID 암호화 응답
+return c.json({ id: encryptId(rawId), ... })
+
+// 인증 필요한 라우트
+sessions.use('/*', authMiddleware)
+
+// 세션 타입 변환 (snake_case ↔ camelCase)
+const session = sessionFromRow(dbRow)  // DB → API
+const row = sessionToRow(input)        // API → DB
+```
+
 ## API 엔드포인트 요약
 
 | 그룹 | 경로 | 메서드 | 인증 | 설명 |
@@ -142,38 +184,6 @@ config/
 | | `/api/admin/session-chunks/batch-signed-urls` | POST | 어드민 | 청크 일괄 서명 URL |
 | | `/api/admin/sync-audio-urls` | POST | 어드민 | 오디오 URL 동기화 |
 | | `/api/admin/reset-all` | DELETE | 어드민 | 전체 데이터 초기화 |
-
-## 암호화 패턴
-
-| 방향 | 형식 | 처리 |
-|------|------|------|
-| 요청 | `{ enc_data: "<base64url>" }` | `bodyDecryptMiddleware`가 자동 복호화 → `c.get('body')` |
-| 응답 | `base64url(IV\|AuthTag\|Ciphertext)@enc_uncounted` | `encryptId()`로 민감 필드 암호화 후 반환 |
-
-## 인증
-
-- **헤더**: `Authorization: Bearer {JWT}`
-- **쿠키**: `uncounted_session` (httpOnly, SameSite=Lax, 1h) / `uncounted_refresh` (90d)
-- `authMiddleware` — 필수 (401 반환)
-- `optionalAuthMiddleware` — 선택적 (없어도 통과)
-- 어드민: `app_metadata.role === 'admin'` 확인
-
-## 주요 패턴
-
-```typescript
-// 라우트에서 body 읽기
-const body = getBody<MyType>(c)
-
-// ID 암호화 응답
-return c.json({ id: encryptId(rawId), ... })
-
-// 인증 필요한 라우트
-sessions.use('/*', authMiddleware)
-
-// 세션 타입 변환 (snake_case ↔ camelCase)
-const session = sessionFromRow(dbRow)  // DB → API
-const row = sessionToRow(input)        // API → DB
-```
 
 ## DB 마이그레이션
 

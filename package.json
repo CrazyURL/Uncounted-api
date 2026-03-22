@@ -12,6 +12,8 @@
     "logs:prod": "render logs srv-d6ndrri4d50c73dfrt40 --tail"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1014.0",
+    "@aws-sdk/s3-request-presigner": "^3.1014.0",
     "@hono/node-server": "^1.19.9",
     "@hono/swagger-ui": "^0.6.0",
     "@supabase/supabase-js": "^2.97.0",
