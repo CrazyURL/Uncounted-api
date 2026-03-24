@@ -1076,7 +1076,7 @@ export const openApiSpec = {
       post: {
         tags: ['storage'],
         summary: 'WAV 청크 단위 업로드',
-        description: `WAV 파일을 청크 단위로 Supabase Storage에 업로드하고 \`session_chunks\` 테이블에 기록합니다.
+        description: `WAV 파일을 청크 단위로 S3 스토리지에 업로드하고 \`session_chunks\` 테이블에 기록합니다.
 저장 경로: \`{userId}/{sessionId}/{sessionId}-001.wav\`
 
 **요청 형식**: \`multipart/form-data\`
@@ -2486,6 +2486,39 @@ export const openApiSpec = {
         },
       },
     },
+    '/api/admin/storage/metas': {
+      get: {
+        tags: ['admin'],
+        summary: '전체 Meta JSONL 파일 목록 (어드민)',
+        description: 'meta-jsonl 버킷의 모든 JSONL 파일을 반환합니다.',
+        responses: {
+          200: {
+            description: 'Meta JSONL 파일 목록',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          userId: { type: 'string' },
+                          batchId: { type: 'string' },
+                          path: { type: 'string' },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
     '/api/admin/storage/signed-url': {
       post: {
         tags: ['admin'],
@@ -2501,6 +2534,7 @@ export const openApiSpec = {
                 properties: {
                   storagePath: { type: 'string' },
                   expiresIn: { type: 'integer', default: 300 },
+                  bucket: { type: 'string', enum: ['audio', 'meta'], default: 'audio', description: '대상 버킷 (기본: audio)' },
                 },
               },
             },

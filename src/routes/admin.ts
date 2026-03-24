@@ -11,6 +11,7 @@ import {
   getSignedUrl,
   getSignedUrls,
   S3_AUDIO_BUCKET,
+  S3_META_BUCKET,
 } from '../lib/s3.js'
 
 const admin = new Hono()
@@ -1029,19 +1030,50 @@ admin.get('/storage/wavs', async (c) => {
 })
 
 /**
+ * GET /admin/storage/metas
+ * 전체 유저 Meta JSONL 목록 조회 (어드민 전용)
+ */
+admin.get('/storage/metas', async (c) => {
+  try {
+    const userPrefixes = await listFolders(S3_META_BUCKET, '')
+
+    type StorageMetaEntry = { userId: string; batchId: string; path: string }
+    const result: StorageMetaEntry[] = []
+
+    for (const prefix of userPrefixes) {
+      const userId = prefix.replace(/\/$/, '')
+      const files = await listObjects(S3_META_BUCKET, prefix, 1000)
+
+      for (const file of files) {
+        if (!file.key.endsWith('.jsonl')) continue
+        const fileName = file.key.split('/').pop() ?? ''
+        const batchId = fileName.replace('.jsonl', '')
+        result.push({ userId, batchId, path: file.key })
+      }
+    }
+
+    return c.json({ data: result })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
  * POST /admin/storage/signed-url
  * Admin signed URL 생성 (RLS 우회)
- * Body: { storagePath: string, expiresIn?: number }
+ * Body: { storagePath: string, expiresIn?: number, bucket?: 'audio' | 'meta' }
  */
 admin.post('/storage/signed-url', async (c) => {
-  const { storagePath, expiresIn = 300 } = getBody<{ storagePath: string; expiresIn?: number }>(c)
+  const { storagePath, expiresIn = 300, bucket = 'audio' } = getBody<{ storagePath: string; expiresIn?: number; bucket?: 'audio' | 'meta' }>(c)
 
   if (!storagePath) {
     return c.json({ error: 'Missing storagePath' }, 400)
   }
 
+  const targetBucket = bucket === 'meta' ? S3_META_BUCKET : S3_AUDIO_BUCKET
+
   try {
-    const signedUrl = await getSignedUrl(S3_AUDIO_BUCKET, storagePath, expiresIn)
+    const signedUrl = await getSignedUrl(targetBucket, storagePath, expiresIn)
 
     return c.json({ data: { signedUrl } })
   } catch (err: any) {

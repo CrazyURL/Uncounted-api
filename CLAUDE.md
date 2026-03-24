@@ -138,7 +138,8 @@ config/
 | | `/api/admin/ledger-entries/confirm-job` | POST | 어드민 | 익스포트 작업 정산 확정 |
 | | `/api/admin/delivery-records` | GET/POST | 어드민 | 납품 기록 관리 |
 | | `/api/admin/storage/wavs` | GET | 어드민 | 전체 WAV 파일 목록 |
-| | `/api/admin/storage/signed-url` | POST | 어드민 | 서명 URL 발급 |
+| | `/api/admin/storage/metas` | GET | 어드민 | 전체 Meta JSONL 파일 목록 |
+| | `/api/admin/storage/signed-url` | POST | 어드민 | 서명 URL 발급 (bucket: audio/meta) |
 | | `/api/admin/session-chunks/batch-signed-urls` | POST | 어드민 | 청크 일괄 서명 URL |
 | | `/api/admin/sync-audio-urls` | POST | 어드민 | 오디오 URL 동기화 |
 | | `/api/admin/reset-all` | DELETE | 어드민 | 전체 데이터 초기화 |
