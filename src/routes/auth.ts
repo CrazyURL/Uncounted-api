@@ -12,16 +12,7 @@ import { getBody } from '../lib/middleware.js'
 const auth = new Hono()
 const IS_PROD = process.env.NODE_ENV === 'production'
 
-// ── PKCE 상태 저장소 (메모리) ─────────────────────────────────────────────
-type PkceState = { codeVerifier: string; frontendRedirect: string; expiresAt: number }
-const pkceStore = new Map<string, PkceState>()
-
-setInterval(() => {
-  const now = Date.now()
-  for (const [key, val] of pkceStore) {
-    if (val.expiresAt < now) pkceStore.delete(key)
-  }
-}, 60_000)
+// ── PKCE 상태 저장소 (Supabase DB) ────────────────────────────────────────
 
 // ── 쿠키 헬퍼 ────────────────────────────────────────────────────────────
 
@@ -304,7 +295,7 @@ auth.post('/session', async (c) => {
  * - 클라이언트가 code_challenge를 제공하면 그대로 사용 (네이티브 플로우)
  * - code_challenge 없으면 서버에서 생성 후 쿠키로 매핑 (웹 플로우)
  */
-auth.get('/oauth/google', (c) => {
+auth.get('/oauth/google', async (c) => {
   const frontendRedirect = c.req.query('redirect') || 'http://localhost:5173/auth'
   const clientCodeChallenge = c.req.query('code_challenge')
 
@@ -319,11 +310,18 @@ auth.get('/oauth/google', (c) => {
     codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url')
     const flowId = randomUUID()
 
-    pkceStore.set(flowId, {
-      codeVerifier,
-      frontendRedirect,
-      expiresAt: Date.now() + 5 * 60 * 1000,
-    })
+    const { error: pkceInsertError } = await supabaseAdmin
+      .from('pkce_store')
+      .insert({
+        flow_id: flowId,
+        code_verifier: codeVerifier,
+        frontend_redirect: frontendRedirect,
+      })
+
+    if (pkceInsertError) {
+      console.error('pkce_store insert failed:', pkceInsertError)
+      return c.json({ error: 'Internal Server Error' }, 500)
+    }
 
     setCookie(c, 'pkce_flow_id', flowId, {
       httpOnly: true,
@@ -376,13 +374,19 @@ auth.get('/oauth/callback', async (c) => {
       return c.json({ error: 'missing_params' }, 400)
     }
 
-    const pkceState = pkceStore.get(flowId)
-    if (!pkceState || pkceState.expiresAt < Date.now()) {
-      pkceStore.delete(flowId)
+    const { data: pkceState, error: pkceSelectError } = await supabaseAdmin
+      .from('pkce_store')
+      .select('code_verifier, expires_at')
+      .eq('flow_id', flowId)
+      .maybeSingle()
+
+    // 조회 후 즉시 삭제 (일회용)
+    await supabaseAdmin.from('pkce_store').delete().eq('flow_id', flowId)
+
+    if (pkceSelectError || !pkceState || new Date(pkceState.expires_at) < new Date()) {
       return c.json({ error: 'invalid_state' }, 400)
     }
-    pkceStore.delete(flowId)
-    codeVerifier = pkceState.codeVerifier
+    codeVerifier = pkceState.code_verifier
   }
 
   // Supabase PKCE 토큰 교환

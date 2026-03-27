@@ -18,6 +18,7 @@ const DEFAULT_CONSENT = {
   third_party_consent_updated_at: null,
   consent_withdrawn: false,
   consent_withdrawn_updated_at: null,
+  withdrawal_notified_at: null,
   sku_consents: {} as Record<string, boolean>,
 }
 
@@ -29,7 +30,7 @@ user.get('/consent', async (c) => {
 
   const { data, error } = await supabaseAdmin
     .from('users_profile')
-    .select('collect_consent, collect_consent_updated_at, third_party_consent, third_party_consent_updated_at, consent_withdrawn, consent_withdrawn_updated_at, sku_consents')
+    .select('collect_consent, collect_consent_updated_at, third_party_consent, third_party_consent_updated_at, consent_withdrawn, consent_withdrawn_updated_at, withdrawal_notified_at, sku_consents')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -54,13 +55,14 @@ user.put('/consent', async (c) => {
     third_party_consent_updated_at?: string | null
     consent_withdrawn?: boolean
     consent_withdrawn_updated_at?: string | null
+    withdrawal_notified_at?: string | null
     sku_consents?: Record<string, boolean>
   }
 
   // 기존 행 조회 (merge를 위해 기존 값도 함께 읽음)
   const { data: existing, error: selectError } = await supabaseAdmin
     .from('users_profile')
-    .select('pid, collect_consent, collect_consent_updated_at, third_party_consent, third_party_consent_updated_at, consent_withdrawn, consent_withdrawn_updated_at, sku_consents')
+    .select('pid, collect_consent, collect_consent_updated_at, third_party_consent, third_party_consent_updated_at, consent_withdrawn, consent_withdrawn_updated_at, withdrawal_notified_at, sku_consents')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -77,6 +79,7 @@ user.put('/consent', async (c) => {
     third_party_consent_updated_at: body.third_party_consent_updated_at ?? existing?.third_party_consent_updated_at ?? null,
     consent_withdrawn: body.consent_withdrawn ?? existing?.consent_withdrawn ?? false,
     consent_withdrawn_updated_at: body.consent_withdrawn_updated_at ?? existing?.consent_withdrawn_updated_at ?? null,
+    withdrawal_notified_at: body.withdrawal_notified_at ?? existing?.withdrawal_notified_at ?? null,
     sku_consents: body.sku_consents ?? existing?.sku_consents ?? {},
     updated_at: new Date().toISOString(),
   }

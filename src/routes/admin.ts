@@ -1267,4 +1267,29 @@ admin.delete('/reset-all', async (c) => {
   return c.json({ data: { tables: result } })
 })
 
+// ── POST /admin/consent/notify-withdrawal ────────────────────────────────
+// 관리자가 납품처에 동의 철회 통지 완료 후 호출.
+// 해당 사용자의 withdrawal_notified_at을 현재 시각으로 설정.
+
+admin.post('/consent/notify-withdrawal', async (c) => {
+  const { userId } = getBody<{ userId: string }>(c)
+
+  if (!userId) {
+    return c.json({ error: 'userId is required' }, 400)
+  }
+
+  try {
+    const now = new Date().toISOString()
+    const { error } = await supabaseAdmin
+      .from('users_profile')
+      .update({ withdrawal_notified_at: now, updated_at: now })
+      .eq('user_id', userId)
+
+    if (error) return c.json({ error: error.message }, 500)
+    return c.json({ data: { userId, withdrawal_notified_at: now } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
 export default admin
