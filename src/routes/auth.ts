@@ -87,7 +87,8 @@ auth.post('/signin', async (c) => {
       },
     })
   } catch (err: any) {
-    return c.json({ error: err.message }, 500)
+    console.error('[signin] Error:', err)
+    return c.json({ error: 'Internal Server Error' }, 500)
   }
 })
 
@@ -122,7 +123,8 @@ auth.post('/signup', async (c) => {
       },
     })
   } catch (err: any) {
-    return c.json({ error: err.message }, 500)
+    console.error('[signup] Error:', err)
+    return c.json({ error: 'Internal Server Error' }, 500)
   }
 })
 
@@ -150,7 +152,8 @@ auth.post('/signout', async (c) => {
     }
     return c.json({ data: { success: true } })
   } catch (err: any) {
-    return c.json({ error: err.message }, 500)
+    console.error('[signout] Error:', err)
+    return c.json({ error: 'Internal Server Error' }, 500)
   }
 })
 
@@ -186,7 +189,8 @@ auth.get('/session', async (c) => {
       error: null,
     })
   } catch (err: any) {
-    return c.json({ data: { session: null }, error: err.message })
+    console.error('[session GET] Error:', err)
+    return c.json({ data: { session: null }, error: 'Internal Server Error' })
   }
 })
 
@@ -212,7 +216,8 @@ auth.get('/me', async (c) => {
 
     return c.json({ data: { user: { id: encryptId(user.id), email: user.email ? encryptId(user.email) : null } } })
   } catch (err: any) {
-    return c.json({ error: err.message }, 500)
+    console.error('[me] Error:', err)
+    return c.json({ error: 'Internal Server Error' }, 500)
   }
 })
 
@@ -251,7 +256,8 @@ auth.post('/refresh', async (c) => {
       },
     })
   } catch (err: any) {
-    return c.json({ error: err.message }, 500)
+    console.error('[refresh] Error:', err)
+    return c.json({ error: 'Internal Server Error' }, 500)
   }
 })
 
@@ -287,7 +293,8 @@ auth.post('/session', async (c) => {
       },
     })
   } catch (err: any) {
-    return c.json({ error: err.message }, 500)
+    console.error('[session POST] Error:', err)
+    return c.json({ error: 'Internal Server Error' }, 500)
   }
 })
 
@@ -451,7 +458,8 @@ auth.post('/link-pid', async (c) => {
 
     return c.json({ data: { success: true } })
   } catch (err: any) {
-    return c.json({ error: err.message }, 500)
+    console.error('[link-pid] Error:', err)
+    return c.json({ error: 'Internal Server Error' }, 500)
   }
 })
 

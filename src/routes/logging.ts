@@ -3,12 +3,13 @@
 
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
-import { getBody } from '../lib/middleware.js'
+import { getBody, optionalAuthMiddleware } from '../lib/middleware.js'
 
 const logging = new Hono()
 
 // 인증은 선택적 (익명 로그도 허용)
-// userId는 클라이언트에서 전송된 값 사용
+// userId는 인증 토큰에서만 추출 (클라이언트 제공값 무시)
+logging.use('/*', optionalAuthMiddleware)
 
 // ── API 엔드포인트 ──────────────────────────────────────────────────────
 
@@ -23,13 +24,15 @@ logging.post('/funnel', async (c) => {
     return c.json({ error: 'Events array is required' }, 400)
   }
 
+  const userId = (c.get('userId') as string | undefined) ?? null
+
   try {
     const rows = events.map((e) => ({
       id: e.id,
       step: e.step,
       timestamp: e.timestamp,
       date_bucket: e.date_bucket,
-      user_id: e.user_id ?? null,
+      user_id: userId,
       meta: e.meta ?? null,
     }))
 
@@ -38,7 +41,8 @@ logging.post('/funnel', async (c) => {
       .upsert(rows, { onConflict: 'id' })
 
     if (error) {
-      return c.json({ error: error.message }, 500)
+      console.error('funnel upsert error:', error)
+      return c.json({ error: 'Internal Server Error' }, 500)
     }
 
     return c.json({
@@ -48,7 +52,8 @@ logging.post('/funnel', async (c) => {
       },
     })
   } catch (err: any) {
-    return c.json({ error: err.message }, 500)
+    console.error('funnel handler error:', err)
+    return c.json({ error: 'Internal Server Error' }, 500)
   }
 })
 
@@ -63,6 +68,8 @@ logging.post('/errors', async (c) => {
     return c.json({ error: 'Logs array is required' }, 400)
   }
 
+  const userId = (c.get('userId') as string | undefined) ?? null
+
   try {
     const rows = logs.map((e) => ({
       id: e.id,
@@ -71,7 +78,7 @@ logging.post('/errors', async (c) => {
       message: e.message,
       stack: e.stack ?? null,
       context: e.context ?? null,
-      user_id: e.userId ?? null,
+      user_id: userId,
       device_info: e.deviceInfo ?? null,
     }))
 
@@ -80,7 +87,8 @@ logging.post('/errors', async (c) => {
       .upsert(rows, { onConflict: 'id' })
 
     if (error) {
-      return c.json({ error: error.message }, 500)
+      console.error('error_logs upsert error:', error)
+      return c.json({ error: 'Internal Server Error' }, 500)
     }
 
     return c.json({
@@ -90,7 +98,8 @@ logging.post('/errors', async (c) => {
       },
     })
   } catch (err: any) {
-    return c.json({ error: err.message }, 500)
+    console.error('errors handler error:', err)
+    return c.json({ error: 'Internal Server Error' }, 500)
   }
 })
 
