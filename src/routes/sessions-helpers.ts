@@ -3,6 +3,12 @@
 
 import { encryptId } from '../lib/crypto.js'
 
+/** qaScore를 0-100 범위로 클램핑 (CWE-345 서버 측 재검증) */
+export const clampQaScore = (score: unknown): number => {
+  if (typeof score !== 'number' || isNaN(score)) return 0
+  return Math.max(0, Math.min(100, Math.round(score)))
+}
+
 export function sessionFromRow(row: Record<string, unknown>) {
   const rawId = row.id as string
   const rawUserId = (row.user_id as string) ?? null
@@ -70,7 +76,7 @@ export function sessionToRow(s: any) {
     title: s.title,
     date: s.date,
     duration: s.duration,
-    qa_score: s.qaScore ?? 0,
+    qa_score: clampQaScore(s.qaScore),
     contribution_score: s.contributionScore ?? 0,
     labels: s.labels,
     strategy_locked: s.strategyLocked ?? false,
