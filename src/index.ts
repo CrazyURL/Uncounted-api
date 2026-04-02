@@ -32,8 +32,11 @@ const allowedOrigins = (process.env.CORS_ORIGIN || '')
 
 app.use('/*', cors({
   origin: (origin) => {
-    if (!allowedOrigins.length) return '*'
-    return allowedOrigins.includes(origin) ? origin : null
+    // 오직 CORS_ORIGIN 환경변수에 명시된 Origin만 허용 (보안 강화)
+    if (allowedOrigins.includes(origin)) return origin
+
+    // 허용되지 않은 모든 요청은 차단
+    return null
   },
   credentials: true,
 }))
