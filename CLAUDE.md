@@ -30,10 +30,14 @@ npx vitest run # 테스트 실행
 src/
   index.ts / dev.ts / openapi.ts / types.ts
   lib/       # supabase.ts, s3.ts, crypto.ts, middleware.ts
+  lib/audio/ # ffmpegProcessor.ts (WAV 전처리)
+  lib/export/ # poolingService, packageBuilder, metadataRepository 등
   routes/    # auth, sessions, sessionChunks, storage, transcripts,
-             # transcriptChunks, user, logging, admin
+             # transcriptChunks, user, logging, admin, admin-exports,
+             # admin-ledger, upload
+  scripts/   # 일회성 마이그레이션 스크립트
 supabase/
-  migrations/  # 001~017 SQL 파일
+  migrations/  # 001~024 SQL 파일
 ```
 
 ## 핵심 패턴

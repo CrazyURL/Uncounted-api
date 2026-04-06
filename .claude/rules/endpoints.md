@@ -69,3 +69,16 @@ paths: src/routes/**
 | | `/api/admin/session-chunks/batch-signed-urls` | POST | 어드민 | 청크 일괄 서명 URL |
 | | `/api/admin/sync-audio-urls` | POST | 어드민 | 오디오 URL 동기화 |
 | | `/api/admin/reset-all` | DELETE | 어드민 | 전체 데이터 초기화 |
+| | `/api/admin/metadata/stats` | GET | 어드민 | 메타데이터 스키마별 카운트 |
+| | `/api/admin/metadata/summary` | GET | 어드민 | 메타데이터 요약 (이벤트수/유저수/스키마별) |
+| | `/api/admin/metadata/events` | GET | 어드민 | 메타데이터 이벤트 조회 (페이지네이션) |
+| | `/api/admin/consent/notify-withdrawal` | POST | 어드민 | 동의 철회 통지 완료 처리 |
+| **Upload** | `/api/upload` | POST | 선택적 | 메타데이터 NDJSON 배치 수신 → DB 저장 |
+| **Export** | `/api/admin/export-requests/:id/preview` | POST | 어드민 | 풀링 미리보기 |
+| | `/api/admin/export-requests/:id/confirm` | PUT | 어드민 | draft → queued 확정 |
+| | `/api/admin/export-requests/:id/process` | POST | 어드민 | BU 풀링 + 발화 분할 + 품질 분석 |
+| | `/api/admin/export-requests/:id/utterances` | GET | 어드민 | 발화 목록 조회 |
+| | `/api/admin/export-requests/:id/utterances/review` | PUT | 어드민 | 발화 검수 반영 |
+| | `/api/admin/export-requests/:id/finalize` | POST | 어드민 | ZIP 패키징 + S3 업로드 |
+| | `/api/admin/export-requests/:id/download` | GET | 어드민 | 서명 URL 발급 |
+| | `/api/admin/inventory` | GET | 어드민 | SKU 재고 현황 |
