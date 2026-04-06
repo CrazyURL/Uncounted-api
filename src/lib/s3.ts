@@ -35,6 +35,7 @@ export const s3Client = new S3Client({
 
 export const S3_AUDIO_BUCKET = process.env.S3_AUDIO_BUCKET ?? 'sanitized-audio'
 export const S3_META_BUCKET = process.env.S3_META_BUCKET ?? 'meta-jsonl'
+export const EXPORTS_PREFIX = 'exports/'
 
 /** 파일 업로드 (upsert 동작: 동일 키 덮어쓰기) */
 export async function uploadObject(
@@ -129,6 +130,25 @@ export async function getSignedUrl(
     new GetObjectCommand({ Bucket: bucket, Key: key }),
     { expiresIn },
   )
+}
+
+/** 내보내기 패키지 ZIP 업로드 */
+export async function uploadExportPackage(
+  requestId: string,
+  zipBuffer: Uint8Array,
+): Promise<string> {
+  const key = `${EXPORTS_PREFIX}${requestId}.zip`
+  await uploadObject(S3_AUDIO_BUCKET, key, zipBuffer, 'application/zip')
+  return key
+}
+
+/** 내보내기 패키지 다운로드 presigned URL 생성 */
+export async function getExportDownloadUrl(
+  requestId: string,
+  expiresIn = 3600,
+): Promise<string> {
+  const key = `${EXPORTS_PREFIX}${requestId}.zip`
+  return getSignedUrl(S3_AUDIO_BUCKET, key, expiresIn)
 }
 
 /** 배치 presigned URL 생성 */

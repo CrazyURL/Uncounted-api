@@ -3,8 +3,13 @@
 
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
-import { authMiddleware, getBody } from '../lib/middleware.js'
+import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
 import { encryptId } from '../lib/crypto.js'
+import {
+  getMetadataStats,
+  getMetadataEvents,
+  getMetadataSummary,
+} from '../lib/export/metadataRepository.js'
 import {
   listObjects,
   listFolders,
@@ -16,8 +21,9 @@ import {
 
 const admin = new Hono()
 
-// 모든 라우트에 인증 필수 (추후 관리자 권한 체크 추가 가능)
+// 모든 라우트에 인증 + 관리자 권한 필수
 admin.use('/*', authMiddleware)
+admin.use('/*', adminMiddleware)
 
 // ── 세션 행 → camelCase 변환 (sessions.ts의 sessionFromRow와 동일) ──────────
 
@@ -320,255 +326,7 @@ admin.delete('/sku-presets/:id', async (c) => {
   }
 })
 
-// ── Export Jobs ─────────────────────────────────────────────────────────
-
-admin.get('/export-jobs', async (c) => {
-  try {
-    const { data, error } = await supabaseAdmin
-      .from('export_jobs')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(200)
-
-    if (error) return c.json({ error: error.message }, 500)
-    return c.json({ data: data ?? [] })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
-
-admin.get('/export-jobs/:id', async (c) => {
-  const id = c.req.param('id')
-
-  try {
-    const { data, error } = await supabaseAdmin
-      .from('export_jobs')
-      .select('*')
-      .eq('id', id)
-      .single()
-
-    if (error) {
-      if (error.code === 'PGRST116') {
-        return c.json({ data: null })
-      }
-      return c.json({ error: error.message }, 500)
-    }
-
-    return c.json({ data })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
-
-admin.post('/export-jobs', async (c) => {
-  const job = getBody(c)
-
-  try {
-    const { error } = await supabaseAdmin.from('export_jobs').upsert(job)
-    if (error) return c.json({ error: error.message }, 500)
-    return c.json({ data: { success: true } })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
-
-admin.post('/export-jobs/:id/logs', async (c) => {
-  const id = c.req.param('id')
-  const { log } = getBody<{ log: unknown }>(c)
-
-  try {
-    // 기존 job 조회
-    const { data: job, error: fetchError } = await supabaseAdmin
-      .from('export_jobs')
-      .select('logs')
-      .eq('id', id)
-      .single()
-
-    if (fetchError || !job) {
-      return c.json({ error: 'Job not found' }, 404)
-    }
-
-    // logs 배열에 추가
-    const logs = Array.isArray(job.logs) ? [...job.logs, log] : [log]
-
-    const { error } = await supabaseAdmin
-      .from('export_jobs')
-      .update({ logs })
-      .eq('id', id)
-
-    if (error) return c.json({ error: error.message }, 500)
-    return c.json({ data: { success: true } })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
-
-admin.delete('/export-jobs/:id', async (c) => {
-  const id = c.req.param('id')
-
-  try {
-    const { error } = await supabaseAdmin.from('export_jobs').delete().eq('id', id)
-    if (error) return c.json({ error: error.message }, 500)
-    return c.json({ data: { success: true } })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
-
-// ── Billable Units ──────────────────────────────────────────────────────
-
-function billableUnitFromRow(row: Record<string, unknown>) {
-  const rawId = row.id as string
-  const rawSessionId = (row.session_id ?? row.sessionId) as string
-  const rawUserId = (row.user_id ?? row.userId) as string
-
-  return {
-    id:               encryptId(rawId),
-    sessionId:        rawUserId ? encryptId(rawSessionId) : null,
-    minuteIndex:      (row.minute_index ?? row.minuteIndex) as number,
-    effectiveSeconds: Number(row.effective_seconds ?? row.effectiveSeconds ?? 0),
-    qualityGrade:     ((row.quality_grade ?? row.qualityGrade) as 'A' | 'B' | 'C') ?? 'C',
-    qaScore:          Number(row.qa_score ?? row.qaScore ?? 0),
-    qualityTier:      ((row.quality_tier ?? row.qualityTier) as string) ?? 'basic',
-    labelSource:      ((row.label_source ?? row.labelSource) as string) ?? null,
-    hasLabels:        ((row.has_labels ?? row.hasLabels) as boolean) ?? false,
-    consentStatus:    ((row.consent_status ?? row.consentStatus) as string) ?? 'PRIVATE',
-    piiStatus:        ((row.pii_status ?? row.piiStatus) as string) ?? 'CLEAR',
-    lockStatus:       ((row.lock_status ?? row.lockStatus) as string) ?? 'available',
-    lockedByJobId:    ((row.locked_by_job_id ?? row.lockedByJobId) as string) ?? null,
-    sessionDate:      ((row.session_date ?? row.sessionDate) as string) ?? '',
-    userId:           rawUserId ? encryptId(rawUserId) : null,
-    sourceSessionIds: ((row.source_session_ids ?? row.sourceSessionIds) as string[]) ?? undefined,
-    deviceContext:    ((row.device_context ?? row.deviceContext) as any) ?? undefined,
-  }
-}
-
-admin.get('/billable-units', async (c) => {
-  const qualityGrade = c.req.query('qualityGrade')?.split(',')
-  const qualityTier = c.req.query('qualityTier')?.split(',')
-  const consentStatus = c.req.query('consentStatus')
-  const lockStatus = c.req.query('lockStatus')
-  const userId = c.req.query('userId')
-  const dateFrom = c.req.query('dateFrom')
-  const dateTo = c.req.query('dateTo')
-  const limit = Math.min(parseInt(c.req.query('limit') ?? '200', 10), 1000)
-  const offset = parseInt(c.req.query('offset') ?? '0', 10)
-
-  try {
-    let query = supabaseAdmin
-      .from('billable_units')
-      .select('*', { count: 'exact' })
-      .order('session_date', { ascending: false })
-      .range(offset, offset + limit - 1)
-
-    if (qualityGrade?.length) query = query.in('quality_grade', qualityGrade)
-    if (qualityTier?.length) query = query.in('quality_tier', qualityTier)
-    if (consentStatus) query = query.eq('consent_status', consentStatus)
-    if (lockStatus) query = query.eq('lock_status', lockStatus)
-    if (userId) query = query.eq('user_id', userId)
-    if (dateFrom && dateTo) {
-      query = query.gte('session_date', dateFrom).lte('session_date', dateTo)
-    }
-
-    const { data, error, count } = await query
-    if (error) return c.json({ error: error.message }, 500)
-    return c.json({ data: (data ?? []).map(billableUnitFromRow), count: count ?? 0 })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
-
-admin.post('/billable-units', async (c) => {
-  const { units } = getBody<{ units: any[] }>(c)
-
-  if (!Array.isArray(units) || units.length === 0) {
-    return c.json({ error: 'Units array is required' }, 400)
-  }
-
-  try {
-    const BATCH = 500
-    for (let i = 0; i < units.length; i += BATCH) {
-      const batch = units.slice(i, i + BATCH)
-      const { error } = await supabaseAdmin.from('billable_units').upsert(batch)
-      if (error) {
-        return c.json({ error: error.message }, 500)
-      }
-    }
-
-    return c.json({ data: { count: units.length, success: true } })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
-
-admin.post('/billable-units/lock', async (c) => {
-  const { unitIds, jobId } = getBody<{ unitIds: string[]; jobId: string }>(c)
-
-  if (!Array.isArray(unitIds) || !jobId) {
-    return c.json({ error: 'unitIds and jobId are required' }, 400)
-  }
-
-  try {
-    const BATCH = 500
-    let locked = 0
-
-    for (let i = 0; i < unitIds.length; i += BATCH) {
-      const batch = unitIds.slice(i, i + BATCH)
-      const { error, count } = await supabaseAdmin
-        .from('billable_units')
-        .update({ lock_status: 'locked_for_job', locked_by_job_id: jobId })
-        .in('id', batch)
-        .eq('lock_status', 'available')
-
-      if (error) break
-      locked += count ?? batch.length
-    }
-
-    return c.json({ data: { locked } })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
-
-admin.post('/billable-units/unlock', async (c) => {
-  const { jobId } = getBody<{ jobId: string }>(c)
-
-  if (!jobId) {
-    return c.json({ error: 'jobId is required' }, 400)
-  }
-
-  try {
-    const { error } = await supabaseAdmin
-      .from('billable_units')
-      .update({ lock_status: 'available', locked_by_job_id: null })
-      .eq('locked_by_job_id', jobId)
-
-    if (error) return c.json({ error: error.message }, 500)
-    return c.json({ data: { success: true } })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
-
-admin.post('/billable-units/mark-delivered', async (c) => {
-  const { jobId } = getBody<{ jobId: string }>(c)
-
-  if (!jobId) {
-    return c.json({ error: 'jobId is required' }, 400)
-  }
-
-  try {
-    const { error } = await supabaseAdmin
-      .from('billable_units')
-      .update({ lock_status: 'delivered' })
-      .eq('locked_by_job_id', jobId)
-
-    if (error) return c.json({ error: error.message }, 500)
-    return c.json({ data: { success: true } })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
+// ── Export Jobs, Billable Units → admin-exports.ts로 이동됨 ─────────────
 
 // ── Sessions (Admin) ──────────────────────────────────────────────────
 
@@ -796,205 +554,7 @@ admin.get('/transcripts', async (c) => {
   }
 })
 
-// ── Ledger Entries ──────────────────────────────────────────────────────
-
-admin.get('/ledger-entries', async (c) => {
-  const userId = c.req.query('userId')
-  const status = c.req.query('status')
-  const exportJobId = c.req.query('exportJobId')
-  const buIds = c.req.query('buIds')?.split(',').filter(Boolean)
-
-  try {
-    const PAGE = 1000
-    const all: any[] = []
-    let from = 0
-
-    while (true) {
-      let query = supabaseAdmin
-        .from('user_asset_ledger')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .range(from, from + PAGE - 1)
-
-      if (userId) query = query.eq('user_id', userId)
-      if (status) query = query.eq('status', status)
-      if (exportJobId) query = query.eq('export_job_id', exportJobId)
-      if (buIds?.length) query = query.in('bu_id', buIds)
-
-      const { data, error } = await query
-      if (error) { console.warn('ledger-entries error:', error.message); break }
-      if (!data || data.length === 0) break
-
-      all.push(...data)
-      if (data.length < PAGE) break
-      from += PAGE
-    }
-
-    return c.json({ data: all })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
-
-admin.post('/ledger-entries', async (c) => {
-  const { entries } = getBody<{ entries: any[] }>(c)
-
-  if (!Array.isArray(entries) || entries.length === 0) {
-    return c.json({ error: 'entries array is required' }, 400)
-  }
-
-  try {
-    const BATCH = 500
-    for (let i = 0; i < entries.length; i += BATCH) {
-      const batch = entries.slice(i, i + BATCH)
-      const { error } = await supabaseAdmin.from('user_asset_ledger').upsert(batch)
-      if (error) return c.json({ error: error.message }, 500)
-    }
-    return c.json({ data: { count: entries.length, success: true } })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
-
-admin.post('/ledger-entries/update-status', async (c) => {
-  const { ids, status, confirmedAmount } = getBody<{
-    ids: string[]
-    status: string
-    confirmedAmount?: number
-  }>(c)
-
-  if (!Array.isArray(ids) || ids.length === 0 || !status) {
-    return c.json({ error: 'ids and status are required' }, 400)
-  }
-
-  try {
-    const now = new Date().toISOString()
-    const updateFields: Record<string, unknown> = { status }
-
-    if (status === 'confirmed') {
-      updateFields.confirmed_at = now
-      if (confirmedAmount != null) updateFields.amount_confirmed = confirmedAmount
-    } else if (status === 'withdrawable') {
-      updateFields.withdrawable_at = now
-    } else if (status === 'paid') {
-      updateFields.paid_at = now
-    }
-
-    const BATCH = 500
-    let updated = 0
-    for (let i = 0; i < ids.length; i += BATCH) {
-      const batch = ids.slice(i, i + BATCH)
-      const { error, count } = await supabaseAdmin
-        .from('user_asset_ledger')
-        .update(updateFields)
-        .in('id', batch)
-      if (error) return c.json({ error: error.message }, 500)
-      updated += count ?? batch.length
-    }
-
-    return c.json({ data: { updated } })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
-
-admin.post('/ledger-entries/confirm-job', async (c) => {
-  const { exportJobId, totalPayment } = getBody<{
-    exportJobId: string
-    totalPayment: number
-  }>(c)
-
-  if (!exportJobId || totalPayment == null) {
-    return c.json({ error: 'exportJobId and totalPayment are required' }, 400)
-  }
-
-  try {
-    // estimated 상태인 항목 조회
-    const { data: rows, error: fetchError } = await supabaseAdmin
-      .from('user_asset_ledger')
-      .select('id, amount_high')
-      .eq('export_job_id', exportJobId)
-      .eq('status', 'estimated')
-
-    if (fetchError) return c.json({ error: fetchError.message }, 500)
-    if (!rows || rows.length === 0) return c.json({ data: { confirmed: 0 } })
-
-    const totalHigh = rows.reduce((s: number, r: any) => s + (r.amount_high ?? 0), 0)
-    if (totalHigh === 0) return c.json({ data: { confirmed: 0 } })
-
-    const now = new Date().toISOString()
-    let confirmed = 0
-
-    for (const row of rows) {
-      const ratio = (row.amount_high ?? 0) / totalHigh
-      const amount = Math.round(totalPayment * ratio)
-      const { error } = await supabaseAdmin
-        .from('user_asset_ledger')
-        .update({ amount_confirmed: amount, status: 'confirmed', confirmed_at: now })
-        .eq('id', row.id)
-      if (!error) confirmed++
-    }
-
-    return c.json({ data: { confirmed } })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
-
-// ── Delivery Records ─────────────────────────────────────────────────────
-
-admin.get('/delivery-records', async (c) => {
-  const clientId = c.req.query('clientId')
-
-  if (!clientId) {
-    return c.json({ error: 'clientId query parameter is required' }, 400)
-  }
-
-  try {
-    const { data, error } = await supabaseAdmin
-      .from('delivery_records')
-      .select('*')
-      .eq('client_id', clientId)
-
-    if (error) return c.json({ error: error.message }, 500)
-    return c.json({ data: data ?? [] })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
-
-admin.post('/delivery-records', async (c) => {
-  const { buIds, clientId, exportJobId } = getBody<{
-    buIds: string[]
-    clientId: string
-    exportJobId: string
-  }>(c)
-
-  if (!Array.isArray(buIds) || !clientId || !exportJobId) {
-    return c.json({ error: 'buIds, clientId, exportJobId are required' }, 400)
-  }
-
-  try {
-    const now = new Date().toISOString()
-    const BATCH = 500
-    for (let i = 0; i < buIds.length; i += BATCH) {
-      const batch = buIds.slice(i, i + BATCH).map((buId) => ({
-        bu_id: buId,
-        client_id: clientId,
-        export_job_id: exportJobId,
-        delivered_at: now,
-      }))
-      const { error } = await supabaseAdmin
-        .from('delivery_records')
-        .upsert(batch, { onConflict: 'bu_id,client_id' })
-      if (error) return c.json({ error: error.message }, 500)
-    }
-
-    return c.json({ data: { count: buIds.length, success: true } })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
+// ── Ledger Entries, Delivery Records → admin-exports.ts로 이동됨 ────────
 
 // ── Admin Storage: WAV 목록 조회 ────────────────────────────────────────
 
@@ -1289,6 +849,55 @@ admin.post('/consent/notify-withdrawal', async (c) => {
     return c.json({ data: { userId, withdrawal_notified_at: now } })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
+  }
+})
+
+// ── Metadata Events ───────────────────────────────────────────────────
+
+/**
+ * GET /admin/metadata/stats
+ * 스키마별 메타데이터 이벤트 카운트
+ */
+admin.get('/metadata/stats', async (c) => {
+  try {
+    const stats = await getMetadataStats()
+    return c.json({ data: stats })
+  } catch (err) {
+    console.error('[admin] metadata/stats error:', err)
+    return c.json({ error: 'Internal Server Error' }, 500)
+  }
+})
+
+/**
+ * GET /admin/metadata/summary
+ * 메타 탭 대시보드용 요약 (전체 이벤트 수, 유저 수, 스키마별 카운트)
+ */
+admin.get('/metadata/summary', async (c) => {
+  try {
+    const summary = await getMetadataSummary()
+    return c.json({ data: summary })
+  } catch (err) {
+    console.error('[admin] metadata/summary error:', err)
+    return c.json({ error: 'Internal Server Error' }, 500)
+  }
+})
+
+/**
+ * GET /admin/metadata/events?schema=U-M07-v1&pseudo_id=xxx&limit=100&offset=0
+ * 메타데이터 이벤트 조회 (페이지네이션)
+ */
+admin.get('/metadata/events', async (c) => {
+  try {
+    const result = await getMetadataEvents({
+      schemaId: c.req.query('schema') ?? undefined,
+      pseudoId: c.req.query('pseudo_id') ?? undefined,
+      limit: Number(c.req.query('limit') ?? 100),
+      offset: Number(c.req.query('offset') ?? 0),
+    })
+    return c.json({ data: result.data, total: result.total })
+  } catch (err) {
+    console.error('[admin] metadata/events error:', err)
+    return c.json({ error: 'Internal Server Error' }, 500)
   }
 })
 

@@ -12,11 +12,14 @@ import auth from './routes/auth.js'
 import sessions from './routes/sessions.js'
 import storage from './routes/storage.js'
 import admin from './routes/admin.js'
+import adminExports from './routes/admin-exports.js'
+import adminLedger from './routes/admin-ledger.js'
 import logging from './routes/logging.js'
 import transcripts from './routes/transcripts.js'
 import transcriptChunks from './routes/transcriptChunks.js'
 import sessionChunks from './routes/sessionChunks.js'
 import user from './routes/user.js'
+import upload from './routes/upload.js'
 
 const app = new Hono()
 
@@ -76,11 +79,14 @@ app.route('/api/auth', auth)
 app.route('/api/sessions', sessions)
 app.route('/api/storage', storage)
 app.route('/api/admin', admin)
+app.route('/api/admin', adminExports)
+app.route('/api/admin', adminLedger)
 app.route('/api/logging', logging)
 app.route('/api/transcripts', transcripts)
 app.route('/api/transcript-chunks', transcriptChunks)
 app.route('/api/session-chunks', sessionChunks)
 app.route('/api/user', user)
+app.route('/api/upload', upload)
 
 // ── 404 핸들러 ─────────────────────────────────────────────────────────
 

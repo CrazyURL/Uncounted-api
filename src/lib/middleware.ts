@@ -16,7 +16,7 @@ export async function bodyDecryptMiddleware(c: Context, next: Next) {
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(c.req.method)) {
     // multipart/form-data는 라우트 핸들러에서 직접 파싱 (c.req.formData())
     const contentType = c.req.header('Content-Type') ?? ''
-    if (!contentType.startsWith('multipart/')) {
+    if (!contentType.startsWith('multipart/') && contentType !== 'application/x-ndjson') {
       try {
         const raw = await c.req.json()
         if (raw && typeof raw === 'object' && 'enc_data' in raw) {
@@ -103,6 +103,28 @@ export async function devBodyLogger(c: Context, next: Next) {
     const body = await cloned.json()
     console.log('[RES BODY]', JSON.stringify(truncateArrays(body), null, 2))
   } catch { /* non-JSON 응답은 스킵 */ }
+}
+
+/**
+ * Admin 권한 검증 미들웨어
+ * authMiddleware 이후에 적용 — app_metadata.role === 'admin' 확인
+ */
+export async function adminMiddleware(c: Context, next: Next) {
+  const userId = c.get('userId')
+  if (!userId) {
+    return c.json({ error: 'Unauthorized' }, 401)
+  }
+
+  try {
+    const { data: { user }, error } = await supabaseAdmin.auth.admin.getUserById(userId)
+    if (error || !user || user.app_metadata?.role !== 'admin') {
+      return c.json({ error: 'Forbidden' }, 403)
+    }
+    c.set('user', user)
+    await next()
+  } catch {
+    return c.json({ error: 'Forbidden' }, 403)
+  }
 }
 
 export async function optionalAuthMiddleware(c: Context, next: Next) {
