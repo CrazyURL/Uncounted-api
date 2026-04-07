@@ -420,12 +420,17 @@ adminExports.post('/export-requests/:id/process', async (c) => {
       minQaScore: 50,
       requireTranscript: true,
     }
+    const diversityConstraints = (filters.diversityConstraints as Record<string, unknown>) ?? {}
+
     console.log('[process] poolFilters:', JSON.stringify(poolFilters))
+    console.log('[process] diversityConstraints:', JSON.stringify(diversityConstraints))
 
     const poolResult = await poolAndRankBUs(
       job.sku_id,
       job.requested_units,
       poolFilters,
+      {},
+      diversityConstraints,
     )
     console.log('[process] poolResult:', {
       selectedBUs: poolResult.selectedBUs.length,

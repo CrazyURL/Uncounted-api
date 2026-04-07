@@ -42,6 +42,9 @@ export interface SpeakerDemographic {
   pseudoId: string
   utteranceCount: number
   totalDurationSec: number
+  ageBand?: string
+  gender?: string
+  regionGroup?: string
 }
 
 export interface UtteranceMetaLine {
@@ -117,6 +120,24 @@ export async function buildPackage(
   const sessionIds = [...new Set(utterances.map((u) => u.session_id as string).filter(Boolean))]
   const metricsMap = await loadQualityMetrics(sessionIds)
 
+  // 3b. Load speaker demographics via sessions → users_profile
+  const { data: profileRows } = await supabaseAdmin
+    .from('sessions')
+    .select('id, pid, users_profile(age_band, gender, region_group)')
+    .in('id', sessionIds)
+
+  const sessionDemoMap = new Map<string, { ageBand?: string; gender?: string; regionGroup?: string }>()
+  for (const row of (profileRows ?? []) as Record<string, unknown>[]) {
+    const profile = row.users_profile as Record<string, unknown> | null
+    if (profile) {
+      sessionDemoMap.set(row.id as string, {
+        ageBand: (profile.age_band as string) ?? undefined,
+        gender: (profile.gender as string) ?? undefined,
+        regionGroup: (profile.region_group as string) ?? undefined,
+      })
+    }
+  }
+
   // 4. Load transcripts for involved sessions
   const transcriptMap = await loadTranscripts(sessionIds)
 
@@ -134,7 +155,7 @@ export async function buildPackage(
   const packageDirName = `U-A01_${today}_${sanitizedClient}`
 
   // Gather speaker demographics
-  const speakerMap = new Map<string, { count: number; durationSec: number }>()
+  const speakerMap = new Map<string, { count: number; durationSec: number; ageBand?: string; gender?: string; regionGroup?: string }>()
   const metaLines: UtteranceMetaLine[] = []
   let totalDurationSec = 0
   const gradeDistribution = { A: 0, B: 0, C: 0 }
@@ -167,9 +188,13 @@ export async function buildPackage(
     // Speaker demographics
     const speakerKey = pseudoId ?? sessionId
     const existing = speakerMap.get(speakerKey) ?? { count: 0, durationSec: 0 }
+    const demo = sessionDemoMap.get(sessionId)
     speakerMap.set(speakerKey, {
       count: existing.count + 1,
       durationSec: existing.durationSec + durationSec,
+      ageBand: existing.ageBand ?? demo?.ageBand,
+      gender: existing.gender ?? demo?.gender,
+      regionGroup: existing.regionGroup ?? demo?.regionGroup,
     })
 
     // Fill metrics from quality metrics table if not on item itself
@@ -218,6 +243,9 @@ export async function buildPackage(
       pseudoId,
       utteranceCount: stats.count,
       totalDurationSec: Math.round(stats.durationSec * 100) / 100,
+      ageBand: stats.ageBand,
+      gender: stats.gender,
+      regionGroup: stats.regionGroup,
     }),
   )
 

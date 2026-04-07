@@ -18,6 +18,7 @@ export interface PoolingFilters {
 export interface DiversityConstraints {
   maxSpeakerRatio?: number  // max % of total from one speaker (default 0.4)
   minSpeakers?: number      // minimum distinct speakers (default 2)
+  demographicTargets?: Record<string, Record<string, number>> // e.g. { gender: { male: 0.5, female: 0.5 } }
 }
 
 export interface QualityGate {
@@ -45,6 +46,10 @@ export interface PooledBU {
   clippingRatio: number | null
   beepMaskRatio: number | null
   qualityScore: number | null
+  // demographics (from sessions → users_profile join)
+  ageBand?: string
+  gender?: string
+  regionGroup?: string
 }
 
 export interface PoolResult {
@@ -56,6 +61,7 @@ export interface PoolResult {
   speakerCount: number
   qualityDistribution: Record<string, number>
   summary: string
+  demographicActual?: Record<string, Record<string, number>>
 }
 
 export interface PoolPreview {
@@ -76,10 +82,10 @@ const DEFAULT_QUALITY_GATE: Required<QualityGate> = {
   maxBeepMaskRatio: 0.3,
 }
 
-const DEFAULT_DIVERSITY: Required<DiversityConstraints> = {
+const DEFAULT_DIVERSITY = {
   maxSpeakerRatio: 0.4,
   minSpeakers: 2,
-}
+} satisfies Omit<Required<DiversityConstraints>, 'demographicTargets'>
 
 // ── Core Functions ──────────────────────────────────────────────────────
 
@@ -154,7 +160,25 @@ async function fetchEligibleBUs(filters: PoolingFilters): Promise<PooledBU[]> {
     metricsMap.set(key, m)
   }
 
-  // Step 4: Combine and filter
+  // Step 4: Fetch speaker demographics via sessions → users_profile
+  const { data: profileRows } = await supabaseAdmin
+    .from('sessions')
+    .select('id, pid, users_profile(age_band, gender, region_group)')
+    .in('id', sessionIds)
+
+  const profileMap = new Map<string, { ageBand?: string; gender?: string; regionGroup?: string }>()
+  for (const row of (profileRows ?? []) as Record<string, unknown>[]) {
+    const profile = row.users_profile as Record<string, unknown> | null
+    if (profile) {
+      profileMap.set(row.id as string, {
+        ageBand: (profile.age_band as string) ?? undefined,
+        gender: (profile.gender as string) ?? undefined,
+        regionGroup: (profile.region_group as string) ?? undefined,
+      })
+    }
+  }
+
+  // Step 5: Combine and filter
   const result: PooledBU[] = []
   for (const row of buRows as Record<string, unknown>[]) {
     const sessionId = row.session_id as string
@@ -163,6 +187,7 @@ async function fetchEligibleBUs(filters: PoolingFilters): Promise<PooledBU[]> {
 
     const metricsKey = `${sessionId}_${row.minute_index}`
     const metrics = metricsMap.get(metricsKey)
+    const demo = profileMap.get(sessionId)
 
     result.push({
       id: row.id as string,
@@ -181,6 +206,9 @@ async function fetchEligibleBUs(filters: PoolingFilters): Promise<PooledBU[]> {
       clippingRatio: metrics ? Number(metrics.clipping_ratio ?? null) : null,
       beepMaskRatio: metrics ? Number(metrics.beep_mask_ratio ?? null) : null,
       qualityScore: metrics ? Number(metrics.quality_score ?? null) : null,
+      ageBand: demo?.ageBand,
+      gender: demo?.gender,
+      regionGroup: demo?.regionGroup,
     })
   }
 
@@ -206,16 +234,41 @@ function applyQualityGate(bus: PooledBU[], gate: QualityGate): PooledBU[] {
   })
 }
 
+// Demographic category → PooledBU field mapping
+const DEMOGRAPHIC_FIELD_MAP: Record<string, keyof PooledBU> = {
+  gender: 'gender',
+  ageBand: 'ageBand',
+  age_band: 'ageBand',
+  regionGroup: 'regionGroup',
+  region_group: 'regionGroup',
+}
+
 /**
- * Apply diversity constraints: max speaker ratio + min speakers.
+ * Apply diversity constraints: max speaker ratio + min speakers + demographic targets.
  */
-function applyDiversityConstraints(
+export function applyDiversityConstraints(
   ranked: PooledBU[],
   count: number,
   constraints: DiversityConstraints,
-): PooledBU[] {
+): { selected: PooledBU[]; demographicActual?: Record<string, Record<string, number>> } {
   const c = { ...DEFAULT_DIVERSITY, ...constraints }
   const maxPerSpeaker = Math.max(1, Math.floor(count * c.maxSpeakerRatio))
+  const targets = c.demographicTargets
+
+  // Initialize demographic slot tracking
+  const slots: Record<string, Record<string, number>> = {}
+  const filled: Record<string, Record<string, number>> = {}
+
+  if (targets) {
+    for (const [category, ratios] of Object.entries(targets)) {
+      slots[category] = {}
+      filled[category] = {}
+      for (const [value, ratio] of Object.entries(ratios)) {
+        slots[category][value] = Math.round(count * ratio)
+        filled[category][value] = 0
+      }
+    }
+  }
 
   const selected: PooledBU[] = []
   const speakerCounts = new Map<string, number>()
@@ -223,16 +276,59 @@ function applyDiversityConstraints(
   for (const bu of ranked) {
     if (selected.length >= count) break
 
+    // Speaker ratio check
     const speaker = bu.userId ?? '__unknown__'
     const currentCount = speakerCounts.get(speaker) ?? 0
-
     if (currentCount >= maxPerSpeaker) continue
+
+    // Demographic slot check
+    if (targets) {
+      let canSelect = true
+      for (const category of Object.keys(targets)) {
+        const field = DEMOGRAPHIC_FIELD_MAP[category]
+        const value = field ? (bu[field] as string | undefined) : undefined
+        const bucket = value ?? '응답안함'
+
+        // If this bucket has a target and is already full, skip
+        if (slots[category][bucket] !== undefined && filled[category][bucket] >= slots[category][bucket]) {
+          canSelect = false
+          break
+        }
+      }
+      if (!canSelect) continue
+    }
 
     selected.push(bu)
     speakerCounts.set(speaker, currentCount + 1)
+
+    // Update demographic filled counts
+    if (targets) {
+      for (const category of Object.keys(targets)) {
+        const field = DEMOGRAPHIC_FIELD_MAP[category]
+        const value = field ? (bu[field] as string | undefined) : undefined
+        const bucket = value ?? '응답안함'
+        if (filled[category][bucket] !== undefined) {
+          filled[category][bucket]++
+        } else {
+          filled[category][bucket] = 1
+        }
+      }
+    }
   }
 
-  return selected
+  // Compute actual demographic ratios
+  let demographicActual: Record<string, Record<string, number>> | undefined
+  if (targets && selected.length > 0) {
+    demographicActual = {}
+    for (const [category, counts] of Object.entries(filled)) {
+      demographicActual[category] = {}
+      for (const [value, count_] of Object.entries(counts)) {
+        demographicActual[category][value] = Math.round((count_ / selected.length) * 10000) / 10000
+      }
+    }
+  }
+
+  return { selected, demographicActual }
 }
 
 /**
@@ -259,7 +355,7 @@ export async function poolAndRankBUs(
   })
 
   // 4. Apply diversity constraints and select top N
-  const selected = applyDiversityConstraints(ranked, requestedBUs, diversityConstraints)
+  const { selected, demographicActual } = applyDiversityConstraints(ranked, requestedBUs, diversityConstraints)
 
   // 5. Build result
   const speakerSet = new Set(selected.map((bu) => bu.userId ?? '__unknown__'))
@@ -284,6 +380,7 @@ export async function poolAndRankBUs(
     speakerCount: speakerSet.size,
     qualityDistribution,
     summary,
+    demographicActual,
   }
 }
 

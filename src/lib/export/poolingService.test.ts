@@ -115,6 +115,164 @@ describe('poolingService', () => {
       expect(result.selectedBUs.length).toBeLessThanOrEqual(2)
       expect(result.canFulfill).toBe(false)
     })
+
+    it('applies demographic targets - single category', async () => {
+      // 6 BUs: 4 male, 2 female, request 4 with 50/50 gender target
+      const bus = [
+        mockBU({ id: 'bu-1', user_id: 'u1', qa_score: 95, session_id: 'sess-m1' }),
+        mockBU({ id: 'bu-2', user_id: 'u2', qa_score: 90, session_id: 'sess-m2' }),
+        mockBU({ id: 'bu-3', user_id: 'u3', qa_score: 85, session_id: 'sess-f1' }),
+        mockBU({ id: 'bu-4', user_id: 'u4', qa_score: 80, session_id: 'sess-m3' }),
+        mockBU({ id: 'bu-5', user_id: 'u5', qa_score: 75, session_id: 'sess-f2' }),
+        mockBU({ id: 'bu-6', user_id: 'u6', qa_score: 70, session_id: 'sess-m4' }),
+      ]
+
+      // Mock sessions → users_profile join data
+      const profileData = [
+        { id: 'sess-m1', pid: 'p1', users_profile: { age_band: '30대', gender: '남성', region_group: '수도권' } },
+        { id: 'sess-m2', pid: 'p2', users_profile: { age_band: '20대', gender: '남성', region_group: '영남' } },
+        { id: 'sess-f1', pid: 'p3', users_profile: { age_band: '20대', gender: '여성', region_group: '수도권' } },
+        { id: 'sess-m3', pid: 'p4', users_profile: { age_band: '40대', gender: '남성', region_group: '호남' } },
+        { id: 'sess-f2', pid: 'p5', users_profile: { age_band: '30대', gender: '여성', region_group: '수도권' } },
+        { id: 'sess-m4', pid: 'p6', users_profile: { age_band: '20대', gender: '남성', region_group: '영남' } },
+      ]
+
+      vi.mocked(supabaseAdmin.from).mockImplementation((table: string) => {
+        if (table === 'billable_units') return mockQueryChain(bus) as never
+        if (table === 'transcript_chunks') return mockQueryChain([{ session_id: 'sess-m1' }, { session_id: 'sess-m2' }, { session_id: 'sess-f1' }, { session_id: 'sess-m3' }, { session_id: 'sess-f2' }, { session_id: 'sess-m4' }]) as never
+        if (table === 'bu_quality_metrics') return mockQueryChain([]) as never
+        if (table === 'sessions') return mockQueryChain(profileData) as never
+        return mockQueryChain([]) as never
+      })
+
+      const { poolAndRankBUs } = await import('./poolingService.js')
+      const result = await poolAndRankBUs('A01', 4, {}, {}, {
+        demographicTargets: {
+          gender: { '남성': 0.5, '여성': 0.5 },
+        },
+      })
+
+      // Should select 2 male + 2 female = 4 total
+      const maleCount = result.selectedBUs.filter(bu => bu.gender === '남성').length
+      const femaleCount = result.selectedBUs.filter(bu => bu.gender === '여성').length
+
+      expect(result.selectedBUs).toHaveLength(4)
+      expect(maleCount).toBe(2)
+      expect(femaleCount).toBe(2)
+      expect(result.demographicActual).toBeDefined()
+      expect(result.demographicActual!.gender['남성']).toBe(0.5)
+      expect(result.demographicActual!.gender['여성']).toBe(0.5)
+    })
+
+    it('reports demographic shortfall when targets cannot be met', async () => {
+      // 3 BUs all male, request 4 with 50/50 gender target
+      const bus = [
+        mockBU({ id: 'bu-1', user_id: 'u1', qa_score: 95, session_id: 'sess-m1' }),
+        mockBU({ id: 'bu-2', user_id: 'u2', qa_score: 90, session_id: 'sess-m2' }),
+        mockBU({ id: 'bu-3', user_id: 'u3', qa_score: 85, session_id: 'sess-m3' }),
+      ]
+
+      const profileData = [
+        { id: 'sess-m1', pid: 'p1', users_profile: { age_band: '30대', gender: '남성', region_group: '수도권' } },
+        { id: 'sess-m2', pid: 'p2', users_profile: { age_band: '20대', gender: '남성', region_group: '영남' } },
+        { id: 'sess-m3', pid: 'p3', users_profile: { age_band: '40대', gender: '남성', region_group: '호남' } },
+      ]
+
+      vi.mocked(supabaseAdmin.from).mockImplementation((table: string) => {
+        if (table === 'billable_units') return mockQueryChain(bus) as never
+        if (table === 'transcript_chunks') return mockQueryChain([{ session_id: 'sess-m1' }, { session_id: 'sess-m2' }, { session_id: 'sess-m3' }]) as never
+        if (table === 'bu_quality_metrics') return mockQueryChain([]) as never
+        if (table === 'sessions') return mockQueryChain(profileData) as never
+        return mockQueryChain([]) as never
+      })
+
+      const { poolAndRankBUs } = await import('./poolingService.js')
+      const result = await poolAndRankBUs('A01', 4, {}, {}, {
+        demographicTargets: {
+          gender: { '남성': 0.5, '여성': 0.5 },
+        },
+      })
+
+      // Male slots = 2, female slots = 2
+      // Only 2 males can be selected (slot full), 0 females → shortfall
+      expect(result.selectedBUs.length).toBeLessThanOrEqual(2)
+      expect(result.canFulfill).toBe(false)
+    })
+
+    it('works without demographicTargets (backward compatible)', async () => {
+      const bus = [
+        mockBU({ id: 'bu-1', user_id: 'u1', qa_score: 90, session_id: 'sess-1' }),
+        mockBU({ id: 'bu-2', user_id: 'u2', qa_score: 80, session_id: 'sess-1' }),
+      ]
+
+      vi.mocked(supabaseAdmin.from).mockImplementation((table: string) => {
+        if (table === 'billable_units') return mockQueryChain(bus) as never
+        if (table === 'transcript_chunks') return mockQueryChain([{ session_id: 'sess-1' }]) as never
+        if (table === 'bu_quality_metrics') return mockQueryChain([]) as never
+        if (table === 'sessions') return mockQueryChain([]) as never
+        return mockQueryChain([]) as never
+      })
+
+      const { poolAndRankBUs } = await import('./poolingService.js')
+      const result = await poolAndRankBUs('A01', 2)
+
+      expect(result.selectedBUs).toHaveLength(2)
+      expect(result.demographicActual).toBeUndefined()
+      expect(result.canFulfill).toBe(true)
+    })
+
+    it('applies multi-category demographic targets', async () => {
+      // 6 BUs with mixed demographics
+      const bus = [
+        mockBU({ id: 'bu-1', user_id: 'u1', qa_score: 95, session_id: 'sess-1' }),
+        mockBU({ id: 'bu-2', user_id: 'u2', qa_score: 90, session_id: 'sess-2' }),
+        mockBU({ id: 'bu-3', user_id: 'u3', qa_score: 85, session_id: 'sess-3' }),
+        mockBU({ id: 'bu-4', user_id: 'u4', qa_score: 80, session_id: 'sess-4' }),
+        mockBU({ id: 'bu-5', user_id: 'u5', qa_score: 75, session_id: 'sess-5' }),
+        mockBU({ id: 'bu-6', user_id: 'u6', qa_score: 70, session_id: 'sess-6' }),
+      ]
+
+      const profileData = [
+        { id: 'sess-1', pid: 'p1', users_profile: { age_band: '20대', gender: '남성', region_group: '수도권' } },
+        { id: 'sess-2', pid: 'p2', users_profile: { age_band: '20대', gender: '여성', region_group: '수도권' } },
+        { id: 'sess-3', pid: 'p3', users_profile: { age_band: '30대', gender: '남성', region_group: '영남' } },
+        { id: 'sess-4', pid: 'p4', users_profile: { age_band: '30대', gender: '여성', region_group: '영남' } },
+        { id: 'sess-5', pid: 'p5', users_profile: { age_band: '20대', gender: '남성', region_group: '수도권' } },
+        { id: 'sess-6', pid: 'p6', users_profile: { age_band: '30대', gender: '여성', region_group: '호남' } },
+      ]
+
+      vi.mocked(supabaseAdmin.from).mockImplementation((table: string) => {
+        if (table === 'billable_units') return mockQueryChain(bus) as never
+        if (table === 'transcript_chunks') return mockQueryChain(
+          profileData.map(p => ({ session_id: p.id }))
+        ) as never
+        if (table === 'bu_quality_metrics') return mockQueryChain([]) as never
+        if (table === 'sessions') return mockQueryChain(profileData) as never
+        return mockQueryChain([]) as never
+      })
+
+      const { poolAndRankBUs } = await import('./poolingService.js')
+      const result = await poolAndRankBUs('A01', 4, {}, {}, {
+        demographicTargets: {
+          gender: { '남성': 0.5, '여성': 0.5 },
+          ageBand: { '20대': 0.5, '30대': 0.5 },
+        },
+      })
+
+      expect(result.selectedBUs).toHaveLength(4)
+      expect(result.demographicActual).toBeDefined()
+
+      // Verify both categories achieved
+      const males = result.selectedBUs.filter(bu => bu.gender === '남성').length
+      const females = result.selectedBUs.filter(bu => bu.gender === '여성').length
+      expect(males).toBe(2)
+      expect(females).toBe(2)
+
+      const twenties = result.selectedBUs.filter(bu => bu.ageBand === '20대').length
+      const thirties = result.selectedBUs.filter(bu => bu.ageBand === '30대').length
+      expect(twenties).toBe(2)
+      expect(thirties).toBe(2)
+    })
   })
 
   describe('previewPool', () => {
