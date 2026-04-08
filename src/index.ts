@@ -14,6 +14,7 @@ import storage from './routes/storage.js'
 import admin from './routes/admin.js'
 import adminExports from './routes/admin-exports.js'
 import adminLedger from './routes/admin-ledger.js'
+import adminUtterances from './routes/admin-utterances.js'
 import logging from './routes/logging.js'
 import transcripts from './routes/transcripts.js'
 import transcriptChunks from './routes/transcriptChunks.js'
@@ -81,6 +82,7 @@ app.route('/api/storage', storage)
 app.route('/api/admin', admin)
 app.route('/api/admin', adminExports)
 app.route('/api/admin', adminLedger)
+app.route('/api/admin', adminUtterances)
 app.route('/api/logging', logging)
 app.route('/api/transcripts', transcripts)
 app.route('/api/transcript-chunks', transcriptChunks)

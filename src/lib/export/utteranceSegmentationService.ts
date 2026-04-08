@@ -18,6 +18,7 @@ import {
 } from '../audio/ffmpegProcessor.js'
 import { mergeShortSegments, splitLongSegments } from './segmentationUtils.js'
 import { buildUtteranceId } from './utteranceRepository.js'
+import { supabaseAdmin } from '../supabase.js'
 
 const MIN_UTTERANCE_SEC = 5
 const MAX_UTTERANCE_SEC = 30
@@ -45,6 +46,7 @@ export interface SegmentationResult {
   totalUtterances: number
   activeUtterances: number
   segments: UtteranceSegment[]
+  source?: 'client' | 'server'
 }
 
 /**
@@ -63,6 +65,18 @@ export async function segmentSession(
   audioStoragePath: string,
   options?: SegmentationOptions,
 ): Promise<SegmentationResult> {
+  // v3: 클라이언트 업로드 발화가 존재하면 서버 분할 스킵
+  const { count } = await supabaseAdmin
+    .from('utterances')
+    .select('*', { count: 'exact', head: true })
+    .eq('session_id', sessionId)
+    .eq('upload_status', 'uploaded')
+
+  if (count && count > 0) {
+    return { sessionId, totalUtterances: count, activeUtterances: count, segments: [], source: 'client' }
+  }
+
+  // 레거시 폴백: FFmpeg 서버 분할
   const workDir = join(tmpdir(), `utt-seg-${randomUUID()}`)
   mkdirSync(workDir, { recursive: true })
 

@@ -34,10 +34,10 @@ src/
   lib/export/ # poolingService, packageBuilder, metadataRepository 등
   routes/    # auth, sessions, sessionChunks, storage, transcripts,
              # transcriptChunks, user, logging, admin, admin-exports,
-             # admin-ledger, upload
-  scripts/   # 일회성 마이그레이션 스크립트
+             # admin-ledger, admin-utterances, upload
+  scripts/   # 일회성 스크립트
 supabase/
-  migrations/  # 001~024 SQL 파일
+  migrations/  # 001~028 SQL 파일
 ```
 
 ## 핵심 패턴

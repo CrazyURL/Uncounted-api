@@ -9,7 +9,6 @@ import {
   buildDedupKey,
   type MetadataEventInsert,
 } from '../lib/export/metadataRepository.js'
-import { uploadObject, S3_META_BUCKET } from '../lib/s3.js'
 
 const upload = new Hono()
 
@@ -22,7 +21,7 @@ const MAX_RECORDS_PER_BATCH = 200
 const MAX_PAYLOAD_BYTES = 10_240      // 레코드당 10 KB
 
 const ALLOWED_SCHEMAS = new Set([
-  'U-M05-v1', 'U-M06-v1', 'U-M07-v1', 'U-M08-v1', 'U-M09-v1',
+  'U-M01-v1', 'U-M05-v1', 'U-M06-v1', 'U-M07-v1', 'U-M08-v1', 'U-M09-v1',
   'U-M10-v1', 'U-M11-v1', 'U-M13-v1', 'U-M14-v1', 'U-M16-v1',
   'U-M18-v1', 'U-P01-v1',
 ])
@@ -99,15 +98,6 @@ upload.post('/', async (c) => {
 
   try {
     const result = await upsertMetadataEvents(inserts)
-
-    // S3 백업 (fire-and-forget)
-    const batchId = crypto.randomUUID()
-    uploadObject(
-      S3_META_BUCKET,
-      `metadata/${userId ?? 'anon'}/${batchId}.jsonl`,
-      rawBody,
-      'application/x-ndjson',
-    ).catch((err) => console.error('[upload] S3 backup failed:', err))
 
     return c.json({
       accepted: result.inserted,

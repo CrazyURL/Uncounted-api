@@ -27,10 +27,11 @@ paths: src/routes/**
 | | `/api/sessions/:id/dup` | PATCH | 필수 | 중복 상태 수정 |
 | **Session Chunks** | `/api/session-chunks/:sessionId/:chunkIndex/labels` | PUT | 필수 | 청크 라벨 업데이트 |
 | **Storage** | `/api/storage/audio` | POST | 필수 | WAV 업로드 (base64) |
-| | `/api/storage/meta` | POST | 필수 | 메타데이터 JSONL 업로드 |
 | | `/api/storage/audio/chunk` | POST | 필수 | WAV 청크 업로드 (multipart) |
 | | `/api/storage/audio/chunks/:sessionId` | GET | 필수 | 청크 목록 조회 |
 | | `/api/storage/audio/signed-url` | POST | 필수 | 서명 URL 발급 |
+| | `/api/storage/session-chunks` | POST | 필수 | 논리 청크 메타 등록 (WAV 없음) |
+| | `/api/storage/audio/utterance` | POST | 필수 | 발화 WAV + 메타 업로드 (multipart) |
 | | `/api/storage/user` | DELETE | 필수 | 사용자 파일 전체 삭제 |
 | **User** | `/api/user/consent` | GET/PUT | 필수 | 동의 상태 조회/수정 |
 | **Transcripts** | `/api/transcripts` | GET | 필수 | 전사 목록 |
@@ -73,7 +74,7 @@ paths: src/routes/**
 | | `/api/admin/metadata/summary` | GET | 어드민 | 메타데이터 요약 (이벤트수/유저수/스키마별) |
 | | `/api/admin/metadata/events` | GET | 어드민 | 메타데이터 이벤트 조회 (페이지네이션) |
 | | `/api/admin/consent/notify-withdrawal` | POST | 어드민 | 동의 철회 통지 완료 처리 |
-| **Upload** | `/api/upload` | POST | 선택적 | 메타데이터 NDJSON 배치 수신 → DB 저장 |
+| **Upload** | `/api/upload` | POST | 선택적 | 메타데이터 NDJSON 배치 수신 → DB 저장 (U-M01~U-M18, U-P01) |
 | **Export** | `/api/admin/export-requests/:id/preview` | POST | 어드민 | 풀링 미리보기 |
 | | `/api/admin/export-requests/:id/confirm` | PUT | 어드민 | draft → queued 확정 |
 | | `/api/admin/export-requests/:id/process` | POST | 어드민 | BU 풀링 + 발화 분할 + 품질 분석 |

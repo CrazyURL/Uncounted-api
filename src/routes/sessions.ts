@@ -123,26 +123,32 @@ sessions.post('/batch', async (c) => {
 
 /**
  * PATCH /sessions/:id
- * STT 완료 후 transcript + audio_metrics 업데이트 (Android SttProcessingService 호출)
+ * STT 완료 후 audio_metrics + has_diarization + upload_status 업데이트
+ * (Android SttProcessingService 호출)
+ *
+ * NOTE: transcript는 sessions 테이블 컬럼이 아님 — POST /transcripts/:id로 별도 저장.
+ *       클라이언트가 보내더라도 무시한다.
  */
 sessions.patch('/:id', async (c) => {
   const userId = c.get('userId') as string
   const sessionId = c.req.param('id')
-  const { transcript, audio_metrics, upload_status } = getBody<{
-    transcript?: string
+  const { audio_metrics, has_diarization, upload_status, pii_status } = getBody<{
     audio_metrics?: unknown
+    has_diarization?: boolean
     upload_status?: string
+    pii_status?: string
   }>(c)
 
   try {
-    if (transcript === undefined && audio_metrics === undefined && upload_status === undefined) {
+    if (audio_metrics === undefined && has_diarization === undefined
+        && upload_status === undefined && pii_status === undefined) {
       return c.json({ error: 'No fields to update' }, 400)
     }
 
-    // transcript / audio_metrics 업데이트 (조건 없음)
+    // audio_metrics / has_diarization 업데이트
     const updatePayload: Record<string, unknown> = {}
-    if (transcript !== undefined)    updatePayload.transcript    = transcript
-    if (audio_metrics !== undefined) updatePayload.audio_metrics = audio_metrics
+    if (audio_metrics !== undefined)  updatePayload.audio_metrics  = audio_metrics
+    if (has_diarization !== undefined) updatePayload.has_diarization = has_diarization
 
     if (Object.keys(updatePayload).length > 0) {
       const { error } = await supabaseAdmin
@@ -162,6 +168,15 @@ sessions.patch('/:id', async (c) => {
         .eq('user_id', userId)
         .neq('upload_status', 'UPLOADED')
       // 0 rows affected (이미 UPLOADED) 는 정상 — 에러 무시
+    }
+
+    // pii_status 업데이트
+    if (pii_status !== undefined) {
+      await supabaseAdmin
+        .from('sessions')
+        .update({ pii_status })
+        .eq('id', sessionId)
+        .eq('user_id', userId)
     }
 
     return c.json({ data: { ok: true } })
@@ -343,6 +358,43 @@ sessions.patch('/:id/dup', async (c) => {
 
     if (error) return c.json({ error: error.message }, 500)
     return c.json({ data: { success: true } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * POST /sessions/:id/utterances/complete
+ * 세션 발화 업로드 완료 신호
+ * Body (암호화): { totalCount, uploadedCount, failedCount }
+ */
+sessions.post('/:id/utterances/complete', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const { totalCount, uploadedCount } = getBody<{
+    totalCount: number
+    uploadedCount: number
+    failedCount?: number
+  }>(c)
+
+  if (totalCount === undefined || uploadedCount === undefined) {
+    return c.json({ error: 'Missing totalCount or uploadedCount' }, 400)
+  }
+
+  try {
+    const uploadStatus = uploadedCount === totalCount ? 'complete' : 'partial'
+
+    const { error } = await supabaseAdmin
+      .from('sessions')
+      .update({
+        utterance_count:         totalCount,
+        utterance_upload_status: uploadStatus,
+      })
+      .eq('id', sessionId)
+      .eq('user_id', userId)
+
+    if (error) return c.json({ error: error.message }, 500)
+    return c.json({ data: { ok: true, uploadStatus } })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }

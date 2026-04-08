@@ -50,29 +50,6 @@ storage.post('/audio', async (c) => {
   }
 })
 
-/**
- * POST /storage/meta
- * 메타 JSONL 업로드
- * Body: { batchId: string, content: string (JSONL text) }
- */
-storage.post('/meta', async (c) => {
-  const userId = c.get('userId') as string
-  const { batchId, content } = getBody<{ batchId: string; content: string }>(c)
-
-  if (!batchId || !content) {
-    return c.json({ error: 'Missing batchId or content' }, 400)
-  }
-
-  const path = `${userId}/${batchId}.jsonl`
-
-  try {
-    await uploadObject(S3_META_BUCKET, path, content, 'application/x-ndjson')
-
-    return c.json({ path })
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500)
-  }
-})
 
 /**
  * POST /storage/audio/chunk
@@ -191,6 +168,222 @@ storage.post('/audio/signed-url', async (c) => {
     const signedUrl = await getSignedUrl(S3_AUDIO_BUCKET, storagePath, expiresIn)
 
     return c.json({ signedUrl })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * POST /storage/session-chunks
+ * 논리 청크 메타 등록 (WAV 없음, v3 logical chunk)
+ * Body (암호화): { sessionId, chunkIndex, chunkType, utteranceCount, totalUtteranceDuration, startSec, endSec }
+ */
+storage.post('/session-chunks', async (c) => {
+  const userId = c.get('userId') as string
+
+  try {
+    const {
+      sessionId,
+      chunkIndex,
+      chunkType,
+      utteranceCount,
+      totalUtteranceDuration,
+      startSec,
+      endSec,
+    } = getBody<{
+      sessionId: string
+      chunkIndex: number
+      chunkType: string
+      utteranceCount: number
+      totalUtteranceDuration: number
+      startSec: number
+      endSec: number
+    }>(c)
+
+    if (!sessionId || chunkIndex === undefined || chunkIndex === null) {
+      return c.json({ error: 'Missing sessionId or chunkIndex' }, 400)
+    }
+
+    // chunkType 허용값 검증
+    const allowedChunkTypes = ['wav', 'logical']
+    if (chunkType && !allowedChunkTypes.includes(chunkType)) {
+      return c.json({ error: 'Invalid chunkType: must be wav or logical' }, 400)
+    }
+
+    // 세션 소유권 검증
+    const { data: session } = await supabaseAdmin
+      .from('sessions')
+      .select('id')
+      .eq('id', sessionId)
+      .eq('user_id', userId)
+      .single()
+    if (!session) return c.json({ error: 'Session not found or access denied' }, 403)
+
+    const durationSec = endSec - startSec
+
+    const { data: chunkRow, error: dbError } = await supabaseAdmin
+      .from('session_chunks')
+      .upsert(
+        {
+          session_id:               sessionId,
+          user_id:                  userId,
+          chunk_index:              chunkIndex,
+          chunk_type:               chunkType || 'logical',
+          utterance_count:          utteranceCount ?? 0,
+          total_utterance_duration: totalUtteranceDuration ?? null,
+          start_sec:                startSec,
+          end_sec:                  endSec,
+          duration_sec:             durationSec,
+          storage_path:             null,
+          sample_rate:              16000,
+          upload_status:            'uploaded',
+          updated_at:               new Date().toISOString(),
+        },
+        { onConflict: 'session_id,chunk_index' },
+      )
+      .select('id')
+      .single()
+
+    if (dbError) {
+      return c.json({ error: dbError.message }, 500)
+    }
+
+    return c.json({ chunkId: chunkRow.id })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * POST /storage/audio/utterance
+ * 발화 WAV + 메타 업로드 — multipart/form-data
+ * - wavFile: WAV binary (Blob)
+ * - meta: AES-256-GCM 암호화된 JSON (utterance 메타데이터)
+ * 저장 경로: utterances/{sessionId}/{utteranceId}.wav
+ */
+storage.post('/audio/utterance', async (c) => {
+  const userId = c.get('userId') as string
+
+  try {
+    const form = await c.req.formData()
+    const wavFile = form.get('wavFile') as File | null
+    const metaRaw = form.get('meta') as string | null
+
+    if (!wavFile || !metaRaw) {
+      return c.json({ error: 'Missing wavFile or meta' }, 400)
+    }
+
+    const meta = decryptData(metaRaw) as {
+      sessionId: string
+      utteranceId: string
+      chunkId: number
+      sequenceOrder: number
+      sequenceInChunk: number
+      speakerId: string
+      isUser: boolean
+      startSec: number
+      endSec: number
+      durationSec: number
+      paddedStartSec?: number
+      paddedEndSec?: number
+      paddedDurationSec?: number
+      transcriptText?: string
+      transcriptWords?: unknown
+      snrDb?: number
+      speechRatio?: number
+      clippingRatio?: number
+      beepMaskRatio?: number
+      qualityScore?: number
+      qualityGrade?: string
+      segmentedBy?: string
+      clientVersion?: string
+      labels?: Record<string, string>
+      dialogAct?: string
+      labelSource?: string
+      labelConfidence?: number
+    }
+
+    const { sessionId, utteranceId } = meta
+
+    if (!sessionId || !utteranceId) {
+      return c.json({ error: 'Missing required meta fields' }, 400)
+    }
+
+    // WAV 파일 크기 제한 (10MB)
+    const MAX_WAV_SIZE = 10 * 1024 * 1024
+    if (wavFile.size > MAX_WAV_SIZE) {
+      return c.json({ error: 'WAV file too large: max 10MB' }, 413)
+    }
+
+    // 세션 소유권 검증
+    const { data: session } = await supabaseAdmin
+      .from('sessions')
+      .select('id')
+      .eq('id', sessionId)
+      .eq('user_id', userId)
+      .single()
+    if (!session) return c.json({ error: 'Session not found or access denied' }, 403)
+
+    const storagePath = `utterances/${sessionId}/${utteranceId}.wav`
+
+    // File → Uint8Array
+    const bytes = new Uint8Array(await wavFile.arrayBuffer())
+
+    // S3 업로드 먼저
+    await uploadObject(S3_AUDIO_BUCKET, storagePath, bytes, 'audio/wav')
+
+    // utterances UPSERT
+    const { error: dbError } = await supabaseAdmin
+      .from('utterances')
+      .upsert(
+        {
+          id:                  utteranceId,
+          session_id:          sessionId,
+          chunk_id:            meta.chunkId ?? null,
+          user_id:             userId,
+          sequence_in_chunk:   meta.sequenceInChunk,
+          sequence_order:      meta.sequenceOrder,
+          speaker_id:          meta.speakerId,
+          is_user:             meta.isUser,
+          start_sec:           meta.startSec,
+          end_sec:             meta.endSec,
+          duration_sec:        meta.durationSec,
+          padded_start_sec:    meta.paddedStartSec ?? null,
+          padded_end_sec:      meta.paddedEndSec ?? null,
+          padded_duration_sec: meta.paddedDurationSec ?? null,
+          storage_path:        storagePath,
+          file_size_bytes:     bytes.byteLength,
+          upload_status:       'uploaded',
+          transcript_text:     meta.transcriptText ?? null,
+          transcript_words:    meta.transcriptWords ?? null,
+          snr_db:              meta.snrDb ?? null,
+          speech_ratio:        meta.speechRatio ?? null,
+          clipping_ratio:      meta.clippingRatio ?? null,
+          beep_mask_ratio:     meta.beepMaskRatio ?? null,
+          quality_score:       meta.qualityScore ?? null,
+          quality_grade:       meta.qualityGrade ?? null,
+          labels:              meta.labels ?? null,
+          dialog_act:          meta.dialogAct ?? null,
+          label_source:        meta.labelSource ?? null,
+          label_confidence:    meta.labelConfidence ?? null,
+          segmented_by:        meta.segmentedBy ?? 'client',
+          client_version:      meta.clientVersion ?? null,
+          updated_at:          new Date().toISOString(),
+        },
+        { onConflict: 'session_id,sequence_order' },
+      )
+
+    if (dbError) {
+      // DB 실패 시 S3 정리
+      try {
+        await deleteObjects(S3_AUDIO_BUCKET, [storagePath])
+      } catch (_) {
+        // S3 삭제 실패는 무시 (orphan 파일은 추후 정리)
+      }
+      return c.json({ error: dbError.message }, 500)
+    }
+
+    return c.json({ storagePath, utteranceId })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }

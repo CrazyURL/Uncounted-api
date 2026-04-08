@@ -32,6 +32,8 @@ export interface MetadataEventInsert {
 // U-M07: 자연키 (pseudoId + dateBucket + dayOfWeek + timeBucket)
 // 기타 스키마: pseudoId + dateBucket + payload hash
 const NATURAL_KEY_SCHEMAS: Record<string, (r: Record<string, unknown>) => string> = {
+  'U-M01-v1': (r) =>
+    `U-M01-v1:${r.pseudoId}:${r.dateBucket}:${r.timeBucket}:${r.callType}:${r.durationBucket}`,
   'U-M07-v1': (r) =>
     `U-M07-v1:${r.pseudoId}:${r.dateBucket}:${r.dayOfWeek}:${r.timeBucket}`,
   'U-M08-v1': (r) =>

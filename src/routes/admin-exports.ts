@@ -468,14 +468,33 @@ adminExports.post('/export-requests/:id/process', async (c) => {
       }
     }
 
-    const sessionsToSegment = [...sessionMap.entries()].map(([sessionId, userId]) => ({
-      sessionId,
-      audioStoragePath: `${userId}/${sessionId}/${sessionId}.wav`,
-    }))
+    // v3: 클라이언트 발화가 있는 세션은 서버 분할 스킵
+    const legacySessions: Array<{ sessionId: string; audioStoragePath: string }> = []
+    let clientUtteranceCount = 0
 
-    const segResults = await segmentBulk(sessionsToSegment)
+    for (const [sessionId, userId] of sessionMap.entries()) {
+      const { count } = await supabaseAdmin
+        .from('utterances')
+        .select('*', { count: 'exact', head: true })
+        .eq('session_id', sessionId)
+        .eq('upload_status', 'uploaded')
 
-    // 7. Save utterances to export_package_items
+      if (count && count > 0) {
+        clientUtteranceCount += count
+      } else {
+        legacySessions.push({
+          sessionId,
+          audioStoragePath: `${userId}/${sessionId}/${sessionId}.wav`,
+        })
+      }
+    }
+
+    // 레거시 세션만 FFmpeg 분할
+    const segResults = legacySessions.length > 0
+      ? await segmentBulk(legacySessions)
+      : []
+
+    // 7. Save utterances to export_package_items (레거시 세션만)
     const utteranceSaves = segResults.flatMap((sr) => {
       if (!sr.result) return []
       return sr.result.segments.map((seg) => ({
@@ -501,11 +520,13 @@ adminExports.post('/export-requests/:id/process', async (c) => {
     await analyzeBulk(sessionsForQuality)
 
     // 9. Update utterance_count + status → reviewing
+    const totalUtteranceCount = utteranceSaves.length + clientUtteranceCount
+
     await supabaseAdmin
       .from('export_jobs')
       .update({
         status: 'reviewing',
-        utterance_count: utteranceSaves.length,
+        utterance_count: totalUtteranceCount,
       })
       .eq('id', id)
 
@@ -515,7 +536,9 @@ adminExports.post('/export-requests/:id/process', async (c) => {
         selectedBUs: poolResult.selectedBUs.length,
         canFulfill: poolResult.canFulfill,
         shortfall: poolResult.shortfall,
-        utteranceCount: utteranceSaves.length,
+        utteranceCount: totalUtteranceCount,
+        clientUtteranceCount,
+        legacyUtteranceCount: utteranceSaves.length,
         segmentationErrors: segResults.filter((r) => r.error).length,
       },
     })
@@ -536,9 +559,80 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
   const id = c.req.param('id')
 
   try {
+    // v3: BU 잠금된 세션에서 utterances 테이블 직접 조회 시도
+    const { data: lockedBUs } = await supabaseAdmin
+      .from('billable_units')
+      .select('session_id')
+      .eq('locked_by_job_id', id)
+
+    const lockedSessionIds = [...new Set((lockedBUs ?? []).map((bu) => bu.session_id as string).filter(Boolean))]
+
+    let hasClientUtterances = false
+    if (lockedSessionIds.length > 0) {
+      const { count } = await supabaseAdmin
+        .from('utterances')
+        .select('*', { count: 'exact', head: true })
+        .in('session_id', lockedSessionIds)
+        .eq('upload_status', 'uploaded')
+
+      hasClientUtterances = (count ?? 0) > 0
+    }
+
+    if (hasClientUtterances) {
+      // v3: utterances 테이블에서 직접 조회
+      const { data: uttRows, error: uttError } = await supabaseAdmin
+        .from('utterances')
+        .select('*')
+        .in('session_id', lockedSessionIds)
+        .eq('upload_status', 'uploaded')
+        .order('session_id', { ascending: true })
+        .order('sequence_order', { ascending: true })
+
+      if (uttError) {
+        return c.json({ error: uttError.message }, 500)
+      }
+
+      const withUrls = await Promise.all(
+        (uttRows ?? []).map(async (u) => {
+          let signedUrl: string | null = null
+          if (u.storage_path) {
+            try {
+              signedUrl = await getSignedUrl('sanitized-audio', u.storage_path, 600)
+            } catch {
+              // ignore
+            }
+          }
+          return {
+            utteranceId: u.id,
+            sessionId: u.session_id,
+            chunkId: u.chunk_id,
+            sequenceInChunk: u.sequence_in_chunk,
+            sequenceOrder: u.sequence_order,
+            speakerId: u.speaker_id,
+            isUser: u.is_user,
+            startSec: u.start_sec,
+            endSec: u.end_sec,
+            durationSec: u.duration_sec,
+            storagePath: u.storage_path,
+            qualityGrade: u.quality_grade,
+            qualityScore: u.quality_score,
+            snrDb: u.snr_db,
+            speechRatio: u.speech_ratio,
+            reviewStatus: u.review_status,
+            excludeReason: u.exclude_reason,
+            transcriptText: u.transcript_text,
+            signedUrl,
+            source: 'utterances' as const,
+          }
+        }),
+      )
+
+      return c.json({ data: withUrls })
+    }
+
+    // 레거시 폴백: export_package_items
     const utterances = await getUtterancesByExportRequest(id)
 
-    // Add signed URLs for playback
     const withUrls = await Promise.all(
       utterances.map(async (u) => {
         let signedUrl: string | null = null
@@ -550,7 +644,7 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
             // ignore — URL generation may fail for missing files
           }
         }
-        return { ...u, signedUrl }
+        return { ...u, signedUrl, source: 'legacy' as const }
       }),
     )
 

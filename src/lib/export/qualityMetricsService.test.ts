@@ -12,6 +12,9 @@ vi.mock('../supabase.js', () => ({
       select: vi.fn().mockReturnValue({
         eq: vi.fn().mockReturnValue({
           order: vi.fn().mockResolvedValue({ data: [], error: null }),
+          eq: vi.fn().mockReturnValue({
+            not: vi.fn().mockResolvedValue({ data: [], error: null }),
+          }),
         }),
       }),
       update: vi.fn().mockReturnValue({
@@ -112,6 +115,17 @@ describe('qualityMetricsService', () => {
         if (table === 'billable_units') {
           return { update: mockUpdate } as never
         }
+        if (table === 'utterances') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                eq: vi.fn().mockReturnValue({
+                  not: vi.fn().mockResolvedValue({ data: [], error: null }),
+                }),
+              }),
+            }),
+          } as never
+        }
         return {} as never
       })
 
@@ -192,6 +206,17 @@ describe('qualityMetricsService', () => {
             update: vi.fn().mockReturnValue({
               eq: vi.fn().mockReturnValue({
                 eq: vi.fn().mockResolvedValue({ data: null, error: null }),
+              }),
+            }),
+          } as never
+        }
+        if (table === 'utterances') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                eq: vi.fn().mockReturnValue({
+                  not: vi.fn().mockResolvedValue({ data: [], error: null }),
+                }),
               }),
             }),
           } as never

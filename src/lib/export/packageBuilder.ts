@@ -51,9 +51,17 @@ export interface UtteranceMetaLine {
   utterance_id: string
   session_id: string
   pseudo_id: string | null
+  chunk_index?: number | null
+  sequence_in_chunk?: number | null
+  is_user?: boolean | null
+  speaker_id?: string | null
   duration_sec: number
+  start_sec?: number | null
+  end_sec?: number | null
   snr_db: number | null
   speech_ratio: number | null
+  volume_lufs?: number | null
+  beep_mask_ratio?: number | null
   quality_grade: string | null
   qa_score: number | null
 }
@@ -98,20 +106,55 @@ export async function buildPackage(
     if (client?.name) clientName = client.name
   }
 
-  // 2. Load included utterances (file_type='wav', non-excluded)
-  const { data: items, error: itemsError } = await supabaseAdmin
-    .from('export_package_items')
-    .select('*')
-    .eq('export_request_id', exportJobId)
-    .eq('file_type', 'wav')
-    .is('content_hash', null) // non-excluded
-    .order('utterance_id', { ascending: true })
+  // 2. Load included utterances — v3: utterances 테이블 우선, 없으면 export_package_items 폴백
+  let utterances: Record<string, unknown>[] = []
 
-  if (itemsError) {
-    throw new Error(`Failed to load package items: ${itemsError.message}`)
+  // 2a. BU 잠금된 세션 목록 추출
+  const { data: lockedBUs } = await supabaseAdmin
+    .from('billable_units')
+    .select('session_id')
+    .eq('locked_by_job_id', exportJobId)
+
+  const lockedSessionIds = [...new Set((lockedBUs ?? []).map((bu) => bu.session_id as string).filter(Boolean))]
+
+  if (lockedSessionIds.length > 0) {
+    // 2b. utterances 테이블에서 approved 발화 조회 (v3)
+    const { data: uttRows, error: uttError } = await supabaseAdmin
+      .from('utterances')
+      .select('*')
+      .in('session_id', lockedSessionIds)
+      .eq('upload_status', 'uploaded')
+      .in('review_status', ['pending', 'approved'])
+      .order('id', { ascending: true })
+
+    if (!uttError && uttRows && uttRows.length > 0) {
+      utterances = (uttRows as Record<string, unknown>[]).map((row) => ({
+        ...row,
+        utterance_id: row.id,
+        file_path_in_package: row.storage_path,
+        qa_score: row.quality_score,
+        pseudo_id: null,
+      }))
+    }
   }
 
-  const utterances = (items ?? []) as Record<string, unknown>[]
+  // 2c. utterances가 없으면 레거시 export_package_items 폴백
+  if (utterances.length === 0) {
+    const { data: items, error: itemsError } = await supabaseAdmin
+      .from('export_package_items')
+      .select('*')
+      .eq('export_request_id', exportJobId)
+      .eq('file_type', 'wav')
+      .is('content_hash', null) // non-excluded
+      .order('utterance_id', { ascending: true })
+
+    if (itemsError) {
+      throw new Error(`Failed to load package items: ${itemsError.message}`)
+    }
+
+    utterances = (items ?? []) as Record<string, unknown>[]
+  }
+
   if (utterances.length === 0) {
     throw new Error(`No utterances found for export job ${exportJobId}`)
   }
@@ -206,9 +249,17 @@ export async function buildPackage(
       utterance_id: uttId,
       session_id: sessionId,
       pseudo_id: pseudoId,
+      chunk_index: (utt.chunk_index as number) ?? null,
+      sequence_in_chunk: (utt.sequence_in_chunk as number) ?? null,
+      is_user: (utt.is_user as boolean) ?? null,
+      speaker_id: (utt.speaker_id as string) ?? null,
       duration_sec: durationSec,
+      start_sec: utt.start_sec != null ? Number(utt.start_sec) : null,
+      end_sec: utt.end_sec != null ? Number(utt.end_sec) : null,
       snr_db: itemSnr,
       speech_ratio: itemSpeechRatio,
+      volume_lufs: utt.volume_lufs != null ? Number(utt.volume_lufs) : null,
+      beep_mask_ratio: utt.beep_mask_ratio != null ? Number(utt.beep_mask_ratio) : null,
       quality_grade: grade,
       qa_score: qaScore,
     })

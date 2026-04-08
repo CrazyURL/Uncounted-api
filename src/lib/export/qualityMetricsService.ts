@@ -93,10 +93,78 @@ async function cleanupTemp(path: string): Promise<void> {
  * Analyze quality for a single session's audio.
  * Downloads WAV from S3, runs FFmpeg analysis, saves metrics per BU (1-minute segment).
  */
+/**
+ * Aggregate client-measured quality metrics from utterances table.
+ * Returns metrics per BU (1-minute segment) using utterance averages.
+ */
+async function aggregateClientMetrics(
+  sessionId: string,
+  userId: string,
+): Promise<SessionQualityResult | null> {
+  const { data: utterances, error } = await supabaseAdmin
+    .from('utterances')
+    .select('snr_db, speech_ratio, clipping_ratio, beep_mask_ratio, volume_lufs, quality_score, quality_grade, duration_sec')
+    .eq('session_id', sessionId)
+    .eq('upload_status', 'uploaded')
+    .not('quality_score', 'is', null)
+
+  if (error || !utterances || utterances.length === 0) {
+    return null
+  }
+
+  // Compute session-level averages
+  const totalDuration = utterances.reduce((sum, u) => sum + Number(u.duration_sec || 0), 0)
+  const avgSnrDb = utterances.reduce((sum, u) => sum + Number(u.snr_db || 0), 0) / utterances.length
+  const avgSpeechRatio = utterances.reduce((sum, u) => sum + Number(u.speech_ratio || 0), 0) / utterances.length
+  const avgClippingRatio = utterances.reduce((sum, u) => sum + Number(u.clipping_ratio || 0), 0) / utterances.length
+  const avgVolumeLufs = utterances.reduce((sum, u) => sum + Number(u.volume_lufs || 0), 0) / utterances.length
+  const avgQualityScore = utterances.reduce((sum, u) => sum + Number(u.quality_score || 0), 0) / utterances.length
+
+  const buCount = Math.max(1, Math.ceil(totalDuration / 60))
+  const inserts: BuQualityMetricsInsert[] = []
+
+  for (let i = 0; i < buCount; i++) {
+    const score = Math.round(avgQualityScore)
+    inserts.push({
+      session_id: sessionId,
+      bu_index: i,
+      user_id: userId,
+      snr_db: Math.round(avgSnrDb * 100) / 100,
+      speech_ratio: Math.round(avgSpeechRatio * 10000) / 10000,
+      clipping_ratio: Math.round(avgClippingRatio * 10000) / 10000,
+      volume_lufs: Math.round(avgVolumeLufs * 100) / 100,
+      quality_score: score,
+      quality_grade: computeQualityGrade(score),
+    })
+  }
+
+  const metrics = await upsertQualityMetricsBatch(inserts)
+
+  for (const m of metrics) {
+    await supabaseAdmin
+      .from('billable_units')
+      .update({
+        quality_grade: m.quality_grade,
+        qa_score: m.quality_score,
+      })
+      .eq('session_id', sessionId)
+      .eq('minute_index', m.bu_index)
+  }
+
+  return { sessionId, userId, metrics }
+}
+
 export async function analyzeSessionQuality(
   sessionId: string,
   userId: string,
 ): Promise<SessionQualityResult> {
+  // v3: 클라이언트 측정값이 있으면 FFmpeg 분석 스킵
+  const clientResult = await aggregateClientMetrics(sessionId, userId)
+  if (clientResult) {
+    return clientResult
+  }
+
+  // 레거시 폴백: FFmpeg 분석
   const s3Key = `${userId}/${sessionId}/${sessionId}.wav`
   const tempPath = await downloadWavToTemp(s3Key)
 
