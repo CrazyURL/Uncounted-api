@@ -25,6 +25,11 @@ paths: src/lib/**
 - `optionalAuthMiddleware` — 선택적 (없어도 통과)
 - 어드민: `app_metadata.role === 'admin'` 확인
 
+## Signout 만료 토큰 처리
+
+`/auth/signout`은 만료된 JWT에서도 `extractUserIdFromJwt(token)`으로 payload의 `sub`(userId)를 추출하여 `admin.signOut(userId)`를 호출한다.
+이로써 access token 만료 상태에서 로그아웃해도 Supabase 세션(refresh token 포함)이 확실히 revoke된다.
+
 ## 주요 코드 패턴
 
 ```typescript
