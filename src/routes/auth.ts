@@ -12,6 +12,22 @@ import { getBody } from '../lib/middleware.js'
 const auth = new Hono()
 const IS_PROD = process.env.NODE_ENV === 'production'
 
+/**
+ * 만료된 JWT에서도 user ID(sub)를 추출한다.
+ * JWT payload는 서명 검증 없이 디코딩 가능하며,
+ * signOut 용도로는 user ID만 필요하므로 안전하다.
+ */
+function extractUserIdFromJwt(token: string): string | null {
+  try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return null
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString())
+    return payload.sub || null
+  } catch {
+    return null
+  }
+}
+
 // ── PKCE 상태 저장소 (Supabase DB) ────────────────────────────────────────
 
 // ── 쿠키 헬퍼 ────────────────────────────────────────────────────────────
@@ -140,6 +156,12 @@ auth.post('/signout', async (c) => {
     const { data: { user }, error: userError } = await supabaseAdmin.auth.getUser(token)
     if (!userError && user) {
       await supabaseAdmin.auth.admin.signOut(user.id)
+    } else {
+      // 토큰 만료 시에도 JWT payload에서 userId를 추출하여 세션 revoke
+      const userId = extractUserIdFromJwt(token)
+      if (userId) {
+        await supabaseAdmin.auth.admin.signOut(userId)
+      }
     }
     return c.json({ data: { success: true } })
   } catch (err: any) {
