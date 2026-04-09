@@ -138,7 +138,7 @@ export const openApiSpec = {
           lockEndMs: { type: 'number', nullable: true },
           localSanitizedWavPath: { $ref: '#/components/schemas/EncryptedString' },
           localSanitizedTextPreview: { $ref: '#/components/schemas/EncryptedString' },
-          consentStatus: { type: 'string', enum: ['locked', 'consented', 'denied'] },
+          consentStatus: { type: 'string', enum: ['locked', 'consented', 'both_agreed', 'denied'] },
           consentedAt: { type: 'string', format: 'date-time', nullable: true },
           verifiedSpeaker: { type: 'boolean' },
           userId: { $ref: '#/components/schemas/EncryptedString' },

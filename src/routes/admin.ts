@@ -855,7 +855,7 @@ admin.post('/consent/notify-withdrawal', async (c) => {
 // ── PUT /admin/sessions/consent-force-update ────────────────────────────
 // 테스트 데이터 동의 강제 전환 (어드민 전용)
 // 입력: { sessionIds: string[], consentStatus: 'both_agreed' }
-// 효과: sessions.consent_status = 'consented', billable_units.consent_status = 'PUBLIC_CONSENTED'
+// 효과: sessions.consent_status = 'both_agreed', billable_units.consent_status = 'PUBLIC_CONSENTED'
 
 admin.put('/sessions/consent-force-update', async (c) => {
   const { sessionIds, consentStatus } = getBody<{ sessionIds: string[]; consentStatus: string }>(c)
@@ -888,7 +888,7 @@ admin.put('/sessions/consent-force-update', async (c) => {
 
     const { error: sessErr } = await supabaseAdmin
       .from('sessions')
-      .update({ consent_status: 'consented' })
+      .update({ consent_status: 'both_agreed' })
       .in('id', eligibleIds)
 
     if (sessErr) throw sessErr
