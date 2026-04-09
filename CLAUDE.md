@@ -37,7 +37,7 @@ src/
              # admin-ledger, admin-utterances, upload
   scripts/   # 일회성 스크립트
 supabase/
-  migrations/  # 001~029 SQL 파일
+  migrations/  # 001~030 SQL 파일
 ```
 
 ## 핵심 패턴

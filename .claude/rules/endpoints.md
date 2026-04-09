@@ -34,6 +34,9 @@ paths: src/routes/**
 | | `/api/storage/audio/utterance` | POST | 필수 | 발화 WAV + 메타 업로드 (multipart) |
 | | `/api/storage/user` | DELETE | 필수 | 사용자 파일 전체 삭제 |
 | **User** | `/api/user/consent` | GET/PUT | 필수 | 동의 상태 조회/수정 |
+| | `/api/user/voice-profile` | GET | 필수 | 목소리 등록 프로필 조회 |
+| | `/api/user/voice-profile` | PUT | 필수 | 목소리 등록 프로필 저장 (enrolled만) |
+| | `/api/user/voice-profile` | DELETE | 필수 | 목소리 등록 프로필 삭제 |
 | **Transcripts** | `/api/transcripts` | GET | 필수 | 전사 목록 |
 | | `/api/transcripts/:sessionId` | GET/POST/DELETE | 필수 | 전사 조회/저장/삭제 |
 | **Transcript Chunks** | `/api/transcript-chunks` | POST | 필수 | 청크별 전사+오디오 통계 저장 |

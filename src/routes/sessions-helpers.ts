@@ -78,7 +78,7 @@ export function sessionToRow(s: any) {
     duration: s.duration,
     qa_score: clampQaScore(s.qaScore),
     contribution_score: s.contributionScore ?? 0,
-    labels: s.labels,
+    labels: s.labels ?? undefined,
     strategy_locked: s.strategyLocked ?? false,
     asset_type: s.assetType ?? '업무/회의',
     is_public: s.isPublic,

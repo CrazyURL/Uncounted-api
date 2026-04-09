@@ -110,4 +110,108 @@ user.put('/consent', async (c) => {
   return c.json({ data: consentFields })
 })
 
+// ── GET /api/user/voice-profile ─────────────────────────────────────────────
+// 서버 저장된 목소리 등록 프로필 조회. 없으면 null 반환.
+
+user.get('/voice-profile', async (c) => {
+  const userId = c.get('userId') as string
+
+  const { data, error } = await supabaseAdmin
+    .from('voice_profiles')
+    .select('enrollment_status, embeddings, reference_embedding, enrollment_count, min_enrollments, enrolled_at, updated_at')
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  if (error) {
+    console.error('[voice-profile GET] DB error:', error)
+    return c.json({ error: 'DB error' }, 500)
+  }
+
+  if (!data) return c.json({ data: null })
+
+  return c.json({
+    data: {
+      enrollmentStatus: data.enrollment_status,
+      embeddings: data.embeddings ?? [],
+      referenceEmbedding: data.reference_embedding ?? null,
+      enrollmentCount: data.enrollment_count,
+      minEnrollments: data.min_enrollments,
+      enrolledAt: data.enrolled_at ?? null,
+      updatedAt: data.updated_at ?? null,
+    },
+  })
+})
+
+// ── PUT /api/user/voice-profile ──────────────────────────────────────────────
+// 목소리 등록 프로필 저장/업데이트 (upsert). 등록 완료 프로필만 허용.
+
+user.put('/voice-profile', async (c) => {
+  const userId = c.get('userId') as string
+  const body = getBody(c) as {
+    enrollmentStatus: string
+    embeddings: unknown[]
+    referenceEmbedding: unknown[] | null
+    enrollmentCount: number
+    minEnrollments: number
+    enrolledAt: string | null
+    updatedAt: string | null
+  }
+
+  if (body.enrollmentStatus !== 'enrolled') {
+    return c.json({ error: 'enrolled 상태만 저장 가능합니다' }, 400)
+  }
+
+  if (!Array.isArray(body.embeddings) || body.embeddings.length > 20) {
+    return c.json({ error: 'embeddings: 배열이어야 하며 최대 20개입니다' }, 400)
+  }
+
+  if (body.referenceEmbedding !== null && (!Array.isArray(body.referenceEmbedding) || body.referenceEmbedding.length > 256)) {
+    return c.json({ error: 'referenceEmbedding: 최대 256개의 숫자 배열이어야 합니다' }, 400)
+  }
+
+  const now = new Date().toISOString()
+  const { error } = await supabaseAdmin
+    .from('voice_profiles')
+    .upsert(
+      {
+        user_id: userId,
+        enrollment_status: body.enrollmentStatus,
+        embeddings: body.embeddings,
+        reference_embedding: body.referenceEmbedding,
+        enrollment_count: body.enrollmentCount,
+        min_enrollments: body.minEnrollments,
+        enrolled_at: body.enrolledAt,
+        updated_at: now,
+        created_at: now,
+      },
+      { onConflict: 'user_id' },
+    )
+
+  if (error) {
+    console.error('[voice-profile PUT] DB error:', error)
+    return c.json({ error: 'DB error' }, 500)
+  }
+
+  return c.json({ data: { ok: true } })
+})
+
+// ── DELETE /api/user/voice-profile ───────────────────────────────────────────
+// 목소리 등록 프로필 삭제 (앱 내 등록 초기화와 연동).
+
+user.delete('/voice-profile', async (c) => {
+  const userId = c.get('userId') as string
+
+  const { error } = await supabaseAdmin
+    .from('voice_profiles')
+    .delete()
+    .eq('user_id', userId)
+
+  if (error) {
+    console.error('[voice-profile DELETE] DB error:', error)
+    return c.json({ error: 'DB error' }, 500)
+  }
+
+  return c.json({ data: { ok: true } })
+})
+
 export default user
