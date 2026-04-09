@@ -337,8 +337,8 @@ describe('inventoryService', () => {
     expect(inventory.skus.length).toBeGreaterThan(0)
     expect(inventory.generatedAt).toBeTruthy()
 
-    // A01 requires qa>=50, so only bu-1 qualifies
-    const a01 = inventory.skus.find((s) => s.skuId === 'A01')
+    // U-A01 requires qa>=50, so only bu-1 qualifies
+    const a01 = inventory.skus.find((s) => s.skuId === 'U-A01')
     expect(a01).toBeTruthy()
     expect(a01!.availableBUs).toBe(1)
   })

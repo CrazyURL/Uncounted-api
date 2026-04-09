@@ -95,6 +95,7 @@ export async function getMetadataStats(): Promise<{
 }> {
   // 스키마별로 개별 카운트 쿼리 (전체 행 로드 방지)
   const schemas = [
+    'U-M01-v1',
     'U-M05-v1', 'U-M06-v1', 'U-M07-v1', 'U-M08-v1', 'U-M09-v1',
     'U-M10-v1', 'U-M11-v1', 'U-M13-v1', 'U-M14-v1', 'U-M16-v1',
     'U-M18-v1', 'U-P01-v1',
@@ -149,6 +150,7 @@ export async function getMetadataSummary(): Promise<{
   bySchema: Array<{ schemaId: string; count: number }>
 }> {
   const schemas = [
+    'U-M01-v1',
     'U-M05-v1', 'U-M06-v1', 'U-M07-v1', 'U-M08-v1', 'U-M09-v1',
     'U-M10-v1', 'U-M11-v1', 'U-M13-v1', 'U-M14-v1', 'U-M16-v1',
     'U-M18-v1', 'U-P01-v1',

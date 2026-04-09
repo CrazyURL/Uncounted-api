@@ -15,11 +15,16 @@ import {
   updateUtteranceStatus,
   saveUtterances,
 } from '../lib/export/utteranceRepository.js'
-import { getSignedUrl } from '../lib/s3.js'
+import { getSignedUrl, S3_AUDIO_BUCKET } from '../lib/s3.js'
 import { buildPackage } from '../lib/export/packageBuilder.js'
 import { getSignedDownloadUrl } from '../lib/export/downloadService.js'
 
 const adminExports = new Hono()
+
+// SKU별 라벨 필수 여부 (skuStudio.ts의 requireLabels와 동기화 유지)
+const SKU_REQUIRES_LABELS: Record<string, boolean> = {
+  'U-A02': true,
+}
 
 // 모든 라우트에 인증 + 관리자 권한 필수
 adminExports.use('/*', authMiddleware)
@@ -314,6 +319,7 @@ adminExports.get('/export-requests/:id/preview', async (c) => {
       requirePiiCleaned: true,
       minQaScore: 50,
       requireTranscript: true,
+      requireLabels: SKU_REQUIRES_LABELS[job.sku_id] ?? false,
     })
 
     const requestedBUs = job.requested_units as number
@@ -409,16 +415,18 @@ adminExports.post('/export-requests/:id/process', async (c) => {
       .eq('id', id)
 
     const filters = (job.filters ?? {}) as Record<string, unknown>
+    const dateRange = filters.dateRange as { from?: string; to?: string } | null
 
     // 3. Pool and rank BUs
     const poolFilters = {
-      qualityGrades: (filters.qualityGrades as string[]) ?? undefined,
-      dateFrom: (filters.dateFrom as string) ?? undefined,
-      dateTo: (filters.dateTo as string) ?? undefined,
+      qualityGrades: filters.minQualityGrade ? [(filters.minQualityGrade as string)] : undefined,
+      dateFrom: dateRange?.from ?? undefined,
+      dateTo: dateRange?.to ?? undefined,
       requireConsent: true,
       requirePiiCleaned: true,
       minQaScore: 50,
       requireTranscript: true,
+      requireLabels: SKU_REQUIRES_LABELS[job.sku_id] ?? false,
     }
     const diversityConstraints = (filters.diversityConstraints as Record<string, unknown>) ?? {}
 
@@ -559,6 +567,15 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
   const id = c.req.param('id')
 
   try {
+    // 0. Job의 sku_id 조회 (라벨 표시 여부 판단)
+    const { data: job } = await supabaseAdmin
+      .from('export_jobs')
+      .select('sku_id')
+      .eq('id', id)
+      .single()
+    const skuId = (job?.sku_id as string) ?? 'U-A01'
+    const requiresLabels = skuId === 'U-A02' || skuId === 'U-A03'
+
     // v3: BU 잠금된 세션에서 utterances 테이블 직접 조회 시도
     const { data: lockedBUs } = await supabaseAdmin
       .from('billable_units')
@@ -566,6 +583,21 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
       .eq('locked_by_job_id', id)
 
     const lockedSessionIds = [...new Set((lockedBUs ?? []).map((bu) => bu.session_id as string).filter(Boolean))]
+
+    // 1. 라벨이 필요한 SKU일 경우 세션 라벨 조회
+    type SessionLabel = { relationship?: string | null; purpose?: string | null; domain?: string | null; tone?: string | null; noise?: string | null }
+    const sessionLabelMap = new Map<string, SessionLabel>()
+    if (requiresLabels && lockedSessionIds.length > 0) {
+      const { data: sessionRows } = await supabaseAdmin
+        .from('sessions')
+        .select('id, labels')
+        .in('id', lockedSessionIds)
+      for (const row of (sessionRows ?? []) as Array<{ id: string; labels: SessionLabel | null }>) {
+        if (row.labels) {
+          sessionLabelMap.set(row.id, row.labels)
+        }
+      }
+    }
 
     let hasClientUtterances = false
     if (lockedSessionIds.length > 0) {
@@ -597,14 +629,17 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
           let signedUrl: string | null = null
           if (u.storage_path) {
             try {
-              signedUrl = await getSignedUrl('sanitized-audio', u.storage_path, 600)
+              signedUrl = await getSignedUrl(S3_AUDIO_BUCKET, u.storage_path, 600)
             } catch {
               // ignore
             }
           }
+          const sessionLabel = requiresLabels ? (sessionLabelMap.get(u.session_id as string) ?? null) : undefined
           return {
             utteranceId: u.id,
             sessionId: u.session_id,
+            pseudoId: '',
+            beepMaskRatio: 0,
             chunkId: u.chunk_id,
             sequenceInChunk: u.sequence_in_chunk,
             sequenceOrder: u.sequence_order,
@@ -618,16 +653,19 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
             qualityScore: u.quality_score,
             snrDb: u.snr_db,
             speechRatio: u.speech_ratio,
+            isIncluded: u.review_status !== 'excluded',
             reviewStatus: u.review_status,
             excludeReason: u.exclude_reason,
             transcriptText: u.transcript_text,
+            audioUrl: signedUrl ?? undefined,
             signedUrl,
             source: 'utterances' as const,
+            ...(requiresLabels && { labels: sessionLabel }),
           }
         }),
       )
 
-      return c.json({ data: withUrls })
+      return c.json({ data: withUrls, skuId })
     }
 
     // 레거시 폴백: export_package_items
@@ -639,12 +677,32 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
         if (u.utterance_id && u.session_id) {
           try {
             const s3Key = `utterances/${u.session_id}/${u.utterance_id}.wav`
-            signedUrl = await getSignedUrl('sanitized-audio', s3Key, 600)
+            signedUrl = await getSignedUrl(S3_AUDIO_BUCKET, s3Key, 600)
           } catch {
             // ignore — URL generation may fail for missing files
           }
         }
-        return { ...u, signedUrl, source: 'legacy' as const }
+        return {
+          utteranceId: u.utterance_id,
+          sessionId: u.session_id ?? '',
+          pseudoId: u.pseudo_id ?? '',
+          durationSec: u.duration_sec ?? 0,
+          startSec: 0,
+          endSec: u.duration_sec ?? 0,
+          snrDb: u.snr_db ?? 0,
+          speechRatio: u.speech_ratio ?? 0,
+          qualityGrade: u.quality_grade ?? 'C',
+          qualityScore: u.qa_score ?? 0,
+          beepMaskRatio: 0,
+          consentStatus: 'PUBLIC_CONSENTED' as const,
+          isIncluded: true,
+          reviewStatus: undefined,
+          excludeReason: undefined,
+          transcriptText: undefined,
+          audioUrl: signedUrl ?? undefined,
+          signedUrl,
+          source: 'legacy' as const,
+        }
       }),
     )
 

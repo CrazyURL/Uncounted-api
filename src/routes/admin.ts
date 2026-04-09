@@ -852,6 +852,59 @@ admin.post('/consent/notify-withdrawal', async (c) => {
   }
 })
 
+// ── PUT /admin/sessions/consent-force-update ────────────────────────────
+// 테스트 데이터 동의 강제 전환 (어드민 전용)
+// 입력: { sessionIds: string[], consentStatus: 'PUBLIC_CONSENTED' | 'PRIVATE' | 'WITHDRAWN' }
+
+admin.put('/sessions/consent-force-update', async (c) => {
+  const { sessionIds, consentStatus } = getBody<{ sessionIds: string[]; consentStatus: string }>(c)
+
+  const ALLOWED_STATUSES = ['PUBLIC_CONSENTED', 'PRIVATE', 'WITHDRAWN']
+  if (!Array.isArray(sessionIds) || sessionIds.length === 0) {
+    return c.json({ error: 'sessionIds 배열이 필요합니다' }, 400)
+  }
+  if (!ALLOWED_STATUSES.includes(consentStatus)) {
+    return c.json({ error: `consentStatus는 ${ALLOWED_STATUSES.join(' | ')} 중 하나여야 합니다` }, 400)
+  }
+  if (sessionIds.length > 100) {
+    return c.json({ error: '한 번에 최대 100개까지 처리 가능합니다' }, 400)
+  }
+
+  try {
+    // upload_status = 'uploaded' 인 세션만 처리 (업로드 중인 세션 제외)
+    const { data: uploadedSessions, error: fetchErr } = await supabaseAdmin
+      .from('sessions')
+      .select('id')
+      .in('id', sessionIds)
+      .eq('upload_status', 'uploaded')
+
+    if (fetchErr) throw fetchErr
+
+    const eligibleIds = (uploadedSessions ?? []).map((s: { id: string }) => s.id)
+    if (eligibleIds.length === 0) {
+      return c.json({ data: { updated: 0, skipped: sessionIds.length, consentStatus } })
+    }
+
+    const { error: sessErr } = await supabaseAdmin
+      .from('sessions')
+      .update({ visibility_status: consentStatus })
+      .in('id', eligibleIds)
+
+    if (sessErr) throw sessErr
+
+    const { error: buErr } = await supabaseAdmin
+      .from('billable_units')
+      .update({ consent_status: consentStatus })
+      .in('session_id', eligibleIds)
+
+    if (buErr) throw buErr
+
+    return c.json({ data: { updated: eligibleIds.length, skipped: sessionIds.length - eligibleIds.length, consentStatus } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
 // ── Metadata Events ───────────────────────────────────────────────────
 
 /**

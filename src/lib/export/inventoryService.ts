@@ -39,17 +39,17 @@ interface SkuFilter {
 }
 
 const SKU_FILTERS: Record<string, SkuFilter> = {
-  'A01': {
+  'U-A01': {
     minQaScore: 50,
     requireConsent: true,
     requireTranscript: true,
   },
-  'A02': {
+  'U-A02': {
     minQaScore: 30,
     requireConsent: true,
     requireTranscript: false,
   },
-  'B01': {
+  'U-B01': {
     minQaScore: 70,
     requireConsent: true,
     requireTranscript: true,

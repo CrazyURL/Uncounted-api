@@ -2,7 +2,7 @@
 // Export 패키지 다운로드 URL 생성 및 export_jobs 업데이트
 
 import { supabaseAdmin } from '../supabase.js'
-import { getExportDownloadUrl } from '../s3.js'
+import { getSignedUrl, S3_AUDIO_BUCKET } from '../s3.js'
 
 const DOWNLOAD_EXPIRES_SEC = 24 * 60 * 60 // 24시간
 
@@ -28,8 +28,8 @@ export async function getSignedDownloadUrl(
     throw new Error(`Export job ${exportJobId} has no package yet`)
   }
 
-  // Generate signed URL (24h)
-  const downloadUrl = await getExportDownloadUrl(exportJobId, DOWNLOAD_EXPIRES_SEC)
+  // Generate signed URL using the actual stored path (24h)
+  const downloadUrl = await getSignedUrl(S3_AUDIO_BUCKET, job.package_storage_path, DOWNLOAD_EXPIRES_SEC)
   const expiresAt = new Date(Date.now() + DOWNLOAD_EXPIRES_SEC * 1000).toISOString()
 
   // Update export_jobs

@@ -11,6 +11,7 @@ import { getSignedUrl, uploadObject, S3_AUDIO_BUCKET, s3Client } from '../lib/s3
 import { GetObjectCommand } from '@aws-sdk/client-s3'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import { validatePiiIntervals } from './admin-utterances-helpers.js'
 
 const execFileAsync = promisify(execFile)
 const adminUtterances = new Hono()
@@ -44,6 +45,46 @@ adminUtterances.get('/utterances/:id/audio', async (c) => {
     const signedUrl = await getSignedUrl(S3_AUDIO_BUCKET, data.storage_path, 3600)
 
     return c.json({ signedUrl })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * GET /admin/utterances/:id/audio/stream
+ * WAV 바이너리 프록시 (wavesurfer.js CORS 우회)
+ */
+adminUtterances.get('/utterances/:id/audio/stream', async (c) => {
+  const utteranceId = c.req.param('id')
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('utterances')
+      .select('storage_path')
+      .eq('id', utteranceId)
+      .single()
+
+    if (error || !data) {
+      return c.json({ error: 'Utterance not found' }, 404)
+    }
+
+    if (!data.storage_path) {
+      return c.json({ error: 'No audio file for this utterance' }, 404)
+    }
+
+    const response = await s3Client.send(
+      new GetObjectCommand({ Bucket: S3_AUDIO_BUCKET, Key: data.storage_path }),
+    )
+    if (!response.Body) {
+      return c.json({ error: 'Failed to download audio' }, 500)
+    }
+
+    const bytes = await response.Body.transformToByteArray()
+
+    c.header('Content-Type', 'audio/wav')
+    c.header('Content-Length', String(bytes.byteLength))
+    c.header('Cache-Control', 'private, max-age=3600')
+    return c.body(bytes.buffer as ArrayBuffer)
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
@@ -95,18 +136,9 @@ adminUtterances.put('/utterances/:id/pii', async (c) => {
     }>
   }>(c)
 
-  if (!Array.isArray(piiIntervals)) {
-    return c.json({ error: 'piiIntervals must be an array' }, 400)
-  }
-
-  // piiIntervals 각 원소 필수 필드 검증
-  for (const interval of piiIntervals) {
-    if (typeof interval.startSec !== 'number' || typeof interval.endSec !== 'number') {
-      return c.json({ error: 'Invalid PII interval: startSec and endSec must be numbers' }, 400)
-    }
-    if (typeof interval.maskType !== 'string' || typeof interval.piiType !== 'string') {
-      return c.json({ error: 'Invalid PII interval: maskType and piiType must be strings' }, 400)
-    }
+  const validationError = validatePiiIntervals(piiIntervals)
+  if (validationError !== null) {
+    return c.json({ error: validationError }, 400)
   }
 
   try {
@@ -128,13 +160,11 @@ adminUtterances.put('/utterances/:id/pii', async (c) => {
 })
 
 /**
- * POST /admin/utterances/:id/apply-mask
- * 마스킹 실행 — S3에서 WAV 다운로드 → FFmpeg beep/무음 삽입 → 재업로드
- * Body: { maskType?: 'beep' | 'silence' } (default: 'beep')
+ * GET /admin/utterances/:id/preview-mask
+ * PII 구간을 무음 처리한 미리보기 WAV 반환 (DB 변경 없음)
  */
-adminUtterances.post('/utterances/:id/apply-mask', async (c) => {
+adminUtterances.get('/utterances/:id/preview-mask', async (c) => {
   const utteranceId = c.req.param('id')
-  const { maskType = 'beep' } = getBody<{ maskType?: 'beep' | 'silence' }>(c)
 
   try {
     const { data: utt, error: fetchError } = await supabaseAdmin
@@ -151,20 +181,17 @@ adminUtterances.post('/utterances/:id/apply-mask', async (c) => {
       return c.json({ error: 'No audio file for this utterance' }, 404)
     }
 
-    const intervals = utt.pii_intervals as Array<{ startSec: number; endSec: number }> | null
+    const intervals = utt.pii_intervals as Array<{ startSec: number; endSec: number; maskType?: string }> | null
     if (!intervals || intervals.length === 0) {
-      return c.json({ error: 'No PII intervals to mask' }, 400)
+      return c.json({ error: 'No PII intervals to preview' }, 400)
     }
 
-    // PII 구간 숫자 검증 (command injection 방지)
-    for (const interval of intervals) {
-      if (typeof interval.startSec !== 'number' || typeof interval.endSec !== 'number') {
-        return c.json({ error: 'Invalid PII interval: startSec and endSec must be numbers' }, 400)
-      }
+    const previewValidationError = validatePiiIntervals(intervals)
+    if (previewValidationError !== null) {
+      return c.json({ error: previewValidationError }, 400)
     }
 
-    // Download WAV from S3
-    const tempDir = join(tmpdir(), `pii-mask-${Date.now()}`)
+    const tempDir = join(tmpdir(), `pii-preview-${Date.now()}`)
     await mkdir(tempDir, { recursive: true })
     const inputPath = join(tempDir, 'input.wav')
     const outputPath = join(tempDir, 'output.wav')
@@ -178,31 +205,25 @@ adminUtterances.post('/utterances/:id/apply-mask', async (c) => {
     const bytes = await response.Body.transformToByteArray()
     await writeFile(inputPath, bytes)
 
-    // Build FFmpeg filter for masking
-    const filters = intervals.map((interval) => {
-      const { startSec, endSec } = interval
-      if (maskType === 'silence') {
-        return `volume=enable='between(t,${startSec},${endSec})':volume=0`
-      }
-      // beep: 1kHz sine wave overlay
-      return `volume=enable='between(t,${startSec},${endSec})':volume=0`
-    })
+    const beepIntervals = intervals.filter(i => (i.maskType ?? 'beep') !== 'silence')
 
-    if (maskType === 'beep') {
-      // Generate beep overlay for each interval and mix
-      const beepFilters = intervals.map((interval, i) => {
+    // 전체 구간 무음 처리 (silence + beep 모두)
+    const silenceFilter = intervals
+      .map((interval) => `volume=enable='between(t,${interval.startSec},${interval.endSec})':volume=0`)
+      .join(',')
+
+    if (beepIntervals.length > 0) {
+      // beep 구간에 sine wave 오버레이
+      const beepFilters = beepIntervals.map((interval, i) => {
         const duration = interval.endSec - interval.startSec
-        return `sine=frequency=1000:duration=${duration}:sample_rate=16000,adelay=${Math.round(interval.startSec * 1000)}|${Math.round(interval.startSec * 1000)},apad=whole_dur=0[beep${i}]`
+        return `sine=frequency=1000:duration=${duration}:sample_rate=16000,adelay=${Math.round(interval.startSec * 1000)}|${Math.round(interval.startSec * 1000)},apad=pad_dur=300[beep${i}]`
       })
-      const mixInputs = intervals.map((_, i) => `[beep${i}]`).join('')
-      const silenceFilter = intervals
-        .map((interval) => `volume=enable='between(t,${interval.startSec},${interval.endSec})':volume=0`)
-        .join(',')
+      const mixInputs = beepIntervals.map((_, i) => `[beep${i}]`).join('')
 
       const filterComplex = [
         `[0:a]${silenceFilter}[silenced]`,
         ...beepFilters,
-        `[silenced]${mixInputs}amix=inputs=${intervals.length + 1}:duration=first[out]`,
+        `[silenced]${mixInputs}amix=inputs=${beepIntervals.length + 1}:duration=first:normalize=0[out]`,
       ].join(';')
 
       await execFileAsync('ffmpeg', [
@@ -213,8 +234,6 @@ adminUtterances.post('/utterances/:id/apply-mask', async (c) => {
         outputPath,
       ])
     } else {
-      // Silence masking
-      const silenceFilter = filters.join(',')
       await execFileAsync('ffmpeg', [
         '-y', '-i', inputPath,
         '-af', silenceFilter,
@@ -223,9 +242,128 @@ adminUtterances.post('/utterances/:id/apply-mask', async (c) => {
       ])
     }
 
-    // Upload masked WAV back to S3 (same path)
+    const { readFile } = await import('fs/promises')
+    const previewBytes = await readFile(outputPath)
+
+    try {
+      await unlink(inputPath)
+      await unlink(outputPath)
+    } catch {
+      // ignore cleanup errors
+    }
+
+    c.header('Content-Type', 'audio/wav')
+    c.header('Content-Disposition', `inline; filename="preview_${utteranceId}.wav"`)
+    return c.body(previewBytes.buffer as ArrayBuffer)
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * POST /admin/utterances/:id/apply-mask
+ * 마스킹 실행 — S3에서 WAV 다운로드 → FFmpeg beep/무음 삽입 → 재업로드
+ * Body: { maskType?: 'beep' | 'silence' } (default: 'beep')
+ */
+adminUtterances.post('/utterances/:id/apply-mask', async (c) => {
+  const utteranceId = c.req.param('id')
+  const { maskType = 'beep' } = getBody<{ maskType?: 'beep' | 'silence' }>(c)
+
+  try {
+    const { data: utt, error: fetchError } = await supabaseAdmin
+      .from('utterances')
+      .select('storage_path, pii_intervals, session_id, user_id')
+      .eq('id', utteranceId)
+      .single()
+
+    if (fetchError || !utt) {
+      return c.json({ error: 'Utterance not found' }, 404)
+    }
+
+    if (!utt.storage_path) {
+      return c.json({ error: 'No audio file for this utterance' }, 404)
+    }
+
+    const intervals = utt.pii_intervals as Array<{ startSec: number; endSec: number; maskType?: string }> | null
+    if (!intervals || intervals.length === 0) {
+      return c.json({ error: 'No PII intervals to mask' }, 400)
+    }
+
+    // PII 구간 숫자 검증 (NaN/Infinity 포함 command injection 방지)
+    const applyValidationError = validatePiiIntervals(intervals)
+    if (applyValidationError !== null) {
+      return c.json({ error: applyValidationError }, 400)
+    }
+
+    // Download WAV from S3 — 재적용 시 원본 백업에서 읽어야 이전 마스킹 덮어쓰기 가능
+    const tempDir = join(tmpdir(), `pii-mask-${Date.now()}`)
+    await mkdir(tempDir, { recursive: true })
+    const inputPath = join(tempDir, 'input.wav')
+    const outputPath = join(tempDir, 'output.wav')
+
+    const backupPath = `${utt.user_id}/${utt.session_id}/original/${utteranceId}.wav`
+    let sourceKey = utt.storage_path
+    try {
+      const backupHead = await s3Client.send(
+        new GetObjectCommand({ Bucket: S3_AUDIO_BUCKET, Key: backupPath }),
+      )
+      if (backupHead.Body) sourceKey = backupPath
+    } catch {
+      // 백업 없으면 최초 적용 — storage_path 사용
+    }
+
+    const response = await s3Client.send(
+      new GetObjectCommand({ Bucket: S3_AUDIO_BUCKET, Key: sourceKey }),
+    )
+    if (!response.Body) {
+      return c.json({ error: 'Failed to download audio' }, 500)
+    }
+    const bytes = await response.Body.transformToByteArray()
+    await writeFile(inputPath, bytes)
+
+    // per-interval maskType 사용 (DB에 저장된 값 우선, 없으면 body 파라미터 폴백)
+    const beepIntervals = intervals.filter(i => (i.maskType ?? maskType) !== 'silence')
+
+    // 전체 구간 무음 처리 (silence + beep 모두)
+    const silenceFilter = intervals
+      .map(i => `volume=enable='between(t,${i.startSec},${i.endSec})':volume=0`)
+      .join(',')
+
+    if (beepIntervals.length > 0) {
+      // beep 구간에만 sine wave 오버레이
+      const beepFilters = beepIntervals.map((interval, i) => {
+        const duration = interval.endSec - interval.startSec
+        return `sine=frequency=1000:duration=${duration}:sample_rate=16000,adelay=${Math.round(interval.startSec * 1000)}|${Math.round(interval.startSec * 1000)},apad=pad_dur=300[beep${i}]`
+      })
+      const mixInputs = beepIntervals.map((_, i) => `[beep${i}]`).join('')
+
+      const filterComplex = [
+        `[0:a]${silenceFilter}[silenced]`,
+        ...beepFilters,
+        `[silenced]${mixInputs}amix=inputs=${beepIntervals.length + 1}:duration=first:normalize=0[out]`,
+      ].join(';')
+
+      await execFileAsync('ffmpeg', [
+        '-y', '-i', inputPath,
+        '-filter_complex', filterComplex,
+        '-map', '[out]',
+        '-ar', '16000', '-ac', '1', '-sample_fmt', 's16',
+        outputPath,
+      ])
+    } else {
+      // 전체 무음 처리
+      await execFileAsync('ffmpeg', [
+        '-y', '-i', inputPath,
+        '-af', silenceFilter,
+        '-ar', '16000', '-ac', '1', '-sample_fmt', 's16',
+        outputPath,
+      ])
+    }
+
+    // Upload masked WAV back to S3: backup original first, then overwrite
     const { readFile } = await import('fs/promises')
     const maskedBytes = await readFile(outputPath)
+    await uploadObject(S3_AUDIO_BUCKET, backupPath, bytes, 'audio/wav')
     await uploadObject(S3_AUDIO_BUCKET, utt.storage_path, maskedBytes, 'audio/wav')
 
     // Update file size
@@ -245,7 +383,82 @@ adminUtterances.post('/utterances/:id/apply-mask', async (c) => {
       // ignore cleanup errors
     }
 
-    return c.json({ data: { ok: true, maskType, intervalsProcessed: intervals.length } })
+    return c.json({ data: { ok: true, intervalsProcessed: intervals.length } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * GET /admin/utterances/:id/original-backup
+ * 원본 백업 존재 여부 확인
+ */
+adminUtterances.get('/utterances/:id/original-backup', async (c) => {
+  const utteranceId = c.req.param('id')
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('utterances')
+      .select('storage_path, session_id, user_id')
+      .eq('id', utteranceId)
+      .single()
+
+    if (error || !data) {
+      return c.json({ error: 'Utterance not found' }, 404)
+    }
+
+    const backupPath = `${data.user_id}/${data.session_id}/original/${utteranceId}.wav`
+
+    try {
+      await s3Client.send(new GetObjectCommand({ Bucket: S3_AUDIO_BUCKET, Key: backupPath }))
+      return c.json({ data: { hasBackup: true } })
+    } catch {
+      return c.json({ data: { hasBackup: false } })
+    }
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * POST /admin/utterances/:id/restore-original
+ * S3 원본 백업을 storage_path로 복원
+ */
+adminUtterances.post('/utterances/:id/restore-original', async (c) => {
+  const utteranceId = c.req.param('id')
+
+  try {
+    const { data: utt, error: fetchError } = await supabaseAdmin
+      .from('utterances')
+      .select('storage_path, session_id, user_id')
+      .eq('id', utteranceId)
+      .single()
+
+    if (fetchError || !utt) {
+      return c.json({ error: 'Utterance not found' }, 404)
+    }
+
+    const backupPath = `${utt.user_id}/${utt.session_id}/original/${utteranceId}.wav`
+
+    const response = await s3Client.send(
+      new GetObjectCommand({ Bucket: S3_AUDIO_BUCKET, Key: backupPath }),
+    )
+    if (!response.Body) {
+      return c.json({ error: 'Original backup not found' }, 404)
+    }
+
+    const bytes = await response.Body.transformToByteArray()
+    await uploadObject(S3_AUDIO_BUCKET, utt.storage_path, bytes, 'audio/wav')
+
+    await supabaseAdmin
+      .from('utterances')
+      .update({
+        file_size_bytes: bytes.byteLength,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', utteranceId)
+
+    return c.json({ data: { ok: true } })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }

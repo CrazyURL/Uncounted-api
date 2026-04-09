@@ -295,6 +295,7 @@ storage.post('/audio/utterance', async (c) => {
       beepMaskRatio?: number
       qualityScore?: number
       qualityGrade?: string
+      volumeLufs?: number
       segmentedBy?: string
       clientVersion?: string
       labels?: Record<string, string>
@@ -362,6 +363,7 @@ storage.post('/audio/utterance', async (c) => {
           beep_mask_ratio:     meta.beepMaskRatio ?? null,
           quality_score:       meta.qualityScore ?? null,
           quality_grade:       meta.qualityGrade ?? null,
+          volume_lufs:         meta.volumeLufs ?? null,
           labels:              meta.labels ?? null,
           dialog_act:          meta.dialogAct ?? null,
           label_source:        meta.labelSource ?? null,

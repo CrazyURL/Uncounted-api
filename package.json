@@ -9,7 +9,8 @@
     "deploy:dev": "render deploys create srv-d6ndi2kr85hc73efrnu0",
     "deploy:prod": "render deploys create srv-d6ndrri4d50c73dfrt40",
     "logs:dev": "render logs srv-d6ndi2kr85hc73efrnu0 --tail",
-    "logs:prod": "render logs srv-d6ndrri4d50c73dfrt40 --tail"
+    "logs:prod": "render logs srv-d6ndrri4d50c73dfrt40 --tail",
+    "download:audio": "tsx scripts/download-dev-audio.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1014.0",

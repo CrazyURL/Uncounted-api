@@ -86,3 +86,11 @@ CREATE POLICY "admin_full_access_utterances" ON utterances
 
 CREATE POLICY "users_read_own_utterances" ON utterances
   FOR SELECT USING (auth.uid()::text = user_id);
+
+-- 또는 더 간단하게: service_role 전용 정책 추가
+CREATE POLICY "service_role_bypass_utterances" ON utterances
+  FOR ALL
+  TO service_role
+  USING (true)
+  WITH CHECK (true);
+

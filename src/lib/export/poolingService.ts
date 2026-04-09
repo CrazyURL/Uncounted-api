@@ -13,6 +13,7 @@ export interface PoolingFilters {
   requirePiiCleaned?: boolean   // default true
   minQaScore?: number           // default 50
   requireTranscript?: boolean   // default true
+  requireLabels?: boolean       // SKU별 라벨 필수 여부 (e.g. U-A02)
 }
 
 export interface DiversityConstraints {
@@ -121,6 +122,9 @@ async function fetchEligibleBUs(filters: PoolingFilters): Promise<PooledBU[]> {
   }
   if (filters.dateTo) {
     query = query.lte('session_date', filters.dateTo)
+  }
+  if (filters.requireLabels) {
+    query = query.eq('has_labels', true)
   }
 
   const { data: buRows, error: buError } = await query
