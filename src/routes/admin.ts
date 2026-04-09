@@ -854,12 +854,13 @@ admin.post('/consent/notify-withdrawal', async (c) => {
 
 // ── PUT /admin/sessions/consent-force-update ────────────────────────────
 // 테스트 데이터 동의 강제 전환 (어드민 전용)
-// 입력: { sessionIds: string[], consentStatus: 'PUBLIC_CONSENTED' | 'PRIVATE' | 'WITHDRAWN' }
+// 입력: { sessionIds: string[], consentStatus: 'both_agreed' }
+// 효과: sessions.consent_status = 'consented', billable_units.consent_status = 'PUBLIC_CONSENTED'
 
 admin.put('/sessions/consent-force-update', async (c) => {
   const { sessionIds, consentStatus } = getBody<{ sessionIds: string[]; consentStatus: string }>(c)
 
-  const ALLOWED_STATUSES = ['PUBLIC_CONSENTED', 'PRIVATE', 'WITHDRAWN']
+  const ALLOWED_STATUSES = ['both_agreed']
   if (!Array.isArray(sessionIds) || sessionIds.length === 0) {
     return c.json({ error: 'sessionIds 배열이 필요합니다' }, 400)
   }
@@ -887,14 +888,14 @@ admin.put('/sessions/consent-force-update', async (c) => {
 
     const { error: sessErr } = await supabaseAdmin
       .from('sessions')
-      .update({ visibility_status: consentStatus })
+      .update({ consent_status: 'consented' })
       .in('id', eligibleIds)
 
     if (sessErr) throw sessErr
 
     const { error: buErr } = await supabaseAdmin
       .from('billable_units')
-      .update({ consent_status: consentStatus })
+      .update({ consent_status: 'PUBLIC_CONSENTED' })
       .in('session_id', eligibleIds)
 
     if (buErr) throw buErr
