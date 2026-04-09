@@ -301,7 +301,7 @@ adminUtterances.post('/utterances/:id/apply-mask', async (c) => {
     const inputPath = join(tempDir, 'input.wav')
     const outputPath = join(tempDir, 'output.wav')
 
-    const backupPath = `${utt.user_id}/${utt.session_id}/original/${utteranceId}.wav`
+    const backupPath = `${utt.session_id}/original/${utteranceId}.wav`
     let sourceKey = utt.storage_path
     try {
       const backupHead = await s3Client.send(
@@ -407,7 +407,7 @@ adminUtterances.get('/utterances/:id/original-backup', async (c) => {
       return c.json({ error: 'Utterance not found' }, 404)
     }
 
-    const backupPath = `${data.user_id}/${data.session_id}/original/${utteranceId}.wav`
+    const backupPath = `${data.session_id}/original/${utteranceId}.wav`
 
     try {
       await s3Client.send(new GetObjectCommand({ Bucket: S3_AUDIO_BUCKET, Key: backupPath }))
@@ -438,7 +438,7 @@ adminUtterances.post('/utterances/:id/restore-original', async (c) => {
       return c.json({ error: 'Utterance not found' }, 404)
     }
 
-    const backupPath = `${utt.user_id}/${utt.session_id}/original/${utteranceId}.wav`
+    const backupPath = `${utt.session_id}/original/${utteranceId}.wav`
 
     const response = await s3Client.send(
       new GetObjectCommand({ Bucket: S3_AUDIO_BUCKET, Key: backupPath }),
