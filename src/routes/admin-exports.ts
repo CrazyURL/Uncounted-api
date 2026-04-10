@@ -584,21 +584,6 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
 
     const lockedSessionIds = [...new Set((lockedBUs ?? []).map((bu) => bu.session_id as string).filter(Boolean))]
 
-    // 1. 라벨이 필요한 SKU일 경우 세션 라벨 조회
-    type SessionLabel = { relationship?: string | null; purpose?: string | null; domain?: string | null; tone?: string | null; noise?: string | null }
-    const sessionLabelMap = new Map<string, SessionLabel>()
-    if (requiresLabels && lockedSessionIds.length > 0) {
-      const { data: sessionRows } = await supabaseAdmin
-        .from('sessions')
-        .select('id, labels')
-        .in('id', lockedSessionIds)
-      for (const row of (sessionRows ?? []) as Array<{ id: string; labels: SessionLabel | null }>) {
-        if (row.labels) {
-          sessionLabelMap.set(row.id, row.labels)
-        }
-      }
-    }
-
     let hasClientUtterances = false
     if (lockedSessionIds.length > 0) {
       const { count } = await supabaseAdmin
@@ -634,7 +619,6 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
               // ignore
             }
           }
-          const sessionLabel = requiresLabels ? (sessionLabelMap.get(u.session_id as string) ?? null) : undefined
           return {
             utteranceId: u.id,
             sessionId: u.session_id,
@@ -660,7 +644,7 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
             audioUrl: signedUrl ?? undefined,
             signedUrl,
             source: 'utterances' as const,
-            ...(requiresLabels && { labels: sessionLabel }),
+            ...(requiresLabels && { labels: u.labels ?? null }),
           }
         }),
       )

@@ -127,21 +127,21 @@ describe('poolingService', () => {
         mockBU({ id: 'bu-6', user_id: 'u6', qa_score: 70, session_id: 'sess-m4' }),
       ]
 
-      // Mock sessions → users_profile join data
+      // Mock users_profile data (user_id 기준)
       const profileData = [
-        { id: 'sess-m1', pid: 'p1', users_profile: { age_band: '30대', gender: '남성', region_group: '수도권' } },
-        { id: 'sess-m2', pid: 'p2', users_profile: { age_band: '20대', gender: '남성', region_group: '영남' } },
-        { id: 'sess-f1', pid: 'p3', users_profile: { age_band: '20대', gender: '여성', region_group: '수도권' } },
-        { id: 'sess-m3', pid: 'p4', users_profile: { age_band: '40대', gender: '남성', region_group: '호남' } },
-        { id: 'sess-f2', pid: 'p5', users_profile: { age_band: '30대', gender: '여성', region_group: '수도권' } },
-        { id: 'sess-m4', pid: 'p6', users_profile: { age_band: '20대', gender: '남성', region_group: '영남' } },
+        { user_id: 'u1', age_band: '30대', gender: '남성', region_group: '수도권' },
+        { user_id: 'u2', age_band: '20대', gender: '남성', region_group: '영남' },
+        { user_id: 'u3', age_band: '20대', gender: '여성', region_group: '수도권' },
+        { user_id: 'u4', age_band: '40대', gender: '남성', region_group: '호남' },
+        { user_id: 'u5', age_band: '30대', gender: '여성', region_group: '수도권' },
+        { user_id: 'u6', age_band: '20대', gender: '남성', region_group: '영남' },
       ]
 
       vi.mocked(supabaseAdmin.from).mockImplementation((table: string) => {
         if (table === 'billable_units') return mockQueryChain(bus) as never
         if (table === 'transcript_chunks') return mockQueryChain([{ session_id: 'sess-m1' }, { session_id: 'sess-m2' }, { session_id: 'sess-f1' }, { session_id: 'sess-m3' }, { session_id: 'sess-f2' }, { session_id: 'sess-m4' }]) as never
         if (table === 'bu_quality_metrics') return mockQueryChain([]) as never
-        if (table === 'sessions') return mockQueryChain(profileData) as never
+        if (table === 'users_profile') return mockQueryChain(profileData) as never
         return mockQueryChain([]) as never
       })
 
@@ -173,16 +173,16 @@ describe('poolingService', () => {
       ]
 
       const profileData = [
-        { id: 'sess-m1', pid: 'p1', users_profile: { age_band: '30대', gender: '남성', region_group: '수도권' } },
-        { id: 'sess-m2', pid: 'p2', users_profile: { age_band: '20대', gender: '남성', region_group: '영남' } },
-        { id: 'sess-m3', pid: 'p3', users_profile: { age_band: '40대', gender: '남성', region_group: '호남' } },
+        { user_id: 'u1', age_band: '30대', gender: '남성', region_group: '수도권' },
+        { user_id: 'u2', age_band: '20대', gender: '남성', region_group: '영남' },
+        { user_id: 'u3', age_band: '40대', gender: '남성', region_group: '호남' },
       ]
 
       vi.mocked(supabaseAdmin.from).mockImplementation((table: string) => {
         if (table === 'billable_units') return mockQueryChain(bus) as never
         if (table === 'transcript_chunks') return mockQueryChain([{ session_id: 'sess-m1' }, { session_id: 'sess-m2' }, { session_id: 'sess-m3' }]) as never
         if (table === 'bu_quality_metrics') return mockQueryChain([]) as never
-        if (table === 'sessions') return mockQueryChain(profileData) as never
+        if (table === 'users_profile') return mockQueryChain(profileData) as never
         return mockQueryChain([]) as never
       })
 
@@ -209,7 +209,7 @@ describe('poolingService', () => {
         if (table === 'billable_units') return mockQueryChain(bus) as never
         if (table === 'transcript_chunks') return mockQueryChain([{ session_id: 'sess-1' }]) as never
         if (table === 'bu_quality_metrics') return mockQueryChain([]) as never
-        if (table === 'sessions') return mockQueryChain([]) as never
+        if (table === 'users_profile') return mockQueryChain([]) as never
         return mockQueryChain([]) as never
       })
 
@@ -233,21 +233,21 @@ describe('poolingService', () => {
       ]
 
       const profileData = [
-        { id: 'sess-1', pid: 'p1', users_profile: { age_band: '20대', gender: '남성', region_group: '수도권' } },
-        { id: 'sess-2', pid: 'p2', users_profile: { age_band: '20대', gender: '여성', region_group: '수도권' } },
-        { id: 'sess-3', pid: 'p3', users_profile: { age_band: '30대', gender: '남성', region_group: '영남' } },
-        { id: 'sess-4', pid: 'p4', users_profile: { age_band: '30대', gender: '여성', region_group: '영남' } },
-        { id: 'sess-5', pid: 'p5', users_profile: { age_band: '20대', gender: '남성', region_group: '수도권' } },
-        { id: 'sess-6', pid: 'p6', users_profile: { age_band: '30대', gender: '여성', region_group: '호남' } },
+        { user_id: 'u1', age_band: '20대', gender: '남성', region_group: '수도권' },
+        { user_id: 'u2', age_band: '20대', gender: '여성', region_group: '수도권' },
+        { user_id: 'u3', age_band: '30대', gender: '남성', region_group: '영남' },
+        { user_id: 'u4', age_band: '30대', gender: '여성', region_group: '영남' },
+        { user_id: 'u5', age_band: '20대', gender: '남성', region_group: '수도권' },
+        { user_id: 'u6', age_band: '30대', gender: '여성', region_group: '호남' },
       ]
 
       vi.mocked(supabaseAdmin.from).mockImplementation((table: string) => {
         if (table === 'billable_units') return mockQueryChain(bus) as never
         if (table === 'transcript_chunks') return mockQueryChain(
-          profileData.map(p => ({ session_id: p.id }))
+          bus.map(b => ({ session_id: b.session_id }))
         ) as never
         if (table === 'bu_quality_metrics') return mockQueryChain([]) as never
-        if (table === 'sessions') return mockQueryChain(profileData) as never
+        if (table === 'users_profile') return mockQueryChain(profileData) as never
         return mockQueryChain([]) as never
       })
 

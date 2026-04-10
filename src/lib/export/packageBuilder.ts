@@ -93,16 +93,16 @@ export interface BuildPackageResult {
 }
 
 export interface LabelsSummary {
-  totalSessions: number
-  labeledSessions: number
+  totalUtterances: number
+  labeledUtterances: number
   labelCoverage: number
   labelDistribution: Record<string, Record<string, number>>
   labelSources: { user_confirmed: number; auto_suggested: number; none: number }
 }
 
 export interface DialogActSummary {
-  totalSessions: number
-  labeledSessions: number
+  totalUtterances: number
+  labeledUtterances: number
   speechActDistribution: Record<string, number>
   intensityDistribution: Record<string, number>
   avgIntensity: number | null
@@ -198,48 +198,40 @@ export async function buildPackage(
   const sessionIds = [...new Set(utterances.map((u) => u.session_id as string).filter(Boolean))]
   const metricsMap = await loadQualityMetrics(sessionIds)
 
-  // 3b. Load speaker demographics via sessions → users_profile
+  // 3b. Load speaker demographics via users_profile (user_id 기준)
+  const userIds = [...new Set(utterances.map((u) => u.user_id as string).filter(Boolean))]
   const { data: profileRows } = await supabaseAdmin
-    .from('sessions')
-    .select('id, pid, consent_status, visibility_consent_version, users_profile(age_band, gender, region_group)')
-    .in('id', sessionIds)
+    .from('users_profile')
+    .select('user_id, age_band, gender, region_group')
+    .in('user_id', userIds)
 
-  const sessionDemoMap = new Map<string, {
-    ageBand?: string; gender?: string; regionGroup?: string;
-    consentStatus?: string; consentVersion?: string;
-  }>()
+  const userDemoMap = new Map<string, { ageBand?: string; gender?: string; regionGroup?: string }>()
   for (const row of (profileRows ?? []) as Record<string, unknown>[]) {
-    const profile = row.users_profile as Record<string, unknown> | null
-    sessionDemoMap.set(row.id as string, {
-      ageBand: profile ? ((profile.age_band as string) ?? undefined) : undefined,
-      gender: profile ? ((profile.gender as string) ?? undefined) : undefined,
-      regionGroup: profile ? ((profile.region_group as string) ?? undefined) : undefined,
-      consentStatus: (row.consent_status as string) ?? undefined,
-      consentVersion: (row.visibility_consent_version as string) ?? undefined,
+    userDemoMap.set(row.user_id as string, {
+      ageBand: (row.age_band as string) ?? undefined,
+      gender: (row.gender as string) ?? undefined,
+      regionGroup: (row.region_group as string) ?? undefined,
     })
+  }
+
+  // 3c. Load consent_status from locked BUs (session_id 기준)
+  const buConsentMap = new Map<string, string>()
+  if (lockedBUs && lockedBUs.length > 0) {
+    const { data: buConsentRows } = await supabaseAdmin
+      .from('billable_units')
+      .select('session_id, consent_status')
+      .eq('locked_by_job_id', exportJobId)
+    for (const row of (buConsentRows ?? []) as Record<string, unknown>[]) {
+      buConsentMap.set(row.session_id as string, (row.consent_status as string) ?? 'PRIVATE')
+    }
   }
 
   // 4. Load transcripts for involved sessions
   const transcriptMap = await loadTranscripts(sessionIds)
 
-  // 4b. Load session labels for SKUs that require labels (U-A02, U-A03)
+  // 4b. SKU 라벨 필수 여부 확인 (U-A02, U-A03)
   const skuId = (job.sku_id as string) ?? 'U-A01'
   const requiresLabels = skuId === 'U-A02' || skuId === 'U-A03'
-  const sessionLabelMap = new Map<string, { labels: Record<string, unknown> | null; labelSource: string | null }>()
-
-  if (requiresLabels && sessionIds.length > 0) {
-    const { data: sessionRows } = await supabaseAdmin
-      .from('sessions')
-      .select('id, labels, label_source')
-      .in('id', sessionIds)
-
-    for (const row of (sessionRows ?? []) as Record<string, unknown>[]) {
-      sessionLabelMap.set(row.id as string, {
-        labels: (row.labels as Record<string, unknown>) ?? null,
-        labelSource: (row.label_source as string) ?? null,
-      })
-    }
-  }
 
   // 5. Load metadata events for pseudo_ids in this package
   const pseudoIds = [
@@ -288,7 +280,7 @@ export async function buildPackage(
     // Speaker demographics
     const speakerKey = pseudoId ?? sessionId
     const existing = speakerMap.get(speakerKey) ?? { count: 0, durationSec: 0 }
-    const demo = sessionDemoMap.get(sessionId)
+    const demo = userDemoMap.get(utt.user_id as string)
     speakerMap.set(speakerKey, {
       count: existing.count + 1,
       durationSec: existing.durationSec + durationSec,
@@ -302,7 +294,7 @@ export async function buildPackage(
     const itemSnr = snrDb ?? (sessionMetrics ? Number(sessionMetrics.snr_db ?? 0) : null)
     const itemSpeechRatio = speechRatio ?? (sessionMetrics ? Number(sessionMetrics.speech_ratio ?? 0) : null)
 
-    const sessionLabel = requiresLabels ? sessionLabelMap.get(sessionId) : undefined
+    const uttLabels = requiresLabels ? (utt.labels as Record<string, unknown> | null) : undefined
     metaLines.push({
       utterance_id: uttId,
       session_id: sessionId,
@@ -323,15 +315,15 @@ export async function buildPackage(
       speaker_age_band: demo?.ageBand ?? null,
       speaker_gender: demo?.gender ?? null,
       speaker_region: demo?.regionGroup ?? null,
-      consent_status: demo?.consentStatus ?? null,
-      consent_version: demo?.consentVersion ?? null,
+      consent_status: buConsentMap.get(sessionId) ?? null,
+      consent_version: null,
       ...(requiresLabels && {
-        label_relationship: (sessionLabel?.labels?.relationship as string) ?? null,
-        label_purpose: (sessionLabel?.labels?.purpose as string) ?? null,
-        label_domain: (sessionLabel?.labels?.domain as string) ?? null,
-        label_tone: (sessionLabel?.labels?.tone as string) ?? null,
-        label_noise: (sessionLabel?.labels?.noise as string) ?? null,
-        label_source: sessionLabel?.labelSource ?? null,
+        label_relationship: (uttLabels?.relationship as string) ?? null,
+        label_purpose: (uttLabels?.purpose as string) ?? null,
+        label_domain: (uttLabels?.domain as string) ?? null,
+        label_tone: (uttLabels?.tone as string) ?? null,
+        label_noise: (uttLabels?.noise as string) ?? null,
+        label_source: (utt.label_source as string) ?? null,
         label_confidence: utt.label_confidence != null ? Number(utt.label_confidence) : null,
       }),
       ...(skuId === 'U-A03' && {
@@ -378,13 +370,13 @@ export async function buildPackage(
     }),
   )
 
-  // Build SKU-specific summaries
+  // Build SKU-specific summaries (utterance 기반)
   const labelsSummary: LabelsSummary | null = skuId === 'U-A02' || skuId === 'U-A03'
-    ? buildLabelsSummary(sessionIds, sessionLabelMap)
+    ? buildLabelsSummary(utterances)
     : null
 
   const dialogActSummary: DialogActSummary | null = skuId === 'U-A03'
-    ? buildDialogActSummary(sessionIds, sessionLabelMap)
+    ? buildDialogActSummary(utterances)
     : null
 
   // 7. Create ZIP archive
@@ -592,30 +584,28 @@ async function loadTranscripts(
 
 // ── SKU Summary Builders ───────────────────────────────────────────────
 
-type SessionLabelEntry = { labels: Record<string, unknown> | null; labelSource: string | null }
-
 function buildLabelsSummary(
-  sessionIds: string[],
-  sessionLabelMap: Map<string, SessionLabelEntry>,
+  utterances: Record<string, unknown>[],
 ): LabelsSummary {
   const labelDistribution: Record<string, Record<string, number>> = {}
   const labelSources = { user_confirmed: 0, auto_suggested: 0, none: 0 }
-  let labeledSessions = 0
+  let labeledUtterances = 0
 
-  for (const sessionId of sessionIds) {
-    const entry = sessionLabelMap.get(sessionId)
-    if (!entry?.labels) {
+  for (const utt of utterances) {
+    const labels = utt.labels as Record<string, unknown> | null
+    if (!labels) {
       labelSources.none++
       continue
     }
 
-    labeledSessions++
+    labeledUtterances++
 
-    if (entry.labelSource === 'user_confirmed') labelSources.user_confirmed++
-    else if (entry.labelSource === 'auto_suggested') labelSources.auto_suggested++
+    const labelSource = (utt.label_source as string) ?? null
+    if (labelSource === 'user_confirmed') labelSources.user_confirmed++
+    else if (labelSource === 'auto_suggested') labelSources.auto_suggested++
     else labelSources.none++
 
-    for (const [key, value] of Object.entries(entry.labels)) {
+    for (const [key, value] of Object.entries(labels)) {
       if (!labelDistribution[key]) labelDistribution[key] = {}
       const strVal = String(value)
       labelDistribution[key][strVal] = (labelDistribution[key][strVal] ?? 0) + 1
@@ -623,30 +613,28 @@ function buildLabelsSummary(
   }
 
   return {
-    totalSessions: sessionIds.length,
-    labeledSessions,
-    labelCoverage: sessionIds.length > 0 ? Math.round((labeledSessions / sessionIds.length) * 10000) / 10000 : 0,
+    totalUtterances: utterances.length,
+    labeledUtterances,
+    labelCoverage: utterances.length > 0 ? Math.round((labeledUtterances / utterances.length) * 10000) / 10000 : 0,
     labelDistribution,
     labelSources,
   }
 }
 
 function buildDialogActSummary(
-  sessionIds: string[],
-  sessionLabelMap: Map<string, SessionLabelEntry>,
+  utterances: Record<string, unknown>[],
 ): DialogActSummary {
   const speechActDistribution: Record<string, number> = {}
   const intensityDistribution: Record<string, number> = {}
   let intensitySum = 0
   let intensityCount = 0
-  let labeledSessions = 0
+  let labeledUtterances = 0
 
-  for (const sessionId of sessionIds) {
-    const entry = sessionLabelMap.get(sessionId)
-    if (!entry?.labels) continue
+  for (const utt of utterances) {
+    const labels = utt.labels as Record<string, unknown> | null
+    if (!labels) continue
 
-    labeledSessions++
-    const labels = entry.labels
+    labeledUtterances++
 
     if (labels.speech_act != null) {
       const act = String(labels.speech_act)
@@ -665,8 +653,8 @@ function buildDialogActSummary(
   }
 
   return {
-    totalSessions: sessionIds.length,
-    labeledSessions,
+    totalUtterances: utterances.length,
+    labeledUtterances,
     speechActDistribution,
     intensityDistribution,
     avgIntensity: intensityCount > 0 ? Math.round((intensitySum / intensityCount) * 100) / 100 : null,

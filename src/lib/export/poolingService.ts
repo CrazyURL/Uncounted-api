@@ -47,7 +47,7 @@ export interface PooledBU {
   clippingRatio: number | null
   beepMaskRatio: number | null
   qualityScore: number | null
-  // demographics (from sessions → users_profile join)
+  // demographics (from users_profile via user_id)
   ageBand?: string
   gender?: string
   regionGroup?: string
@@ -164,22 +164,20 @@ async function fetchEligibleBUs(filters: PoolingFilters): Promise<PooledBU[]> {
     metricsMap.set(key, m)
   }
 
-  // Step 4: Fetch speaker demographics via sessions → users_profile
+  // Step 4: Fetch speaker demographics via users_profile (user_id 기준)
+  const userIds = [...new Set(buRows.map((r: Record<string, unknown>) => r.user_id as string).filter(Boolean))]
   const { data: profileRows } = await supabaseAdmin
-    .from('sessions')
-    .select('id, pid, users_profile(age_band, gender, region_group)')
-    .in('id', sessionIds)
+    .from('users_profile')
+    .select('user_id, age_band, gender, region_group')
+    .in('user_id', userIds)
 
   const profileMap = new Map<string, { ageBand?: string; gender?: string; regionGroup?: string }>()
   for (const row of (profileRows ?? []) as Record<string, unknown>[]) {
-    const profile = row.users_profile as Record<string, unknown> | null
-    if (profile) {
-      profileMap.set(row.id as string, {
-        ageBand: (profile.age_band as string) ?? undefined,
-        gender: (profile.gender as string) ?? undefined,
-        regionGroup: (profile.region_group as string) ?? undefined,
-      })
-    }
+    profileMap.set(row.user_id as string, {
+      ageBand: (row.age_band as string) ?? undefined,
+      gender: (row.gender as string) ?? undefined,
+      regionGroup: (row.region_group as string) ?? undefined,
+    })
   }
 
   // Step 5: Combine and filter
@@ -191,7 +189,7 @@ async function fetchEligibleBUs(filters: PoolingFilters): Promise<PooledBU[]> {
 
     const metricsKey = `${sessionId}_${row.minute_index}`
     const metrics = metricsMap.get(metricsKey)
-    const demo = profileMap.get(sessionId)
+    const demo = profileMap.get(row.user_id as string)
 
     result.push({
       id: row.id as string,
