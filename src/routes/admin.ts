@@ -83,12 +83,51 @@ function sessionFromRow(row: Record<string, unknown>) {
   }
 }
 
+// ── utterances 테이블에서 session별 대표 labels 조회 ───────────────────────
+
+type UtteranceLabelEntry = {
+  labels: Record<string, unknown>
+  labelSource: string | null
+}
+
+async function fetchUtteranceLabelsForSessions(
+  sessionIds: string[],
+): Promise<Map<string, UtteranceLabelEntry>> {
+  const map = new Map<string, UtteranceLabelEntry>()
+  if (sessionIds.length === 0) return map
+
+  const BATCH = 500
+  for (let i = 0; i < sessionIds.length; i += BATCH) {
+    const batch = sessionIds.slice(i, i + BATCH)
+    const { data } = await supabaseAdmin
+      .from('utterances')
+      .select('session_id, labels, label_source')
+      .in('session_id', batch)
+      .not('labels', 'is', null)
+      .order('id', { ascending: true })
+
+    for (const row of (data ?? []) as Record<string, unknown>[]) {
+      const sid = row.session_id as string
+      // 세션당 첫 번째 라벨이 있는 utterance를 대표로 사용
+      if (!map.has(sid)) {
+        map.set(sid, {
+          labels: row.labels as Record<string, unknown>,
+          labelSource: (row.label_source as string) ?? null,
+        })
+      }
+    }
+  }
+
+  return map
+}
+
 // ── 세션 필터 쿼리 빌더 (sessions + users/stats 공유) ─────────────────────
 
 type SessionFilterParams = {
   domains: string[]
   qualityGrades: string[]
   labelStatus?: string
+  labeledSessionIds: string[] | null  // utterances 테이블 기반 라벨 보유 session_id 목록
   publicStatus?: string
   piiCleanedOnly: boolean
   hasAudioUrl: boolean
@@ -111,8 +150,12 @@ function applySessionFilters(query: any, f: SessionFilterParams) {
     if (f.qualityGrades.includes('C')) gradeConds.push('qa_score.lt.60')
     if (gradeConds.length) query = query.or(gradeConds.join(','))
   }
-  if (f.labelStatus === 'labeled') query = query.not('labels', 'is', null)
-  else if (f.labelStatus === 'unlabeled') query = query.is('labels', null)
+  if (f.labelStatus === 'labeled' && f.labeledSessionIds) {
+    if (f.labeledSessionIds.length) query = query.in('id', f.labeledSessionIds)
+    else query = query.eq('id', '__no_match__')
+  } else if (f.labelStatus === 'unlabeled' && f.labeledSessionIds) {
+    if (f.labeledSessionIds.length) query = query.not('id', 'in', `(${f.labeledSessionIds.join(',')})`)
+  }
   if (f.publicStatus === 'public') query = query.eq('is_public', true)
   else if (f.publicStatus === 'private') query = query.eq('is_public', false)
   if (f.piiCleanedOnly) query = query.eq('is_pii_cleaned', true)
@@ -373,8 +416,18 @@ admin.get('/sessions', async (c) => {
       transcriptSessionIds = (tData ?? []).map((r: any) => r.session_id as string)
     }
 
+    // labelStatus 필터: utterances 테이블에서 labels 보유 session_id 목록 사전 조회
+    let labeledSessionIds: string[] | null = null
+    if (labelStatus === 'labeled' || labelStatus === 'unlabeled') {
+      const { data: lData } = await supabaseAdmin
+        .from('utterances')
+        .select('session_id')
+        .not('labels', 'is', null)
+      labeledSessionIds = [...new Set((lData ?? []).map((r: any) => r.session_id as string))]
+    }
+
     const filterParams: SessionFilterParams = {
-      domains, qualityGrades, labelStatus, publicStatus,
+      domains, qualityGrades, labelStatus, labeledSessionIds, publicStatus,
       piiCleanedOnly, hasAudioUrl, diarizationStatus,
       transcriptSessionIds, transcriptStatus,
       uploadStatuses, dateFrom, dateTo,
@@ -391,8 +444,20 @@ admin.get('/sessions', async (c) => {
     const { data, error, count } = await query
     if (error) return c.json({ error: error.message }, 500)
 
+    // utterances 테이블에서 session별 대표 labels 조회하여 병합
+    const rows = (data ?? []) as Record<string, unknown>[]
+    const sessionIds = rows.map((r) => r.id as string).filter(Boolean)
+    const uttLabelsMap = await fetchUtteranceLabelsForSessions(sessionIds)
+
     return c.json({
-      data: (data ?? []).map(sessionFromRow),
+      data: rows.map((row) => {
+        const mapped = sessionFromRow(row)
+        const uttLabels = uttLabelsMap.get(row.id as string)
+        if (uttLabels) {
+          return { ...mapped, labels: uttLabels.labels, labelSource: uttLabels.labelSource }
+        }
+        return mapped
+      }),
       count: count ?? 0,
     })
   } catch (err: any) {
@@ -431,8 +496,18 @@ admin.get('/users/stats', async (c) => {
       transcriptSessionIds = (tData ?? []).map((r: any) => r.session_id as string)
     }
 
+    // labelStatus 필터: utterances 테이블에서 labels 보유 session_id 목록 사전 조회
+    let labeledSessionIds: string[] | null = null
+    if (labelStatus === 'labeled' || labelStatus === 'unlabeled') {
+      const { data: lData } = await supabaseAdmin
+        .from('utterances')
+        .select('session_id')
+        .not('labels', 'is', null)
+      labeledSessionIds = [...new Set((lData ?? []).map((r: any) => r.session_id as string))]
+    }
+
     const filterParams: SessionFilterParams = {
-      domains, qualityGrades, labelStatus, publicStatus,
+      domains, qualityGrades, labelStatus, labeledSessionIds, publicStatus,
       piiCleanedOnly, hasAudioUrl, diarizationStatus,
       transcriptSessionIds, transcriptStatus,
       uploadStatuses, dateFrom, dateTo,
