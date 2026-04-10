@@ -5,11 +5,7 @@ import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
 import { encryptId } from '../lib/crypto.js'
-import {
-  getMetadataStats,
-  getMetadataEvents,
-  getMetadataSummary,
-} from '../lib/export/metadataRepository.js'
+import metadataAdmin from './admin-metadata.js'
 import {
   listObjects,
   listFolders,
@@ -907,52 +903,7 @@ admin.put('/sessions/consent-force-update', async (c) => {
 })
 
 // ── Metadata Events ───────────────────────────────────────────────────
-
-/**
- * GET /admin/metadata/stats
- * 스키마별 메타데이터 이벤트 카운트
- */
-admin.get('/metadata/stats', async (c) => {
-  try {
-    const stats = await getMetadataStats()
-    return c.json({ data: stats })
-  } catch (err) {
-    console.error('[admin] metadata/stats error:', err)
-    return c.json({ error: 'Internal Server Error' }, 500)
-  }
-})
-
-/**
- * GET /admin/metadata/summary
- * 메타 탭 대시보드용 요약 (전체 이벤트 수, 유저 수, 스키마별 카운트)
- */
-admin.get('/metadata/summary', async (c) => {
-  try {
-    const summary = await getMetadataSummary()
-    return c.json({ data: summary })
-  } catch (err) {
-    console.error('[admin] metadata/summary error:', err)
-    return c.json({ error: 'Internal Server Error' }, 500)
-  }
-})
-
-/**
- * GET /admin/metadata/events?schema=U-M07-v1&pseudo_id=xxx&limit=100&offset=0
- * 메타데이터 이벤트 조회 (페이지네이션)
- */
-admin.get('/metadata/events', async (c) => {
-  try {
-    const result = await getMetadataEvents({
-      schemaId: c.req.query('schema') ?? undefined,
-      pseudoId: c.req.query('pseudo_id') ?? undefined,
-      limit: Number(c.req.query('limit') ?? 100),
-      offset: Number(c.req.query('offset') ?? 0),
-    })
-    return c.json({ data: result.data, total: result.total })
-  } catch (err) {
-    console.error('[admin] metadata/events error:', err)
-    return c.json({ error: 'Internal Server Error' }, 500)
-  }
-})
+// admin-metadata.ts로 분리됨
+admin.route('/metadata', metadataAdmin)
 
 export default admin

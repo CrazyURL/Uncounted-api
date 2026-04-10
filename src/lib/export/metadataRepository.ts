@@ -62,6 +62,346 @@ export function buildDedupKey(record: Record<string, unknown>): string {
   return `${schema}:${pseudoId}:${dateBucket}:${hash}`
 }
 
+// ── Date Helpers ──────────────────────────────────────────────────────
+
+const DAY_NAMES = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const
+
+/** Derive day-of-week from YYYY-MM-DD string. Falls back to 'unknown'. */
+function dateToDayOfWeek(dateBucket: string | null): string {
+  if (!dateBucket || dateBucket.length < 10) return 'unknown'
+  const d = new Date(dateBucket + 'T00:00:00')
+  if (isNaN(d.getTime())) return 'unknown'
+  return DAY_NAMES[d.getDay()]
+}
+
+// ── Quality / Sync Helpers ─────────────────────────────────────────────
+
+export type QualityGrade = 'good' | 'partial' | 'sparse'
+
+/** Compute quality grade from distinct timeBucket count per device-date pair */
+export function computeQualityGrade(timeBucketCount: number): QualityGrade {
+  if (timeBucketCount >= 8) return 'good'
+  if (timeBucketCount >= 4) return 'partial'
+  return 'sparse'
+}
+
+export type SyncStatus = 'upToDate' | 'stale'
+
+/** Compute sync status: upToDate if received_at within 48h, else stale */
+export function computeSyncStatus(receivedAt: string | Date): SyncStatus {
+  const receivedTime = typeof receivedAt === 'string' ? new Date(receivedAt) : receivedAt
+  const diffMs = Date.now() - receivedTime.getTime()
+  const hours48 = 48 * 60 * 60 * 1000
+  return diffMs <= hours48 ? 'upToDate' : 'stale'
+}
+
+// ── Inventory ─────────────────────────────────────────────────────────
+
+export interface InventorySku {
+  schemaId: string
+  displayName: string
+  totalEvents: number
+  deviceCount: number
+  periodStart: string | null
+  periodEnd: string | null
+  qualityDistribution: { good: number; partial: number; sparse: number }
+  syncStatus: { upToDate: number; stale: number }
+}
+
+/** Get metadata inventory grouped by schema_id */
+export async function getMetadataInventory(): Promise<{ skus: InventorySku[] }> {
+  // Fetch all events with minimal fields for aggregation
+  const { data, error } = await supabaseAdmin
+    .from('metadata_events')
+    .select('schema_id, pseudo_id, date_bucket, payload, received_at')
+    .order('schema_id', { ascending: true })
+
+  if (error) throw new Error(`getMetadataInventory failed: ${error.message}`)
+
+  const rows = (data ?? []) as Array<{
+    schema_id: string
+    pseudo_id: string
+    date_bucket: string | null
+    payload: Record<string, unknown>
+    received_at: string
+  }>
+
+  // Group by schema_id
+  const schemaMap = new Map<string, typeof rows>()
+  for (const row of rows) {
+    const existing = schemaMap.get(row.schema_id)
+    if (existing) {
+      existing.push(row)
+    } else {
+      schemaMap.set(row.schema_id, [row])
+    }
+  }
+
+  const skus: InventorySku[] = []
+
+  for (const [schemaId, schemaRows] of schemaMap) {
+    const pseudoIds = new Set<string>()
+    const dates: string[] = []
+    // Track timeBuckets per device-date pair for quality
+    const deviceDateBuckets = new Map<string, Set<string>>()
+    // Track latest received_at per pseudo_id for sync
+    const deviceLatestSync = new Map<string, string>()
+
+    for (const row of schemaRows) {
+      pseudoIds.add(row.pseudo_id)
+      if (row.date_bucket) dates.push(row.date_bucket)
+
+      // Quality: count distinct timeBuckets per (pseudo_id, date_bucket)
+      const timeBucket = (row.payload?.timeBucket ?? '') as string
+      if (row.date_bucket && timeBucket) {
+        const key = `${row.pseudo_id}:${row.date_bucket}`
+        const bucketSet = deviceDateBuckets.get(key)
+        if (bucketSet) {
+          bucketSet.add(timeBucket)
+        } else {
+          deviceDateBuckets.set(key, new Set([timeBucket]))
+        }
+      }
+
+      // Sync: track latest received_at per device
+      const current = deviceLatestSync.get(row.pseudo_id)
+      if (!current || row.received_at > current) {
+        deviceLatestSync.set(row.pseudo_id, row.received_at)
+      }
+    }
+
+    // Quality distribution
+    const qualityDistribution = { good: 0, partial: 0, sparse: 0 }
+    for (const [, bucketSet] of deviceDateBuckets) {
+      const grade = computeQualityGrade(bucketSet.size)
+      qualityDistribution[grade] += 1
+    }
+
+    // Sync status distribution
+    const syncStatusDist = { upToDate: 0, stale: 0 }
+    for (const [, latestAt] of deviceLatestSync) {
+      const status = computeSyncStatus(latestAt)
+      syncStatusDist[status] += 1
+    }
+
+    const sortedDates = dates.sort()
+
+    skus.push({
+      schemaId,
+      displayName: schemaId,
+      totalEvents: schemaRows.length,
+      deviceCount: pseudoIds.size,
+      periodStart: sortedDates[0] ?? null,
+      periodEnd: sortedDates[sortedDates.length - 1] ?? null,
+      qualityDistribution,
+      syncStatus: syncStatusDist,
+    })
+  }
+
+  return { skus }
+}
+
+// ── SKU Stats ─────────────────────────────────────────────────────────
+
+export interface SkuDevice {
+  pseudoId: string
+  eventCount: number
+  lastSyncAt: string
+  syncStatus: SyncStatus
+}
+
+export interface SkuStats {
+  devices: SkuDevice[]
+  fieldDistributions: Record<string, Record<string, number>>
+  heatmap: Array<{ dateBucket: string; timeBucket: string; count: number }>
+}
+
+/** Get detailed stats for a specific schema (SKU) */
+export async function getMetadataSkuStats(schemaId: string): Promise<SkuStats> {
+  const { data, error } = await supabaseAdmin
+    .from('metadata_events')
+    .select('pseudo_id, date_bucket, payload, received_at')
+    .eq('schema_id', schemaId)
+
+  if (error) throw new Error(`getMetadataSkuStats failed: ${error.message}`)
+
+  const rows = (data ?? []) as Array<{
+    pseudo_id: string
+    date_bucket: string | null
+    payload: Record<string, unknown>
+    received_at: string
+  }>
+
+  // Devices aggregation
+  const deviceMap = new Map<string, { count: number; lastSyncAt: string }>()
+  for (const row of rows) {
+    const existing = deviceMap.get(row.pseudo_id)
+    if (existing) {
+      existing.count += 1
+      if (row.received_at > existing.lastSyncAt) {
+        existing.lastSyncAt = row.received_at
+      }
+    } else {
+      deviceMap.set(row.pseudo_id, { count: 1, lastSyncAt: row.received_at })
+    }
+  }
+
+  const devices: SkuDevice[] = Array.from(deviceMap.entries()).map(
+    ([pseudoId, info]) => ({
+      pseudoId,
+      eventCount: info.count,
+      lastSyncAt: info.lastSyncAt,
+      syncStatus: computeSyncStatus(info.lastSyncAt),
+    }),
+  )
+
+  // Field distributions — aggregate JSONB keys from payload
+  // For U-M01: callType, durationBucket, timeBucket
+  const distributionKeys = getDistributionKeys(schemaId)
+  const fieldDistributions: Record<string, Record<string, number>> = {}
+  for (const key of distributionKeys) {
+    fieldDistributions[key] = {}
+  }
+
+  // Heatmap: U-M01 uses (month, timeBucket), others use (dayOfWeek, timeBucket)
+  const isMonthlyHeatmap = schemaId === 'U-M01-v1'
+  const heatmapMap = new Map<string, number>()
+
+  for (const row of rows) {
+    const payload = row.payload ?? {}
+
+    // Field distributions
+    for (const key of distributionKeys) {
+      const value = String(payload[key] ?? 'unknown')
+      const dist = fieldDistributions[key]
+      dist[value] = (dist[value] ?? 0) + 1
+    }
+
+    // Heatmap
+    const timeBucket = String(payload.timeBucket ?? 'unknown')
+    let rowKey: string
+    if (isMonthlyHeatmap) {
+      rowKey = row.date_bucket ?? 'unknown'
+    } else {
+      // Derive dayOfWeek: use payload.dayOfWeek if available (U-M07), else derive from date
+      const payloadDow = payload.dayOfWeek as string | undefined
+      rowKey = payloadDow ?? dateToDayOfWeek(row.date_bucket)
+    }
+    const heatKey = `${rowKey}|${timeBucket}`
+    heatmapMap.set(heatKey, (heatmapMap.get(heatKey) ?? 0) + 1)
+  }
+
+  const heatmap = Array.from(heatmapMap.entries()).map(([key, count]) => {
+    const [dateBucket, timeBucket] = key.split('|')
+    return { dateBucket, timeBucket, count }
+  })
+
+  return { devices, fieldDistributions, heatmap }
+}
+
+/** Get payload keys to aggregate for field distributions by schema */
+function getDistributionKeys(schemaId: string): string[] {
+  const schemaDistKeys: Record<string, string[]> = {
+    'U-M01-v1': ['callType', 'durationBucket', 'timeBucket'],
+    'U-M07-v1': ['dayOfWeek', 'timeBucket'],
+    'U-M08-v1': ['timeBucket'],
+    'U-M09-v1': ['eventType', 'timeBucket'],
+    'U-M10-v1': ['timeBucket'],
+  }
+  return schemaDistKeys[schemaId] ?? ['timeBucket']
+}
+
+// ── Preview ───────────────────────────────────────────────────────────
+
+export interface PreviewFilters {
+  quality?: QualityGrade
+  dateFrom?: string
+  dateTo?: string
+  pseudoId?: string
+  limit?: number
+  offset?: number
+}
+
+export interface PreviewResult {
+  events: MetadataEventRow[]
+  fieldDistributions: Record<string, Record<string, number>>
+  total: number
+}
+
+/** Get metadata events preview with filters */
+export async function getMetadataPreview(
+  schemaId: string,
+  filters: PreviewFilters,
+): Promise<PreviewResult> {
+  const limit = Math.min(filters.limit ?? 50, 500)
+  const offset = filters.offset ?? 0
+
+  let query = supabaseAdmin
+    .from('metadata_events')
+    .select('*', { count: 'exact' })
+    .eq('schema_id', schemaId)
+
+  if (filters.pseudoId) {
+    query = query.eq('pseudo_id', filters.pseudoId)
+  }
+  if (filters.dateFrom) {
+    query = query.gte('date_bucket', filters.dateFrom)
+  }
+  if (filters.dateTo) {
+    query = query.lte('date_bucket', filters.dateTo)
+  }
+
+  const { data, count, error } = await query
+    .order('received_at', { ascending: false })
+    .range(offset, offset + limit - 1)
+
+  if (error) throw new Error(`getMetadataPreview failed: ${error.message}`)
+
+  let events = (data ?? []) as MetadataEventRow[]
+  const total = count ?? 0
+
+  // Quality filter — applied in-memory after fetch since it depends on
+  // aggregating timeBucket counts per device-date pair across the result set
+  if (filters.quality) {
+    const deviceDateBuckets = new Map<string, Set<string>>()
+    for (const evt of events) {
+      const timeBucket = String(evt.payload?.timeBucket ?? '')
+      if (evt.date_bucket && timeBucket) {
+        const key = `${evt.pseudo_id}:${evt.date_bucket}`
+        const s = deviceDateBuckets.get(key)
+        if (s) {
+          s.add(timeBucket)
+        } else {
+          deviceDateBuckets.set(key, new Set([timeBucket]))
+        }
+      }
+    }
+    events = events.filter((evt) => {
+      const key = `${evt.pseudo_id}:${evt.date_bucket}`
+      const bucketSet = deviceDateBuckets.get(key)
+      const grade = computeQualityGrade(bucketSet?.size ?? 0)
+      return grade === filters.quality
+    })
+  }
+
+  // Field distributions from the result set
+  const distributionKeys = getDistributionKeys(schemaId)
+  const fieldDistributions: Record<string, Record<string, number>> = {}
+  for (const key of distributionKeys) {
+    fieldDistributions[key] = {}
+  }
+  for (const evt of events) {
+    const payload = evt.payload ?? {}
+    for (const key of distributionKeys) {
+      const value = String(payload[key] ?? 'unknown')
+      const dist = fieldDistributions[key]
+      dist[value] = (dist[value] ?? 0) + 1
+    }
+  }
+
+  return { events, fieldDistributions, total }
+}
+
 // ── Upsert ─────────────────────────────────────────────────────────────
 
 /** Upsert metadata events (idempotent via dedup_key) */
