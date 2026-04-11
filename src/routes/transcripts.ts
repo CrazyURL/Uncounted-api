@@ -29,7 +29,7 @@ type TranscriptWord = {
 transcripts.post('/:sessionId', async (c) => {
   const userId = c.get('userId') as string
   const sessionId = c.req.param('sessionId')
-  const { text, summary, words } = getBody<{ text: string; summary?: string; words?: unknown[] }>(c)
+  const { text, summary, words, source } = getBody<{ text: string; summary?: string; words?: unknown[]; source?: string }>(c)
 
   if (!text || typeof text !== 'string') {
     return c.json({ error: 'Text is required' }, 400)
@@ -45,6 +45,7 @@ transcripts.post('/:sessionId', async (c) => {
 
     if (summary) row.summary = summary
     if (words && Array.isArray(words)) row.words = words
+    if (source === 'device' || source === 'server') row.source = source
 
     const { data, error } = await supabaseAdmin
       .from('transcripts')
@@ -62,6 +63,7 @@ transcripts.post('/:sessionId', async (c) => {
         text: encryptId(data.text),
         summary: data.summary ? encryptId(data.summary) : undefined,
         words: data.words ?? undefined,
+        source: data.source ?? undefined,
         createdAt: data.created_at,
       },
     })
@@ -98,6 +100,7 @@ transcripts.get('/:sessionId', async (c) => {
         text: encryptId(data.text),
         summary: data.summary ? encryptId(data.summary) : undefined,
         words: data.words ?? undefined,
+        source: data.source ?? undefined,
         createdAt: data.created_at,
       },
     })
@@ -116,7 +119,7 @@ transcripts.get('/', async (c) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('transcripts')
-      .select('session_id, text, summary, created_at, words')
+      .select('session_id, text, summary, created_at, words, source')
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
 
@@ -129,6 +132,7 @@ transcripts.get('/', async (c) => {
       text: encryptId(row.text),
       summary: row.summary ? encryptId(row.summary) : undefined,
       words: row.words ?? undefined,
+      source: row.source ?? undefined,
       createdAt: row.created_at,
     }))
 

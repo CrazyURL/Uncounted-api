@@ -102,6 +102,31 @@ sessions.post('/batch', async (c) => {
     // DB 컬럼으로 변환
     const rows = stamped.map(sessionToRow);
 
+    // ── PIPA 동의 상태 조회 → locked 세션 서버에서 오버라이드 ──────────
+    const { data: profile } = await supabaseAdmin
+      .from('users_profile')
+      .select('collect_consent, third_party_consent, consent_withdrawn')
+      .eq('user_id', userId)
+      .maybeSingle()
+
+    const isFullyConsented =
+      profile?.collect_consent &&
+      profile?.third_party_consent &&
+      !profile?.consent_withdrawn
+
+    if (isFullyConsented) {
+      const today = new Date().toISOString().slice(0, 10)
+      for (const row of rows) {
+        if (row.consent_status === 'locked') {
+          row.consent_status = 'user_only'
+          row.is_public = true
+          row.visibility_status = 'PUBLIC_CONSENTED'
+          row.visibility_source = 'GLOBAL_DEFAULT'
+          row.visibility_changed_at = today
+        }
+      }
+    }
+
     const { data, error } = await supabaseAdmin
       .from('sessions')
       .upsert(rows, { onConflict: 'id' })

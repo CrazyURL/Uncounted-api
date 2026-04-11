@@ -107,6 +107,81 @@ user.put('/consent', async (c) => {
     }
   }
 
+  // ── PIPA 동의 완료 시 기존 세션 일괄 동기화 ──────────────────────────
+  // collect_consent + third_party_consent 모두 true이고 철회 아닌 경우
+  // 해당 사용자의 locked 세션을 user_only로 승격
+  const isFullyConsented =
+    consentFields.collect_consent &&
+    consentFields.third_party_consent &&
+    !consentFields.consent_withdrawn
+
+  if (isFullyConsented) {
+    const today = new Date().toISOString().slice(0, 10)
+    try {
+      const { data: updated, error: syncErr } = await supabaseAdmin
+        .from('sessions')
+        .update({
+          consent_status: 'user_only',
+          is_public: true,
+          visibility_status: 'PUBLIC_CONSENTED',
+          visibility_source: 'GLOBAL_DEFAULT',
+          visibility_changed_at: today,
+        })
+        .eq('user_id', userId)
+        .eq('consent_status', 'locked')
+        .select('id')
+
+      const syncCount = updated?.length ?? 0
+      if (syncErr) {
+        console.error('[user/consent PUT] session sync error:', syncErr)
+      } else if (syncCount > 0) {
+        // billable_units도 동기화
+        await supabaseAdmin
+          .from('billable_units')
+          .update({ consent_status: 'PUBLIC_CONSENTED' })
+          .eq('user_id', userId)
+          .eq('consent_status', 'PRIVATE')
+
+        console.log(`[user/consent PUT] session sync: ${syncCount}건 user_only 전환`)
+      }
+    } catch (err) {
+      console.error('[user/consent PUT] session sync failed:', err)
+    }
+  }
+
+  // ── 동의 철회 시 기존 세션 되돌리기 ────────────────────────────────────
+  if (consentFields.consent_withdrawn) {
+    try {
+      const { data: reverted, error: revertErr } = await supabaseAdmin
+        .from('sessions')
+        .update({
+          consent_status: 'locked',
+          is_public: false,
+          visibility_status: 'PRIVATE',
+          visibility_source: 'GLOBAL_DEFAULT',
+          visibility_changed_at: new Date().toISOString().slice(0, 10),
+        })
+        .eq('user_id', userId)
+        .in('consent_status', ['user_only', 'both_agreed'])
+        .select('id')
+
+      const revertCount = reverted?.length ?? 0
+      if (revertErr) {
+        console.error('[user/consent PUT] consent withdrawal sync error:', revertErr)
+      } else if (revertCount > 0) {
+        await supabaseAdmin
+          .from('billable_units')
+          .update({ consent_status: 'PRIVATE' })
+          .eq('user_id', userId)
+          .in('consent_status', ['PUBLIC_CONSENTED'])
+
+        console.log(`[user/consent PUT] consent withdrawn: ${revertCount}건 locked 전환`)
+      }
+    } catch (err) {
+      console.error('[user/consent PUT] withdrawal sync failed:', err)
+    }
+  }
+
   return c.json({ data: consentFields })
 })
 
