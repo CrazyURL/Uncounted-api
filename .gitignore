@@ -5,3 +5,6 @@ dist/
 .env.production
 *.log
 .research/
+
+# 벤치마크 샘플 (PII 오디오, 커밋 금지)
+benchmark-samples/
