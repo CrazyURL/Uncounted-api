@@ -21,6 +21,27 @@ export function encryptId(plaintext: string): string {
 }
 
 /**
+ * encryptId()로 암호화된 값을 원래 plaintext로 복호화한다.
+ * 포맷: base64url( IV(12B) | AuthTag(16B) | Ciphertext ) + '@enc_uncounted'
+ */
+export function decryptId(encryptedId: string): string {
+  const suffix = ENC_SUFFIX
+  if (!encryptedId.endsWith(suffix)) {
+    throw new Error('Invalid encryptId format: missing suffix')
+  }
+  const key  = Buffer.from(ENCRYPTION_KEY, 'hex')
+  const data = Buffer.from(encryptedId.slice(0, -suffix.length), 'base64url')
+  const iv         = data.subarray(0, 12)
+  const authTag    = data.subarray(12, 28)
+  const ciphertext = data.subarray(28)
+
+  const decipher = createDecipheriv('aes-256-gcm', key, iv)
+  decipher.setAuthTag(authTag)
+  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()])
+  return decrypted.toString('utf8')
+}
+
+/**
  * 클라이언트가 암호화한 request body를 복호화한다.
  * 포맷: base64url( IV(12B) | AuthTag(16B) | Ciphertext )  — suffix 없음
  * 클라이언트 crypto.ts의 encryptData()와 대칭.

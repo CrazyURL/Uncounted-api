@@ -6,7 +6,7 @@ import { setCookie, getCookie, deleteCookie } from 'hono/cookie'
 import type { Context } from 'hono'
 import { createHash, randomBytes, randomUUID } from 'crypto'
 import { supabaseAdmin } from '../lib/supabase.js'
-import { encryptId } from '../lib/crypto.js'
+import { encryptId, decryptId } from '../lib/crypto.js'
 import { getBody } from '../lib/middleware.js'
 
 const auth = new Hono()
@@ -241,15 +241,27 @@ auth.get('/me', async (c) => {
  */
 auth.post('/refresh', async (c) => {
   const body = getBody<{ refresh_token?: string }>(c)
-  const refresh_token = body.refresh_token || getCookie(c, 'uncounted_refresh')
 
-  if (!refresh_token) {
+  // body의 refresh_token은 클라이언트가 encryptId()로 암호화해 저장한 값이므로 복호화 필요.
+  // 쿠키의 uncounted_refresh는 setAuthCookies()가 raw Supabase 토큰을 직접 저장하므로 그대로 사용.
+  let raw_refresh_token: string | undefined
+  if (body.refresh_token) {
+    try {
+      raw_refresh_token = decryptId(body.refresh_token)
+    } catch {
+      return c.json({ error: 'Invalid refresh token format' }, 400)
+    }
+  } else {
+    raw_refresh_token = getCookie(c, 'uncounted_refresh')
+  }
+
+  if (!raw_refresh_token) {
     return c.json({ error: 'Refresh token is required' }, 400)
   }
 
   try {
     const { data, error } = await supabaseAdmin.auth.refreshSession({
-      refresh_token,
+      refresh_token: raw_refresh_token,
     })
 
     if (error) {
