@@ -121,7 +121,23 @@ export interface DialogActSummary {
 export async function buildPackage(
   exportJobId: string,
 ): Promise<BuildPackageResult> {
+  let stage = '초기화'
+  try {
+    return await _buildPackageInner(exportJobId, (s) => { stage = s })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    // 이미 stage prefix가 붙어있으면 중복 방지
+    const prefixed = message.startsWith('[') ? message : `[${stage}] ${message}`
+    throw new Error(prefixed)
+  }
+}
+
+async function _buildPackageInner(
+  exportJobId: string,
+  setStage: (s: string) => void,
+): Promise<BuildPackageResult> {
   // 1. Load export job + client info
+  setStage('작업 조회')
   const { data: job, error: jobError } = await supabaseAdmin
     .from('export_jobs')
     .select('*')
@@ -132,6 +148,7 @@ export async function buildPackage(
     throw new Error(`Export job not found: ${exportJobId}`)
   }
 
+  setStage('클라이언트 조회')
   let clientName = 'Unknown Client'
   if (job.client_id) {
     const { data: client } = await supabaseAdmin
@@ -146,15 +163,19 @@ export async function buildPackage(
   let utterances: Record<string, unknown>[] = []
 
   // 2a. BU 잠금된 세션 목록 추출
-  const { data: lockedBUs } = await supabaseAdmin
+  setStage('BU 잠금 세션 조회')
+  const { data: lockedBUs, error: lockedBUsError } = await supabaseAdmin
     .from('billable_units')
     .select('session_id')
     .eq('locked_by_job_id', exportJobId)
+
+  if (lockedBUsError) throw new Error(lockedBUsError.message)
 
   const lockedSessionIds = [...new Set((lockedBUs ?? []).map((bu) => bu.session_id as string).filter(Boolean))]
 
   if (lockedSessionIds.length > 0) {
     // 2b. utterances 테이블에서 approved 발화 조회 (v3)
+    setStage('발화 목록 조회 (v3)')
     const { data: uttRows, error: uttError } = await supabaseAdmin
       .from('utterances')
       .select('*')
@@ -163,8 +184,11 @@ export async function buildPackage(
       .in('review_status', ['pending', 'approved'])
       .order('id', { ascending: true })
 
-    if (!uttError && uttRows && uttRows.length > 0) {
+    if (uttError) throw new Error(uttError.message)
+
+    if (uttRows && uttRows.length > 0) {
       // 2b-1. 검수 단계에서 제외된 발화 ID 목록 조회 (export_package_items.content_hash 기준)
+      setStage('제외 발화 목록 조회')
       const { data: excludedItems } = await supabaseAdmin
         .from('export_package_items')
         .select('utterance_id')
@@ -188,6 +212,7 @@ export async function buildPackage(
 
   // 2c. utterances가 없으면 레거시 export_package_items 폴백
   if (utterances.length === 0) {
+    setStage('레거시 발화 목록 조회')
     const { data: items, error: itemsError } = await supabaseAdmin
       .from('export_package_items')
       .select('*')
@@ -196,9 +221,7 @@ export async function buildPackage(
       .is('content_hash', null) // non-excluded
       .order('utterance_id', { ascending: true })
 
-    if (itemsError) {
-      throw new Error(`Failed to load package items: ${itemsError.message}`)
-    }
+    if (itemsError) throw new Error(itemsError.message)
 
     utterances = (items ?? []) as Record<string, unknown>[]
   }
@@ -208,10 +231,12 @@ export async function buildPackage(
   }
 
   // 3. Load quality metrics for involved sessions
+  setStage('품질 지표 로드')
   const sessionIds = [...new Set(utterances.map((u) => u.session_id as string).filter(Boolean))]
   const metricsMap = await loadQualityMetrics(sessionIds)
 
   // 3b. Load speaker demographics via users_profile (user_id 기준)
+  setStage('화자 인구통계 로드')
   const userIds = [...new Set(utterances.map((u) => u.user_id as string).filter(Boolean))]
   const { data: profileRows } = await supabaseAdmin
     .from('users_profile')
@@ -228,6 +253,7 @@ export async function buildPackage(
   }
 
   // 3c. Load consent_status from locked BUs (session_id 기준)
+  setStage('동의 상태 로드')
   const buConsentMap = new Map<string, string>()
   if (lockedBUs && lockedBUs.length > 0) {
     const { data: buConsentRows } = await supabaseAdmin
@@ -240,6 +266,7 @@ export async function buildPackage(
   }
 
   // 4. Load transcripts for involved sessions
+  setStage('전사 로드')
   const transcriptMap = await loadTranscripts(sessionIds)
 
   // 4b. SKU 라벨 필수 여부 확인 (U-A02, U-A03)
@@ -247,6 +274,7 @@ export async function buildPackage(
   const requiresLabels = skuId === 'U-A02' || skuId === 'U-A03'
 
   // 5. Load metadata events for pseudo_ids in this package
+  setStage('메타데이터 이벤트 로드')
   const pseudoIds = [
     ...new Set(utterances.map((u) => u.pseudo_id as string).filter(Boolean)),
   ]
@@ -392,6 +420,7 @@ export async function buildPackage(
     ? buildDialogActSummary(utterances)
     : null
 
+  setStage('ZIP 생성')
   // 7. Create ZIP archive
   const zipBuffer = await createZipArchive(
     packageDirName,
@@ -406,10 +435,12 @@ export async function buildPackage(
     dialogActSummary,
   )
 
+  setStage('S3 업로드')
   // 7. Upload to S3
   const storagePath = `exports/${exportJobId}/package.zip`
   await uploadObject(S3_AUDIO_BUCKET, storagePath, zipBuffer, 'application/zip')
 
+  setStage('작업 상태 업데이트')
   // 8. Update export_jobs
   const { error: updateError } = await supabaseAdmin
     .from('export_jobs')
@@ -524,12 +555,8 @@ async function createZipArchive(
         const uttId = utt.utterance_id as string
         const filePath = utt.file_path_in_package as string
 
-        try {
-          const wavStream = await downloadStreamFromS3(S3_AUDIO_BUCKET, filePath)
-          archive.append(wavStream, { name: `${dirName}/audio/${uttId}.wav` })
-        } catch (err: any) {
-          console.error(`Failed to include WAV for ${uttId}: ${err.message}`)
-        }
+        const wavStream = await downloadStreamFromS3(S3_AUDIO_BUCKET, filePath)
+        archive.append(wavStream, { name: `${dirName}/audio/${uttId}.wav` })
       }
 
       await archive.finalize()

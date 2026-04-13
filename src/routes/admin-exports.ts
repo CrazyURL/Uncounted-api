@@ -200,7 +200,12 @@ adminExports.post('/billable-units', async (c) => {
   try {
     const BATCH = 500
     for (let i = 0; i < units.length; i += BATCH) {
-      const batch = units.slice(i, i + BATCH)
+      const batch = units.slice(i, i + BATCH).map((u: Record<string, unknown>) => {
+        // lock_status / locked_by_job_id 는 전용 엔드포인트로만 변경 가능.
+        // upsert에 포함되면 process 후 잠긴 BU가 덮어씌워지는 버그 발생.
+        const { lock_status: _ls, locked_by_job_id: _lbj, ...rest } = u
+        return rest
+      })
       const { error } = await supabaseAdmin.from('billable_units').upsert(batch)
       if (error) {
         return c.json({ error: error.message }, 500)
@@ -431,9 +436,10 @@ adminExports.post('/export-requests/:id/process', async (c) => {
     }
     const diversityConstraints = (filters.diversityConstraints as Record<string, unknown>) ?? {}
 
+    // 검수 단계에서 제외 발화가 발생해도 목표량을 채울 수 있도록 2배 버퍼로 풀링
     const poolResult = await poolAndRankBUs(
       job.sku_id,
-      job.requested_units,
+      job.requested_units * 2,
       poolFilters,
       {},
       diversityConstraints,
@@ -521,6 +527,17 @@ adminExports.post('/export-requests/:id/process', async (c) => {
     // 9. Update utterance_count + status → reviewing
     const totalUtteranceCount = utteranceSaves.length + clientUtteranceCount
 
+    if (totalUtteranceCount === 0) {
+      await supabaseAdmin.rpc('fail_export_job', {
+        p_job_id: id,
+        p_error: '풀링 조건을 만족하는 발화가 없습니다. BU 풀링 필터를 완화하거나 데이터를 확인해 주세요.',
+      })
+      return c.json(
+        { error: '풀링 조건을 만족하는 발화가 없습니다. BU 풀링 필터를 완화하거나 데이터를 확인해 주세요.' },
+        422,
+      )
+    }
+
     await supabaseAdmin
       .from('export_jobs')
       .update({
@@ -543,11 +560,8 @@ adminExports.post('/export-requests/:id/process', async (c) => {
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    // Mark job as failed
-    await supabaseAdmin
-      .from('export_jobs')
-      .update({ status: 'failed', error_message: message })
-      .eq('id', id)
+    // BU unlock + status='failed' 원자적 처리
+    await supabaseAdmin.rpc('fail_export_job', { p_job_id: id, p_error: message })
     return c.json({ error: message }, 500)
   }
 })
@@ -790,14 +804,24 @@ adminExports.post('/export-requests/:id/finalize', async (c) => {
       },
     })
   } catch (err: any) {
-    // 실패 시 status → failed
     console.error(`Finalize failed for ${id}:`, err.message)
-    await supabaseAdmin
-      .from('export_jobs')
-      .update({ status: 'failed' })
-      .eq('id', id)
 
-    return c.json({ error: err.message }, 500)
+    const isNoUtterancesError =
+      typeof err.message === 'string' && err.message.includes('No utterances found')
+
+    if (isNoUtterancesError) {
+      // 발화 없음: BU는 유지한 채 reviewing으로 복원 → 재시도 가능
+      await supabaseAdmin.from('export_jobs').update({ status: 'reviewing' }).eq('id', id)
+    } else {
+      // 그 외 에러: BU unlock + status='failed' 원자적 처리
+      await supabaseAdmin.rpc('fail_export_job', { p_job_id: id, p_error: err.message })
+    }
+
+    const userMessage = isNoUtterancesError
+      ? '패키징할 발화가 없습니다. 검수 단계로 돌아가 최소 1개 이상의 발화를 포함시켜 주세요.'
+      : err.message
+
+    return c.json({ error: userMessage }, isNoUtterancesError ? 400 : 500)
   }
 })
 

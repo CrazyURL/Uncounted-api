@@ -4,8 +4,10 @@ paths: supabase/**
 
 # DB 마이그레이션 규칙
 
-`supabase/migrations/` 디렉토리에 001~033번까지의 SQL 마이그레이션 파일.
-새 마이그레이션 추가 시 번호를 순차적으로 증가 (예: `034_xxx.sql`).
+`supabase/migrations/` 디렉토리에 001~034번까지의 SQL 마이그레이션 파일.
+새 마이그레이션 추가 시 번호를 순차적으로 증가 (예: `035_xxx.sql`).
+
+034번: `fail_export_job(p_job_id UUID, p_error TEXT)` RPC — BU 잠금 해제 + export_jobs 상태를 'failed'로 원자적 처리 (SECURITY DEFINER).
 
 주요 테이블:
 - `sessions`, `session_chunks`, `transcripts`, `transcript_chunks` — 세션/전사
