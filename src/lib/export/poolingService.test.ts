@@ -91,7 +91,7 @@ describe('poolingService', () => {
       const result = await poolAndRankBUs('A01', 10)
 
       expect(result.canFulfill).toBe(false)
-      expect(result.shortfall).toBe(9)
+      expect(result.shortfall).toBe(540)
       expect(result.available).toBe(1)
     })
 

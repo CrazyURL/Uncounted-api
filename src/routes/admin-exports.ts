@@ -322,18 +322,19 @@ adminExports.get('/export-requests/:id/preview', async (c) => {
       requireLabels: SKU_REQUIRES_LABELS[job.sku_id] ?? false,
     })
 
-    const requestedBUs = job.requested_units as number
-    const canFulfill = preview.totalEligible >= requestedBUs
-    const shortfall = canFulfill ? undefined : requestedBUs - preview.totalEligible
-    // Rough estimate: ~0.96MB per BU minute of 16kHz mono WAV
-    const estimatedPackageSizeMb = Math.round(Math.min(preview.totalEligible, requestedBUs) * 0.96)
+    const requestedMinutes = job.requested_units as number
+    const availableMinutes = preview.totalHours * 60
+    const canFulfill = availableMinutes >= requestedMinutes
+    const shortfallMinutes = canFulfill ? undefined : requestedMinutes - availableMinutes
+    // Rough estimate: ~0.96MB per minute of 16kHz mono WAV
+    const estimatedPackageSizeMb = Math.round(Math.min(availableMinutes, requestedMinutes) * 0.96)
 
     return c.json({
       data: {
         canFulfill,
-        availableBUs: preview.totalEligible,
-        requestedBUs,
-        shortfall,
+        availableMinutes,
+        requestedMinutes,
+        shortfallMinutes,
         qualityDistribution: preview.qualityDistribution,
         speakerCount: preview.speakerCount,
         labelCoverage: preview.labelCoverage,
@@ -543,7 +544,7 @@ adminExports.post('/export-requests/:id/process', async (c) => {
         status: 'reviewing',
         selectedBUs: poolResult.selectedBUs.length,
         canFulfill: poolResult.canFulfill,
-        shortfall: poolResult.shortfall,
+        shortfallSeconds: poolResult.shortfall,
         utteranceCount: totalUtteranceCount,
         clientUtteranceCount,
         legacyUtteranceCount: utteranceSaves.length,

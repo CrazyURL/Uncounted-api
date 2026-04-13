@@ -25,6 +25,7 @@ paths: src/routes/**
 | | `/api/sessions/:id/visibility` | PUT | 필수 | 공개 여부 수정 |
 | | `/api/sessions/:id/diarization` | PATCH | 필수 | 화자분리 상태 수정 |
 | | `/api/sessions/:id/dup` | PATCH | 필수 | 중복 상태 수정 |
+| | `/api/sessions/:id/utterances/complete` | POST | 필수 | 발화 업로드 완료 신고 (utterance_count, utterance_upload_status 업데이트) |
 | **Session Chunks** | `/api/session-chunks/:sessionId/:chunkIndex/labels` | PUT | 필수 | 청크 라벨 업데이트 |
 | **Storage** | `/api/storage/audio` | POST | 필수 | WAV 업로드 (base64) |
 | | `/api/storage/audio/chunk` | POST | 필수 | WAV 청크 업로드 (multipart) |

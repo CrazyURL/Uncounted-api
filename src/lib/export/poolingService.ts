@@ -246,6 +246,96 @@ const DEMOGRAPHIC_FIELD_MAP: Record<string, keyof PooledBU> = {
 }
 
 /**
+ * Apply diversity constraints stopping by total duration (seconds).
+ * Equivalent to applyDiversityConstraints but uses effectiveSeconds accumulation.
+ */
+export function applyDiversityConstraintsByDuration(
+  ranked: PooledBU[],
+  targetSeconds: number,
+  constraints: DiversityConstraints,
+): { selected: PooledBU[]; demographicActual?: Record<string, Record<string, number>> } {
+  const c = { ...DEFAULT_DIVERSITY, ...constraints }
+  const targets = c.demographicTargets
+
+  const slotSeconds: Record<string, Record<string, number>> = {}
+  const filledSeconds: Record<string, Record<string, number>> = {}
+  const filled: Record<string, Record<string, number>> = {}
+
+  if (targets) {
+    for (const [category, ratios] of Object.entries(targets)) {
+      slotSeconds[category] = {}
+      filledSeconds[category] = {}
+      filled[category] = {}
+      for (const [value, ratio] of Object.entries(ratios)) {
+        slotSeconds[category][value] = targetSeconds * ratio
+        filledSeconds[category][value] = 0
+        filled[category][value] = 0
+      }
+    }
+  }
+
+  const selected: PooledBU[] = []
+  const speakerSeconds = new Map<string, number>()
+  const maxSecondsPerSpeaker = targetSeconds * c.maxSpeakerRatio
+  let totalSeconds = 0
+
+  for (const bu of ranked) {
+    if (totalSeconds >= targetSeconds) break
+
+    const speaker = bu.userId ?? '__unknown__'
+    const currentSecs = speakerSeconds.get(speaker) ?? 0
+    if (currentSecs >= maxSecondsPerSpeaker) continue
+
+    if (targets) {
+      let canSelect = true
+      for (const category of Object.keys(targets)) {
+        const field = DEMOGRAPHIC_FIELD_MAP[category]
+        const value = field ? (bu[field] as string | undefined) : undefined
+        const bucket = value ?? '응답안함'
+        if (slotSeconds[category][bucket] !== undefined && filledSeconds[category][bucket] + bu.effectiveSeconds > slotSeconds[category][bucket]) {
+          canSelect = false
+          break
+        }
+      }
+      if (!canSelect) continue
+    }
+
+    selected.push(bu)
+    speakerSeconds.set(speaker, currentSecs + bu.effectiveSeconds)
+    totalSeconds += bu.effectiveSeconds
+
+    if (targets) {
+      for (const category of Object.keys(targets)) {
+        const field = DEMOGRAPHIC_FIELD_MAP[category]
+        const value = field ? (bu[field] as string | undefined) : undefined
+        const bucket = value ?? '응답안함'
+        if (filledSeconds[category][bucket] !== undefined) {
+          filledSeconds[category][bucket] += bu.effectiveSeconds
+        }
+        if (filled[category][bucket] !== undefined) {
+          filled[category][bucket]++
+        } else {
+          filled[category][bucket] = 1
+        }
+      }
+    }
+  }
+
+  let demographicActual: Record<string, Record<string, number>> | undefined
+  if (targets && selected.length > 0) {
+    demographicActual = {}
+    for (const [category, counts] of Object.entries(filled)) {
+      demographicActual[category] = {}
+      for (const [value, count_] of Object.entries(counts)) {
+        demographicActual[category][value] = Math.round((count_ / selected.length) * 10000) / 10000
+      }
+    }
+  }
+
+  return { selected, demographicActual }
+}
+
+/**
  * Apply diversity constraints: max speaker ratio + min speakers + demographic targets.
  */
 export function applyDiversityConstraints(
@@ -335,14 +425,17 @@ export function applyDiversityConstraints(
 
 /**
  * Pool and rank BUs for a given SKU with filters and diversity constraints.
+ * requestedMinutes: 요청 분량(분 단위). 해당 시간만큼 BU를 duration 기준으로 선택.
  */
 export async function poolAndRankBUs(
   _skuId: string,
-  requestedBUs: number,
+  requestedMinutes: number,
   filters: PoolingFilters = {},
   qualityGate: QualityGate = {},
   diversityConstraints: DiversityConstraints = {},
 ): Promise<PoolResult> {
+  const targetSeconds = requestedMinutes * 60
+
   // 1. Fetch all eligible BUs
   const allEligible = await fetchEligibleBUs(filters)
 
@@ -356,8 +449,8 @@ export async function poolAndRankBUs(
     return scoreB - scoreA
   })
 
-  // 4. Apply diversity constraints and select top N
-  const { selected, demographicActual } = applyDiversityConstraints(ranked, requestedBUs, diversityConstraints)
+  // 4. Apply diversity constraints and select by duration
+  const { selected, demographicActual } = applyDiversityConstraintsByDuration(ranked, targetSeconds, diversityConstraints)
 
   // 5. Build result
   const speakerSet = new Set(selected.map((bu) => bu.userId ?? '__unknown__'))
@@ -366,19 +459,21 @@ export async function poolAndRankBUs(
     qualityDistribution[bu.qualityGrade] = (qualityDistribution[bu.qualityGrade] ?? 0) + 1
   }
 
-  const canFulfill = selected.length >= requestedBUs
-  const shortfall = canFulfill ? 0 : requestedBUs - selected.length
+  const selectedSeconds = selected.reduce((s, bu) => s + bu.effectiveSeconds, 0)
+  const canFulfill = selectedSeconds >= targetSeconds
+  const shortfallSeconds = canFulfill ? 0 : targetSeconds - selectedSeconds
+  const shortfallMinutes = Math.round(shortfallSeconds / 60 * 10) / 10
 
   const summary = canFulfill
-    ? `Selected ${selected.length} BUs from ${speakerSet.size} speakers`
-    : `Short by ${shortfall} BUs (${selected.length}/${requestedBUs} available, ${speakerSet.size} speakers)`
+    ? `Selected ${selected.length} BUs (${Math.round(selectedSeconds / 60 * 10) / 10}min) from ${speakerSet.size} speakers`
+    : `Short by ${shortfallMinutes}min (${Math.round(selectedSeconds / 60 * 10) / 10}/${requestedMinutes}min, ${speakerSet.size} speakers)`
 
   return {
     selectedBUs: selected,
     canFulfill,
-    requested: requestedBUs,
+    requested: requestedMinutes,
     available: selected.length,
-    shortfall,
+    shortfall: shortfallSeconds,
     speakerCount: speakerSet.size,
     qualityDistribution,
     summary,
