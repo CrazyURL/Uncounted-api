@@ -137,7 +137,7 @@ export async function updateUtteranceStatus(
   const { error } = await supabaseAdmin
     .from('export_package_items')
     .update(updateFields)
-    .eq('id', utteranceItemId)
+    .eq('utterance_id', utteranceItemId)
 
   if (error) {
     throw new Error(`updateUtteranceStatus failed: ${error.message}`)

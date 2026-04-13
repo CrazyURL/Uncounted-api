@@ -164,12 +164,25 @@ export async function buildPackage(
       .order('id', { ascending: true })
 
     if (!uttError && uttRows && uttRows.length > 0) {
-      utterances = (uttRows as Record<string, unknown>[]).map((row) => ({
-        ...row,
-        utterance_id: row.id,
-        file_path_in_package: row.storage_path,
-        pseudo_id: null,
-      }))
+      // 2b-1. 검수 단계에서 제외된 발화 ID 목록 조회 (export_package_items.content_hash 기준)
+      const { data: excludedItems } = await supabaseAdmin
+        .from('export_package_items')
+        .select('utterance_id')
+        .eq('export_request_id', exportJobId)
+        .like('content_hash', 'excluded:%')
+
+      const excludedUtteranceIds = new Set(
+        (excludedItems ?? []).map((item) => item.utterance_id as string).filter(Boolean),
+      )
+
+      utterances = (uttRows as Record<string, unknown>[])
+        .filter((row) => !excludedUtteranceIds.has(row.id as string))
+        .map((row) => ({
+          ...row,
+          utterance_id: row.id,
+          file_path_in_package: row.storage_path,
+          pseudo_id: null,
+        }))
     }
   }
 

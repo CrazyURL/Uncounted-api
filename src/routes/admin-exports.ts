@@ -431,9 +431,6 @@ adminExports.post('/export-requests/:id/process', async (c) => {
     }
     const diversityConstraints = (filters.diversityConstraints as Record<string, unknown>) ?? {}
 
-    console.log('[process] poolFilters:', JSON.stringify(poolFilters))
-    console.log('[process] diversityConstraints:', JSON.stringify(diversityConstraints))
-
     const poolResult = await poolAndRankBUs(
       job.sku_id,
       job.requested_units,
@@ -441,13 +438,6 @@ adminExports.post('/export-requests/:id/process', async (c) => {
       {},
       diversityConstraints,
     )
-    console.log('[process] poolResult:', {
-      selectedBUs: poolResult.selectedBUs.length,
-      canFulfill: poolResult.canFulfill,
-      available: poolResult.available,
-      shortfall: poolResult.shortfall,
-      summary: poolResult.summary,
-    })
 
     // 4. Lock selected BUs
     if (poolResult.selectedBUs.length > 0) {
@@ -729,6 +719,16 @@ adminExports.put('/export-requests/:id/utterances/review', async (c) => {
     let updated = 0
     for (const { utteranceId, isIncluded, excludeReason } of updates) {
       try {
+        // v3 path: utterances.review_status 업데이트 (packageBuilder v3가 이 컬럼으로 필터링)
+        await supabaseAdmin
+          .from('utterances')
+          .update({
+            review_status: isIncluded ? 'pending' : 'excluded',
+            ...(isIncluded ? { exclude_reason: null } : { exclude_reason: excludeReason ?? 'manual' }),
+          })
+          .eq('id', utteranceId)
+
+        // legacy path: export_package_items.content_hash 업데이트
         await updateUtteranceStatus(utteranceId, isIncluded, excludeReason)
         updated++
       } catch {
