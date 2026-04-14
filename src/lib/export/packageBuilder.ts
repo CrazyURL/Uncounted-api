@@ -6,9 +6,19 @@
 import archiver from 'archiver'
 import { Readable, PassThrough } from 'stream'
 import { GetObjectCommand } from '@aws-sdk/client-s3'
+import { Upload } from '@aws-sdk/lib-storage'
 import { supabaseAdmin } from '../supabase.js'
-import { s3Client, S3_AUDIO_BUCKET, uploadObject } from '../s3.js'
+import { s3Client, S3_AUDIO_BUCKET } from '../s3.js'
 import { getMetadataForExport } from './metadataRepository.js'
+
+// ZIP 빌드 동안 S3 다운로드를 batch로 병렬 처리할 동시 다운로드 수.
+// 각 batch는 fully Buffer로 다운로드 후 S3 연결을 즉시 닫는다.
+// 메모리 = N × max(WAV size). 4 × 5MB ≈ 20MB peak.
+const AUDIO_DOWNLOAD_CONCURRENCY = 4
+
+// S3 multipart upload 동시 part 수 / part 크기.
+const UPLOAD_QUEUE_SIZE = 4
+const UPLOAD_PART_SIZE = 8 * 1024 * 1024 // 8MB
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -122,8 +132,22 @@ export async function buildPackage(
   exportJobId: string,
 ): Promise<BuildPackageResult> {
   let stage = '초기화'
+  const setStage = async (s: string): Promise<void> => {
+    stage = s
+    // 폴링 클라이언트가 진행 단계를 볼 수 있도록 DB에 저장.
+    // 실패해도 패키징 자체를 중단시키지는 않는다.
+    try {
+      await supabaseAdmin
+        .from('export_jobs')
+        .update({ packaging_stage: s })
+        .eq('id', exportJobId)
+    } catch (e) {
+      console.warn(`[buildPackage ${exportJobId}] stage persist failed:`, e)
+    }
+  }
+
   try {
-    return await _buildPackageInner(exportJobId, (s) => { stage = s })
+    return await _buildPackageInner(exportJobId, setStage)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     // 이미 stage prefix가 붙어있으면 중복 방지
@@ -134,10 +158,10 @@ export async function buildPackage(
 
 async function _buildPackageInner(
   exportJobId: string,
-  setStage: (s: string) => void,
+  setStage: (s: string) => Promise<void>,
 ): Promise<BuildPackageResult> {
   // 1. Load export job + client info
-  setStage('작업 조회')
+  await setStage('작업 조회')
   const { data: job, error: jobError } = await supabaseAdmin
     .from('export_jobs')
     .select('*')
@@ -148,7 +172,7 @@ async function _buildPackageInner(
     throw new Error(`Export job not found: ${exportJobId}`)
   }
 
-  setStage('클라이언트 조회')
+  await setStage('클라이언트 조회')
   let clientName = 'Unknown Client'
   if (job.client_id) {
     const { data: client } = await supabaseAdmin
@@ -163,7 +187,7 @@ async function _buildPackageInner(
   let utterances: Record<string, unknown>[] = []
 
   // 2a. BU 잠금된 세션 목록 추출
-  setStage('BU 잠금 세션 조회')
+  await setStage('BU 잠금 세션 조회')
   const { data: lockedBUs, error: lockedBUsError } = await supabaseAdmin
     .from('billable_units')
     .select('session_id')
@@ -175,7 +199,7 @@ async function _buildPackageInner(
 
   if (lockedSessionIds.length > 0) {
     // 2b. utterances 테이블에서 approved 발화 조회 (v3)
-    setStage('발화 목록 조회 (v3)')
+    await setStage('발화 목록 조회 (v3)')
     const { data: uttRows, error: uttError } = await supabaseAdmin
       .from('utterances')
       .select('*')
@@ -188,7 +212,7 @@ async function _buildPackageInner(
 
     if (uttRows && uttRows.length > 0) {
       // 2b-1. 검수 단계에서 제외된 발화 ID 목록 조회 (export_package_items.content_hash 기준)
-      setStage('제외 발화 목록 조회')
+      await setStage('제외 발화 목록 조회')
       const { data: excludedItems } = await supabaseAdmin
         .from('export_package_items')
         .select('utterance_id')
@@ -212,7 +236,7 @@ async function _buildPackageInner(
 
   // 2c. utterances가 없으면 레거시 export_package_items 폴백
   if (utterances.length === 0) {
-    setStage('레거시 발화 목록 조회')
+    await setStage('레거시 발화 목록 조회')
     const { data: items, error: itemsError } = await supabaseAdmin
       .from('export_package_items')
       .select('*')
@@ -231,12 +255,12 @@ async function _buildPackageInner(
   }
 
   // 3. Load quality metrics for involved sessions
-  setStage('품질 지표 로드')
+  await setStage('품질 지표 로드')
   const sessionIds = [...new Set(utterances.map((u) => u.session_id as string).filter(Boolean))]
   const metricsMap = await loadQualityMetrics(sessionIds)
 
   // 3b. Load speaker demographics via users_profile (user_id 기준)
-  setStage('화자 인구통계 로드')
+  await setStage('화자 인구통계 로드')
   const userIds = [...new Set(utterances.map((u) => u.user_id as string).filter(Boolean))]
   const { data: profileRows } = await supabaseAdmin
     .from('users_profile')
@@ -253,7 +277,7 @@ async function _buildPackageInner(
   }
 
   // 3c. Load consent_status from locked BUs (session_id 기준)
-  setStage('동의 상태 로드')
+  await setStage('동의 상태 로드')
   const buConsentMap = new Map<string, string>()
   if (lockedBUs && lockedBUs.length > 0) {
     const { data: buConsentRows } = await supabaseAdmin
@@ -266,7 +290,7 @@ async function _buildPackageInner(
   }
 
   // 4. Load transcripts for involved sessions
-  setStage('전사 로드')
+  await setStage('전사 로드')
   const transcriptMap = await loadTranscripts(sessionIds)
 
   // 4b. SKU 라벨 필수 여부 확인 (U-A02, U-A03)
@@ -274,7 +298,7 @@ async function _buildPackageInner(
   const requiresLabels = skuId === 'U-A02' || skuId === 'U-A03'
 
   // 5. Load metadata events for pseudo_ids in this package
-  setStage('메타데이터 이벤트 로드')
+  await setStage('메타데이터 이벤트 로드')
   const pseudoIds = [
     ...new Set(utterances.map((u) => u.pseudo_id as string).filter(Boolean)),
   ]
@@ -420,9 +444,15 @@ async function _buildPackageInner(
     ? buildDialogActSummary(utterances)
     : null
 
-  setStage('ZIP 생성')
-  // 7. Create ZIP archive
-  const zipBuffer = await createZipArchive(
+  // 7. ZIP archive를 생성하면서 동시에 S3로 multipart streaming upload
+  //    - 메모리에 전체 ZIP을 누적하지 않음 (RSS 폭증 방지)
+  //    - 빌드와 업로드가 병렬 진행
+  //    - WAV는 STORE(level 0), 작은 파일은 deflate
+  //    - S3 audio 다운로드는 슬라이딩 윈도우(N=8)로 prefetch
+  const storagePath = `exports/${exportJobId}/package.zip`
+  const { sizeBytes } = await streamZipToS3(
+    exportJobId,
+    storagePath,
     packageDirName,
     manifest,
     qualitySummary,
@@ -433,22 +463,20 @@ async function _buildPackageInner(
     metadataEvents,
     labelsSummary,
     dialogActSummary,
+    setStage,
   )
 
-  setStage('S3 업로드')
-  // 7. Upload to S3
-  const storagePath = `exports/${exportJobId}/package.zip`
-  await uploadObject(S3_AUDIO_BUCKET, storagePath, zipBuffer, 'application/zip')
-
-  setStage('작업 상태 업데이트')
+  await setStage('작업 상태 업데이트')
   // 8. Update export_jobs
   const { error: updateError } = await supabaseAdmin
     .from('export_jobs')
     .update({
       package_storage_path: storagePath,
-      package_size_bytes: zipBuffer.length,
+      package_size_bytes: sizeBytes,
       utterance_count: utterances.length,
       status: 'ready',
+      packaging_stage: null,
+      packaging_started_at: null,
     })
     .eq('id', exportJobId)
 
@@ -458,14 +486,27 @@ async function _buildPackageInner(
 
   return {
     storagePath,
-    sizeBytes: zipBuffer.length,
+    sizeBytes,
     utteranceCount: utterances.length,
   }
 }
 
-// ── ZIP Archive Creation ───────────────────────────────────────────────
+// ── ZIP Archive Creation + Streaming Upload ────────────────────────────
 
-async function createZipArchive(
+/**
+ * archiver로 ZIP을 만들면서 동시에 S3로 multipart upload.
+ *
+ * 핵심 최적화:
+ * - WAV PCM은 STORE(level 0) — 압축 효과 0~5%인 데이터에 CPU 낭비 안 함
+ * - 작은 JSON 파일은 deflate level 6 유지
+ * - audio S3 다운로드는 슬라이딩 윈도우(8)로 병렬 prefetch, append는 순차
+ * - 전체 ZIP을 메모리에 누적하지 않음 → RSS 폭증 + PM2 max_memory_restart 회피
+ * - upload는 multipart (8MB part × 4 동시) → 큰 패키지에서도 빠른 업로드
+ * - sizeBytes는 PassThrough에 흘러간 바이트 수로 카운팅
+ */
+async function streamZipToS3(
+  _exportJobId: string,
+  storagePath: string,
   dirName: string,
   manifest: PackageManifest,
   qualitySummary: QualitySummary,
@@ -476,94 +517,164 @@ async function createZipArchive(
   metadataEvents: Array<{ payload: Record<string, unknown> }>,
   labelsSummary: LabelsSummary | null,
   dialogActSummary: DialogActSummary | null,
-): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const archive = archiver('zip', { zlib: { level: 6 } })
-    const chunks: Buffer[] = []
-    const passthrough = new PassThrough()
+  setStage: (s: string) => Promise<void>,
+): Promise<{ sizeBytes: number }> {
+  // 작은 JSON 파일 압축용. WAV는 entry-level store: true로 우회.
+  const archive = archiver('zip', { zlib: { level: 6 } })
+  const passthrough = new PassThrough()
 
-    passthrough.on('data', (chunk: Buffer) => chunks.push(chunk))
-    passthrough.on('end', () => resolve(Buffer.concat(chunks)))
-    passthrough.on('error', reject)
+  // CRITICAL: passthrough에 'data' listener를 붙이지 말 것!
+  // listener를 붙이면 readable side가 즉시 flowing 모드가 되어
+  // chunk가 listener로 drain되고 Upload는 빈 stream을 받게 됨 → ZIP 손상.
+  // 사이즈는 archive.pointer()로 finalize 후에 가져온다.
+  archive.pipe(passthrough)
 
-    archive.on('error', reject)
-    archive.pipe(passthrough)
-
-    // manifest.json
-    archive.append(
-      JSON.stringify(manifest, null, 2),
-      { name: `${dirName}/manifest.json` },
-    )
-
-    // quality_summary.json
-    archive.append(
-      JSON.stringify(qualitySummary, null, 2),
-      { name: `${dirName}/quality_summary.json` },
-    )
-
-    // speaker_demographics.json
-    archive.append(
-      JSON.stringify(speakerDemographics, null, 2),
-      { name: `${dirName}/speaker_demographics.json` },
-    )
-
-    // labels_summary.json (U-A02)
-    if (labelsSummary) {
-      archive.append(
-        JSON.stringify(labelsSummary, null, 2),
-        { name: `${dirName}/labels_summary.json` },
-      )
-    }
-
-    // dialog_act_summary.json (U-A03)
-    if (dialogActSummary) {
-      archive.append(
-        JSON.stringify(dialogActSummary, null, 2),
-        { name: `${dirName}/dialog_act_summary.json` },
-      )
-    }
-
-    // metadata/utterances.jsonl
-    const jsonlContent = metaLines.map((line) => JSON.stringify(line)).join('\n')
-    archive.append(jsonlContent, { name: `${dirName}/metadata/utterances.jsonl` })
-
-    // metadata/events.jsonl (수집기 메타데이터: U-M05~U-M18, U-P01)
-    if (metadataEvents.length > 0) {
-      const eventsJsonl = metadataEvents
-        .map((e) => JSON.stringify(e.payload))
-        .join('\n')
-      archive.append(eventsJsonl, { name: `${dirName}/metadata/events.jsonl` })
-    }
-
-    // transcripts/*.json
-    for (const utt of utterances) {
-      const uttId = utt.utterance_id as string
-      const sessionId = utt.session_id as string
-      const transcript = transcriptMap.get(sessionId)
-
-      if (transcript) {
-        archive.append(
-          JSON.stringify(transcript, null, 2),
-          { name: `${dirName}/transcripts/${uttId}.json` },
-        )
-      }
-    }
-
-    // audio/*.wav — append as deferred streams to avoid loading all into memory at once
-    const appendAudioFiles = async () => {
-      for (const utt of utterances) {
-        const uttId = utt.utterance_id as string
-        const filePath = utt.file_path_in_package as string
-
-        const wavStream = await downloadStreamFromS3(S3_AUDIO_BUCKET, filePath)
-        archive.append(wavStream, { name: `${dirName}/audio/${uttId}.wav` })
-      }
-
-      await archive.finalize()
-    }
-
-    appendAudioFiles().catch(reject)
+  const upload = new Upload({
+    client: s3Client,
+    params: {
+      Bucket: S3_AUDIO_BUCKET,
+      Key: storagePath,
+      Body: passthrough,
+      ContentType: 'application/zip',
+    },
+    queueSize: UPLOAD_QUEUE_SIZE,
+    partSize: UPLOAD_PART_SIZE,
   })
+
+  // CRITICAL: upload.done()을 미리 호출(await 하지 않음)해서
+  // Upload reader가 즉시 passthrough를 consume하기 시작하도록 한다.
+  // 그렇지 않으면 archive.append → passthrough buffer 가득 → backpressure → deadlock.
+  const uploadPromise = upload.done()
+
+  // archive 에러 발생 시 multipart upload 중단
+  let archiveError: Error | null = null
+  archive.on('error', async (err) => {
+    archiveError = err
+    try {
+      await upload.abort()
+    } catch {
+      // ignore
+    }
+  })
+
+  await setStage('ZIP 생성')
+
+  // 1. 작은 JSON 파일들 (사람이 읽는 용도라 prettify 유지)
+  archive.append(JSON.stringify(manifest, null, 2), {
+    name: `${dirName}/manifest.json`,
+  })
+  archive.append(JSON.stringify(qualitySummary, null, 2), {
+    name: `${dirName}/quality_summary.json`,
+  })
+  archive.append(JSON.stringify(speakerDemographics, null, 2), {
+    name: `${dirName}/speaker_demographics.json`,
+  })
+  if (labelsSummary) {
+    archive.append(JSON.stringify(labelsSummary, null, 2), {
+      name: `${dirName}/labels_summary.json`,
+    })
+  }
+  if (dialogActSummary) {
+    archive.append(JSON.stringify(dialogActSummary, null, 2), {
+      name: `${dirName}/dialog_act_summary.json`,
+    })
+  }
+
+  // 2. JSONL (한 줄에 한 객체, prettify 무의미)
+  const jsonlContent = metaLines.map((line) => JSON.stringify(line)).join('\n')
+  archive.append(jsonlContent, { name: `${dirName}/metadata/utterances.jsonl` })
+
+  if (metadataEvents.length > 0) {
+    const eventsJsonl = metadataEvents.map((e) => JSON.stringify(e.payload)).join('\n')
+    archive.append(eventsJsonl, { name: `${dirName}/metadata/events.jsonl` })
+  }
+
+  // 3. transcripts/*.json — sessionId 단위 stringify 캐싱 + minify
+  //    같은 session의 발화는 동일한 transcript JSON을 공유
+  const transcriptJsonCache = new Map<string, string>()
+  for (const utt of utterances) {
+    const uttId = utt.utterance_id as string
+    const sessionId = utt.session_id as string
+    let json = transcriptJsonCache.get(sessionId)
+    if (json === undefined) {
+      const transcript = transcriptMap.get(sessionId)
+      json = transcript ? JSON.stringify(transcript) : ''
+      transcriptJsonCache.set(sessionId, json)
+    }
+    if (json) {
+      archive.append(json, { name: `${dirName}/transcripts/${uttId}.json` })
+    }
+  }
+
+  // 4. audio/*.wav — 병렬 prefetch + STORE 모드
+  await appendAudioFilesParallel(archive, dirName, utterances, setStage)
+
+  if (archiveError) throw archiveError
+
+  // 5. archive 마무리 — 모든 entry stream을 소진할 때까지 대기
+  await setStage('S3 업로드')
+  await archive.finalize()
+
+  // 6. multipart upload 완료 대기 (이미 시작된 promise를 await)
+  await uploadPromise
+
+  if (archiveError) throw archiveError
+
+  // archive.pointer()는 finalize 이후 archive가 출력한 총 바이트 수
+  // = passthrough → S3로 흘러간 ZIP 전체 크기
+  return { sizeBytes: archive.pointer() }
+}
+
+/**
+ * 발화 audio WAV를 batched 병렬 다운로드로 가져와 archive에 순차 append.
+ *
+ * 각 batch는 N개를 동시에 fully download → Buffer로 메모리 보관 → S3 연결 닫음.
+ * archive에는 Buffer를 append (stream이 아님). 이렇게 해야:
+ *  1. S3 connection이 archive 소비 속도에 묶이지 않음 (다운로드 완료 즉시 close)
+ *  2. archive는 Buffer를 동기적으로 빠르게 처리
+ *  3. 메모리는 N × max(WAV size)로 bounded
+ *
+ * STORE 모드(`store: true`)로 deflate 우회 → WAV PCM에 CPU 낭비 안 함.
+ */
+async function appendAudioFilesParallel(
+  archive: archiver.Archiver,
+  dirName: string,
+  utterances: Record<string, unknown>[],
+  setStage: (s: string) => Promise<void>,
+): Promise<void> {
+  const total = utterances.length
+  if (total === 0) return
+
+  await setStage(`오디오 추가 0/${total}`)
+
+  for (let batchStart = 0; batchStart < total; batchStart += AUDIO_DOWNLOAD_CONCURRENCY) {
+    const slice = utterances.slice(batchStart, batchStart + AUDIO_DOWNLOAD_CONCURRENCY)
+
+    // 1. batch를 병렬로 fully download → Buffer (S3 연결은 다운로드 완료 즉시 close)
+    const buffers = await Promise.all(
+      slice.map(async (utt) => {
+        const filePath = utt.file_path_in_package as string
+        const uttId = utt.utterance_id as string
+        const stream = await downloadStreamFromS3(S3_AUDIO_BUCKET, filePath)
+        const chunks: Buffer[] = []
+        for await (const chunk of stream as AsyncIterable<Buffer>) {
+          chunks.push(chunk)
+        }
+        return { uttId, buffer: Buffer.concat(chunks) }
+      }),
+    )
+
+    // 2. archive에 순서대로 append (Buffer라 동기 처리)
+    for (const { uttId, buffer } of buffers) {
+      archive.append(buffer, {
+        name: `${dirName}/audio/${uttId}.wav`,
+        store: true,
+      })
+    }
+
+    const done = Math.min(batchStart + AUDIO_DOWNLOAD_CONCURRENCY, total)
+    await setStage(`오디오 추가 ${done}/${total}`)
+  }
 }
 
 // ── Data Loading Helpers ───────────────────────────────────────────────
