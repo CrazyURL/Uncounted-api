@@ -178,6 +178,8 @@ export async function buildMetadataPackage(
 
 // ── Event Fetching ────────────────────────────────────────────────────
 
+const FETCH_PAGE_SIZE = 1000
+
 async function fetchEventsBySchema(
   schemaIds: string[],
   filters?: MetadataPackageOptions['filters'],
@@ -185,25 +187,40 @@ async function fetchEventsBySchema(
   const result = new Map<string, MetadataEventRow[]>()
 
   for (const schemaId of schemaIds) {
-    let query = supabaseAdmin
-      .from('metadata_events')
-      .select('*')
-      .eq('schema_id', schemaId)
+    const allEvents: MetadataEventRow[] = []
+    let offset = 0
 
-    if (filters?.pseudoIds && filters.pseudoIds.length > 0) {
-      query = query.in('pseudo_id', filters.pseudoIds)
-    }
-    if (filters?.dateFrom) {
-      query = query.gte('date_bucket', filters.dateFrom)
-    }
-    if (filters?.dateTo) {
-      query = query.lte('date_bucket', filters.dateTo)
+    // Paginate in batches of FETCH_PAGE_SIZE to bypass Supabase/PostgREST max_rows limit
+    while (true) {
+      let query = supabaseAdmin
+        .from('metadata_events')
+        .select('*')
+        .eq('schema_id', schemaId)
+
+      if (filters?.pseudoIds && filters.pseudoIds.length > 0) {
+        query = query.in('pseudo_id', filters.pseudoIds)
+      }
+      if (filters?.dateFrom) {
+        query = query.gte('date_bucket', filters.dateFrom)
+      }
+      if (filters?.dateTo) {
+        query = query.lte('date_bucket', filters.dateTo)
+      }
+
+      const { data, error } = await query
+        .order('received_at', { ascending: true })
+        .range(offset, offset + FETCH_PAGE_SIZE - 1)
+
+      if (error) throw new Error(`fetchEventsBySchema(${schemaId}) failed: ${error.message}`)
+
+      const page = (data ?? []) as MetadataEventRow[]
+      allEvents.push(...page)
+
+      if (page.length < FETCH_PAGE_SIZE) break // last page reached
+      offset += FETCH_PAGE_SIZE
     }
 
-    const { data, error } = await query.order('received_at', { ascending: true })
-    if (error) throw new Error(`fetchEventsBySchema(${schemaId}) failed: ${error.message}`)
-
-    let events = (data ?? []) as MetadataEventRow[]
+    let events = allEvents
 
     // Quality filter: include only specific grade
     if (filters?.quality) {
