@@ -414,13 +414,11 @@ adminExports.post('/export-requests/:id/process', async (c) => {
       return c.json({ error: `Cannot process: current status is '${job.status}', expected 'queued'` }, 400)
     }
 
-    // processing 상태면 이전 시도가 중간에 실패한 것 → 잠긴 BU 먼저 해제
-    if (job.status === 'processing') {
-      await supabaseAdmin
-        .from('billable_units')
-        .update({ lock_status: 'available', locked_by_job_id: null })
-        .eq('locked_by_job_id', id)
-    }
+    // 이전 시도에서 잠긴 BU가 남아 있을 수 있으므로 항상 먼저 해제
+    await supabaseAdmin
+      .from('billable_units')
+      .update({ lock_status: 'available', locked_by_job_id: null })
+      .eq('locked_by_job_id', id)
 
     // 2. Update status → processing
     await supabaseAdmin
