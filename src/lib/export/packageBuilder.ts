@@ -7,7 +7,7 @@ import archiver from 'archiver'
 import { Readable, PassThrough } from 'stream'
 import { GetObjectCommand } from '@aws-sdk/client-s3'
 import { Upload } from '@aws-sdk/lib-storage'
-import { supabaseAdmin } from '../supabase.js'
+import { supabaseAdmin, fetchAllPaginated } from '../supabase.js'
 import { s3Client, S3_AUDIO_BUCKET } from '../s3.js'
 import { getMetadataForExport } from './metadataRepository.js'
 
@@ -198,32 +198,38 @@ async function _buildPackageInner(
   const lockedSessionIds = [...new Set((lockedBUs ?? []).map((bu) => bu.session_id as string).filter(Boolean))]
 
   if (lockedSessionIds.length > 0) {
-    // 2b. utterances 테이블에서 approved 발화 조회 (v3)
+    // 2b. utterances 테이블에서 approved 발화 조회 (v3) — 페이지네이션으로 전체 수집
     await setStage('발화 목록 조회 (v3)')
-    const { data: uttRows, error: uttError } = await supabaseAdmin
-      .from('utterances')
-      .select('*')
-      .in('session_id', lockedSessionIds)
-      .eq('upload_status', 'uploaded')
-      .in('review_status', ['pending', 'approved'])
-      .order('id', { ascending: true })
+    const uttRows = await fetchAllPaginated<Record<string, unknown>>(() =>
+      supabaseAdmin
+        .from('utterances')
+        .select('*')
+        .in('session_id', lockedSessionIds)
+        .eq('upload_status', 'uploaded')
+        .in('review_status', ['pending', 'approved'])
+        .order('id', { ascending: true }),
+    )
 
-    if (uttError) throw new Error(uttError.message)
+    if (uttRows.length >= 1000 && uttRows.length % 1000 === 0) {
+      console.warn(`[buildPackage] job=${exportJobId} v3 returned ${uttRows.length} — suspicious round number, verify pagination`)
+    }
 
-    if (uttRows && uttRows.length > 0) {
+    if (uttRows.length > 0) {
       // 2b-1. 검수 단계에서 제외된 발화 ID 목록 조회 (export_package_items.content_hash 기준)
       await setStage('제외 발화 목록 조회')
-      const { data: excludedItems } = await supabaseAdmin
-        .from('export_package_items')
-        .select('utterance_id')
-        .eq('export_request_id', exportJobId)
-        .like('content_hash', 'excluded:%')
-
-      const excludedUtteranceIds = new Set(
-        (excludedItems ?? []).map((item) => item.utterance_id as string).filter(Boolean),
+      const excludedItems = await fetchAllPaginated<{ utterance_id: string }>(() =>
+        supabaseAdmin
+          .from('export_package_items')
+          .select('utterance_id')
+          .eq('export_request_id', exportJobId)
+          .like('content_hash', 'excluded:%'),
       )
 
-      utterances = (uttRows as Record<string, unknown>[])
+      const excludedUtteranceIds = new Set(
+        excludedItems.map((item) => item.utterance_id).filter(Boolean),
+      )
+
+      utterances = uttRows
         .filter((row) => !excludedUtteranceIds.has(row.id as string))
         .map((row) => ({
           ...row,
@@ -234,20 +240,21 @@ async function _buildPackageInner(
     }
   }
 
-  // 2c. utterances가 없으면 레거시 export_package_items 폴백
+  // 2c. utterances가 없으면 레거시 export_package_items 폴백 — 페이지네이션
   if (utterances.length === 0) {
     await setStage('레거시 발화 목록 조회')
-    const { data: items, error: itemsError } = await supabaseAdmin
-      .from('export_package_items')
-      .select('*')
-      .eq('export_request_id', exportJobId)
-      .eq('file_type', 'wav')
-      .is('content_hash', null) // non-excluded
-      .order('utterance_id', { ascending: true })
-
-    if (itemsError) throw new Error(itemsError.message)
-
-    utterances = (items ?? []) as Record<string, unknown>[]
+    utterances = await fetchAllPaginated<Record<string, unknown>>(() =>
+      supabaseAdmin
+        .from('export_package_items')
+        .select('*')
+        .eq('export_request_id', exportJobId)
+        .eq('file_type', 'wav')
+        .is('content_hash', null) // non-excluded
+        .order('utterance_id', { ascending: true }),
+    )
+    if (utterances.length >= 1000 && utterances.length % 1000 === 0) {
+      console.warn(`[buildPackage] job=${exportJobId} legacy returned ${utterances.length} — suspicious round number, verify pagination`)
+    }
   }
 
   if (utterances.length === 0) {
