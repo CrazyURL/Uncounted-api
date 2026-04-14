@@ -761,14 +761,45 @@ adminExports.put('/export-requests/:id/utterances/review', async (c) => {
 
 /**
  * POST /admin/export-requests/:id/finalize
- * reviewing → packaging → buildPackage → ready
- * 에러 시 status → failed
+ * reviewing → packaging → buildPackage(비동기) → ready
+ *
+ * 즉시 202를 반환하고 buildPackage는 백그라운드에서 실행한다.
+ * Cloudflare Tunnel 등 프록시 100s 타임아웃으로 인한 503 회피.
+ * 클라이언트는 status 폴링으로 진행 상황을 확인한다.
+ *
+ * Stuck 복구: status가 'packaging'이지만 STUCK_THRESHOLD_MINUTES 이상
+ * 경과한 경우 자동으로 'reviewing'으로 복원 후 재시작한다.
  */
+const STUCK_THRESHOLD_MINUTES = 30
+
+async function runBuildPackageInBackground(id: string): Promise<void> {
+  try {
+    await buildPackage(id)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`Finalize background task failed for ${id}:`, message)
+
+    const isNoUtterancesError =
+      typeof message === 'string' && message.includes('No utterances found')
+
+    if (isNoUtterancesError) {
+      // 발화 없음: BU는 유지한 채 reviewing으로 복원 → 재시도 가능
+      await supabaseAdmin
+        .from('export_jobs')
+        .update({ status: 'reviewing', packaging_started_at: null, packaging_stage: null })
+        .eq('id', id)
+    } else {
+      // 그 외 에러: BU unlock + status='failed' 원자적 처리
+      await supabaseAdmin.rpc('fail_export_job', { p_job_id: id, p_error: message })
+    }
+  }
+}
+
 adminExports.post('/export-requests/:id/finalize', async (c) => {
   const id = c.req.param('id')
 
   try {
-    // 현재 상태 확인
+    // 1. 현재 상태 확인
     const { data: job, error: fetchError } = await supabaseAdmin
       .from('export_jobs')
       .select('status')
@@ -779,49 +810,68 @@ adminExports.post('/export-requests/:id/finalize', async (c) => {
       return c.json({ error: 'Export job not found' }, 404)
     }
 
-    if (job.status !== 'reviewing') {
-      return c.json({ error: `Cannot finalize: current status is '${job.status}', expected 'reviewing'` }, 400)
+    // 2. status별 진입 가능성 판정
+    if (job.status === 'packaging') {
+      // stuck 복구 시도
+      const { data: resetCount, error: resetError } = await supabaseAdmin.rpc(
+        'reset_stuck_packaging',
+        { p_job_id: id, p_stale_minutes: STUCK_THRESHOLD_MINUTES },
+      )
+
+      if (resetError) {
+        return c.json({ error: `Stuck recovery failed: ${resetError.message}` }, 500)
+      }
+
+      // resetCount가 0이면 아직 정상 진행 중 → 409 Conflict
+      if (!resetCount || (typeof resetCount === 'number' && resetCount === 0)) {
+        return c.json(
+          {
+            error: '이미 패키징이 진행 중입니다. 잠시 후 상태를 확인해 주세요.',
+            data: { status: 'packaging' },
+          },
+          409,
+        )
+      }
+      // resetCount > 0: stuck 복구됨 → reviewing으로 떨어진 상태, 아래로 진행
+    } else if (job.status !== 'reviewing') {
+      return c.json(
+        { error: `Cannot finalize: current status is '${job.status}', expected 'reviewing'` },
+        400,
+      )
     }
 
-    // status → packaging
-    const { error: updateError } = await supabaseAdmin
+    // 3. status → packaging (조건부 update로 동시성 방지)
+    const { data: updated, error: updateError } = await supabaseAdmin
       .from('export_jobs')
-      .update({ status: 'packaging' })
+      .update({ status: 'packaging', packaging_started_at: new Date().toISOString() })
       .eq('id', id)
+      .eq('status', 'reviewing')
+      .select('id')
 
     if (updateError) {
       return c.json({ error: updateError.message }, 500)
     }
 
-    // buildPackage (내부에서 status → ready 전환)
-    const result = await buildPackage(id)
-
-    return c.json({
-      data: {
-        storagePath: result.storagePath,
-        sizeBytes: result.sizeBytes,
-        utteranceCount: result.utteranceCount,
-      },
-    })
-  } catch (err: any) {
-    console.error(`Finalize failed for ${id}:`, err.message)
-
-    const isNoUtterancesError =
-      typeof err.message === 'string' && err.message.includes('No utterances found')
-
-    if (isNoUtterancesError) {
-      // 발화 없음: BU는 유지한 채 reviewing으로 복원 → 재시도 가능
-      await supabaseAdmin.from('export_jobs').update({ status: 'reviewing' }).eq('id', id)
-    } else {
-      // 그 외 에러: BU unlock + status='failed' 원자적 처리
-      await supabaseAdmin.rpc('fail_export_job', { p_job_id: id, p_error: err.message })
+    // 다른 요청이 먼저 status를 바꾼 경우 (race condition)
+    if (!updated || updated.length === 0) {
+      return c.json(
+        {
+          error: '이미 패키징이 진행 중입니다. 잠시 후 상태를 확인해 주세요.',
+          data: { status: 'packaging' },
+        },
+        409,
+      )
     }
 
-    const userMessage = isNoUtterancesError
-      ? '패키징할 발화가 없습니다. 검수 단계로 돌아가 최소 1개 이상의 발화를 포함시켜 주세요.'
-      : err.message
+    // 4. buildPackage를 백그라운드로 실행 (await 하지 않음)
+    void runBuildPackageInBackground(id)
 
-    return c.json({ error: userMessage }, isNoUtterancesError ? 400 : 500)
+    // 5. 즉시 202 Accepted 반환
+    return c.json({ data: { status: 'packaging' } }, 202)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`Finalize handler error for ${id}:`, message)
+    return c.json({ error: message }, 500)
   }
 })
 

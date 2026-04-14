@@ -9,7 +9,24 @@ const port = parseInt(process.env.PORT || '3001', 10)
 
 console.log(`🚀 Uncounted Backend API starting on ${process.env.VITE_API_URL}`)
 
-serve({
-  fetch: app.fetch,
-  port,
-})
+const server = serve(
+  {
+    fetch: app.fetch,
+    port,
+  },
+  () => {
+    // PM2 wait_ready: cluster 무중단 reload 지원
+    if (typeof process.send === 'function') {
+      process.send('ready')
+    }
+  },
+)
+
+const shutdown = (signal: string) => {
+  console.log(`[${signal}] graceful shutdown start`)
+  server.close(() => process.exit(0))
+  setTimeout(() => process.exit(1), 4500).unref()
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'))
+process.on('SIGTERM', () => shutdown('SIGTERM'))
