@@ -410,8 +410,16 @@ adminExports.post('/export-requests/:id/process', async (c) => {
     if (fetchErr || !job) {
       return c.json({ error: 'Export job not found' }, 404)
     }
-    if (job.status !== 'queued') {
+    if (job.status !== 'queued' && job.status !== 'processing') {
       return c.json({ error: `Cannot process: current status is '${job.status}', expected 'queued'` }, 400)
+    }
+
+    // processing 상태면 이전 시도가 중간에 실패한 것 → 잠긴 BU 먼저 해제
+    if (job.status === 'processing') {
+      await supabaseAdmin
+        .from('billable_units')
+        .update({ lock_status: 'available', locked_by_job_id: null })
+        .eq('locked_by_job_id', id)
     }
 
     // 2. Update status → processing
@@ -584,10 +592,19 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
     // v3: BU 잠금된 세션에서 utterances 테이블 직접 조회 시도
     const { data: lockedBUs } = await supabaseAdmin
       .from('billable_units')
-      .select('session_id')
+      .select('session_id, minute_index')
       .eq('locked_by_job_id', id)
 
     const lockedSessionIds = [...new Set((lockedBUs ?? []).map((bu) => bu.session_id as string).filter(Boolean))]
+
+    // 세션별 허용 minute_index 집합 (BU 범위 밖 발화 제외용)
+    const allowedMinutes = new Map<string, Set<number>>()
+    for (const bu of lockedBUs ?? []) {
+      const sid = bu.session_id as string
+      if (!sid) continue
+      if (!allowedMinutes.has(sid)) allowedMinutes.set(sid, new Set())
+      allowedMinutes.get(sid)!.add(bu.minute_index as number)
+    }
 
     let hasClientUtterances = false
     if (lockedSessionIds.length > 0) {
@@ -614,8 +631,16 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
         return c.json({ error: uttError.message }, 500)
       }
 
+      // 선택된 BU minute_index 범위에 속하는 발화만 포함
+      const filteredRows = (uttRows ?? []).filter((u) => {
+        const allowed = allowedMinutes.get(u.session_id as string)
+        if (!allowed) return false
+        const minuteIdx = Math.floor((u.start_sec as number) / 60)
+        return allowed.has(minuteIdx)
+      })
+
       const withUrls = await Promise.all(
-        (uttRows ?? []).map(async (u) => {
+        filteredRows.map(async (u) => {
           let signedUrl: string | null = null
           if (u.storage_path) {
             try {
