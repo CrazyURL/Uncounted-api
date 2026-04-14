@@ -498,6 +498,8 @@ adminExports.post('/export-requests/:id/process', async (c) => {
     const legacySessions: Array<{ sessionId: string; audioStoragePath: string }> = []
     let clientUtteranceCount = 0
 
+    console.log(`[process] selectedBUs=${poolResult.selectedBUs.length}, sessionMap=${sessionMap.size}`)
+
     for (const [sessionId, userId] of sessionMap.entries()) {
       const { count } = await supabaseAdmin
         .from('utterances')
@@ -515,10 +517,14 @@ adminExports.post('/export-requests/:id/process', async (c) => {
       }
     }
 
+    console.log(`[process] clientUtteranceCount=${clientUtteranceCount}, legacySessions=${legacySessions.length}`)
+
     // 레거시 세션만 FFmpeg 분할
     const segResults = legacySessions.length > 0
       ? await segmentBulk(legacySessions)
       : []
+
+    console.log(`[process] segResults=${segResults.length}, errors=${segResults.filter(r => r.error).length}`)
 
     // 7. Save utterances to export_package_items (레거시 세션만)
     const utteranceSaves = segResults.flatMap((sr) => {
