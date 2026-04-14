@@ -414,11 +414,26 @@ adminExports.post('/export-requests/:id/process', async (c) => {
       return c.json({ error: `Cannot process: current status is '${job.status}', expected 'queued'` }, 400)
     }
 
-    // 이전 시도에서 잠긴 BU가 남아 있을 수 있으므로 항상 먼저 해제
+    // 현재 job에서 이전에 잠긴 BU 해제
     await supabaseAdmin
       .from('billable_units')
       .update({ lock_status: 'available', locked_by_job_id: null })
       .eq('locked_by_job_id', id)
+
+    // 다른 failed/processing job의 orphaned lock도 정리 (새 job 풀링에 방해하지 않도록)
+    const { data: stuckJobs } = await supabaseAdmin
+      .from('export_jobs')
+      .select('id')
+      .in('status', ['failed', 'processing'])
+      .neq('id', id)
+
+    if (stuckJobs && stuckJobs.length > 0) {
+      const stuckIds = stuckJobs.map((j: Record<string, unknown>) => j.id as string)
+      await supabaseAdmin
+        .from('billable_units')
+        .update({ lock_status: 'available', locked_by_job_id: null })
+        .in('locked_by_job_id', stuckIds)
+    }
 
     // 2. Update status → processing
     await supabaseAdmin
