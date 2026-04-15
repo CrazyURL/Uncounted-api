@@ -464,4 +464,45 @@ adminUtterances.post('/utterances/:id/restore-original', async (c) => {
   }
 })
 
+/**
+ * POST /admin/utterances/labels
+ * 발화 라벨 배치 저장 (U-A02 / U-A03)
+ * Body: { utteranceIds: string[], labels: Record<string, unknown> }
+ */
+adminUtterances.post('/utterances/labels', async (c) => {
+  const { utteranceIds, labels } = getBody<{
+    utteranceIds: string[]
+    labels: Record<string, unknown>
+  }>(c)
+
+  if (!Array.isArray(utteranceIds) || utteranceIds.length === 0) {
+    return c.json({ error: 'utteranceIds must be a non-empty array' }, 400)
+  }
+  if (!labels || typeof labels !== 'object') {
+    return c.json({ error: 'labels must be an object' }, 400)
+  }
+
+  const { labelSource, ...labelFields } = labels as { labelSource?: string } & Record<string, unknown>
+
+  try {
+    const { error } = await supabaseAdmin
+      .from('utterances')
+      .update({
+        labels: labelFields,
+        label_source: labelSource ?? 'admin',
+        updated_at: new Date().toISOString(),
+      })
+      .in('id', utteranceIds)
+
+    if (error) {
+      return c.json({ error: error.message }, 500)
+    }
+
+    return c.json({ data: { updated: utteranceIds.length } })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Internal error'
+    return c.json({ error: message }, 500)
+  }
+})
+
 export default adminUtterances

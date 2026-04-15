@@ -124,10 +124,15 @@ export async function getSignedUrl(
   bucket: string,
   key: string,
   expiresIn: number,
+  filename?: string,
 ): Promise<string> {
   return awsGetSignedUrl(
     s3Client,
-    new GetObjectCommand({ Bucket: bucket, Key: key }),
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      ...(filename ? { ResponseContentDisposition: `attachment; filename="${filename}"` } : {}),
+    }),
     { expiresIn },
   )
 }

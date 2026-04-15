@@ -16,7 +16,7 @@ export async function getSignedDownloadUrl(
   // Verify job exists and has a package
   const { data: job, error: fetchError } = await supabaseAdmin
     .from('export_jobs')
-    .select('package_storage_path, status')
+    .select('package_storage_path, status, sku_id, created_at')
     .eq('id', exportJobId)
     .single()
 
@@ -28,8 +28,12 @@ export async function getSignedDownloadUrl(
     throw new Error(`Export job ${exportJobId} has no package yet`)
   }
 
+  // Build a human-readable filename: export_{skuId}_{date}.zip
+  const dateStr = new Date(job.created_at).toISOString().slice(0, 10)
+  const filename = `export_${job.sku_id}_${dateStr}.zip`
+
   // Generate signed URL using the actual stored path (24h)
-  const downloadUrl = await getSignedUrl(S3_AUDIO_BUCKET, job.package_storage_path, DOWNLOAD_EXPIRES_SEC)
+  const downloadUrl = await getSignedUrl(S3_AUDIO_BUCKET, job.package_storage_path, DOWNLOAD_EXPIRES_SEC, filename)
   const expiresAt = new Date(Date.now() + DOWNLOAD_EXPIRES_SEC * 1000).toISOString()
 
   // Update export_jobs
