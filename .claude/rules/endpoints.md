@@ -84,6 +84,7 @@ paths: src/routes/**
 | | `/api/admin/export-requests/:id/process` | POST | 어드민 | BU 풀링 + 발화 분할 + 품질 분석 |
 | | `/api/admin/export-requests/:id/utterances` | GET | 어드민 | 발화 목록 조회 |
 | | `/api/admin/export-requests/:id/utterances/review` | PUT | 어드민 | 발화 검수 반영 |
+| | `/api/admin/utterances/labels` | POST | 어드민 | 발화 라벨 배치 저장 |
 | | `/api/admin/export-requests/:id/finalize` | POST | 어드민 | ZIP 패키징 + S3 업로드 |
 | | `/api/admin/export-requests/:id/download` | GET | 어드민 | 서명 URL 발급 |
 | | `/api/admin/inventory` | GET | 어드민 | SKU 재고 현황 |
