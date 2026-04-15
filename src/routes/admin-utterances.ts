@@ -100,7 +100,7 @@ adminUtterances.get('/utterances/:id/pii', async (c) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('utterances')
-      .select('pii_intervals, pii_reviewed_at, pii_reviewed_by')
+      .select('pii_intervals, pii_reviewed_at, pii_reviewed_by, pii_masked, pii_masked_at, pii_masked_by, pii_masked_by_email, pii_mask_version')
       .eq('id', utteranceId)
       .single()
 
@@ -109,9 +109,16 @@ adminUtterances.get('/utterances/:id/pii', async (c) => {
     }
 
     return c.json({
-      piiIntervals: data.pii_intervals ?? [],
-      piiReviewedAt: data.pii_reviewed_at,
-      piiReviewedBy: data.pii_reviewed_by,
+      data: {
+        piiIntervals: data.pii_intervals ?? [],
+        piiReviewedAt: data.pii_reviewed_at,
+        piiReviewedBy: data.pii_reviewed_by,
+        piiMasked: data.pii_masked === true,
+        piiMaskedAt: data.pii_masked_at,
+        piiMaskedBy: data.pii_masked_by,
+        piiMaskedByEmail: data.pii_masked_by_email,
+        piiMaskVersion: data.pii_mask_version ?? 0,
+      },
     })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
@@ -154,6 +161,39 @@ adminUtterances.put('/utterances/:id/pii', async (c) => {
 
     if (error) return c.json({ error: error.message }, 500)
     return c.json({ data: { ok: true } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * PATCH /admin/utterances/:id/review-status
+ * 단건 검수 상태 즉시 저장 (검수 화면에서 토글마다 호출)
+ * Body: { isIncluded: boolean, excludeReason?: string }
+ */
+adminUtterances.patch('/utterances/:id/review-status', async (c) => {
+  const utteranceId = c.req.param('id')
+  const { isIncluded, excludeReason } = getBody<{
+    isIncluded: boolean
+    excludeReason?: string
+  }>(c)
+
+  if (typeof isIncluded !== 'boolean') {
+    return c.json({ error: 'isIncluded must be boolean' }, 400)
+  }
+
+  try {
+    const { error } = await supabaseAdmin
+      .from('utterances')
+      .update({
+        review_status: isIncluded ? 'pending' : 'excluded',
+        exclude_reason: isIncluded ? null : (excludeReason ?? 'manual'),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', utteranceId)
+
+    if (error) return c.json({ error: error.message }, 500)
+    return c.json({ data: { ok: true, isIncluded } })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
@@ -267,12 +307,13 @@ adminUtterances.get('/utterances/:id/preview-mask', async (c) => {
  */
 adminUtterances.post('/utterances/:id/apply-mask', async (c) => {
   const utteranceId = c.req.param('id')
-  const { maskType = 'beep' } = getBody<{ maskType?: 'beep' | 'silence' }>(c)
+  const { maskType = 'beep', jobId } = getBody<{ maskType?: 'beep' | 'silence'; jobId?: string }>(c)
+  const adminUser = (c.get as (key: string) => unknown)('user') as { id: string; email?: string } | undefined
 
   try {
     const { data: utt, error: fetchError } = await supabaseAdmin
       .from('utterances')
-      .select('storage_path, pii_intervals, session_id, user_id')
+      .select('storage_path, pii_intervals, session_id, user_id, pii_mask_version')
       .eq('id', utteranceId)
       .single()
 
@@ -366,14 +407,54 @@ adminUtterances.post('/utterances/:id/apply-mask', async (c) => {
     await uploadObject(S3_AUDIO_BUCKET, backupPath, bytes, 'audio/wav')
     await uploadObject(S3_AUDIO_BUCKET, utt.storage_path, maskedBytes, 'audio/wav')
 
-    // Update file size
-    await supabaseAdmin
+    // Update file size + 마스킹 감사 메타
+    const nextVersion = ((utt.pii_mask_version as number | null) ?? 0) + 1
+    const maskedAt = new Date().toISOString()
+    const { data: updatedRow, error: updateError } = await supabaseAdmin
       .from('utterances')
       .update({
         file_size_bytes: maskedBytes.byteLength,
-        updated_at: new Date().toISOString(),
+        pii_masked: true,
+        pii_masked_at: maskedAt,
+        pii_masked_by: adminUser?.id ?? null,
+        pii_masked_by_email: adminUser?.email ?? null,
+        pii_mask_version: nextVersion,
+        updated_at: maskedAt,
       })
       .eq('id', utteranceId)
+      .select('id, pii_masked, pii_masked_at, pii_masked_by, pii_masked_by_email, pii_mask_version')
+      .single()
+
+    if (updateError) {
+      console.error('[apply-mask] DB update failed:', updateError)
+      return c.json({ error: `DB update failed: ${updateError.message}` }, 500)
+    }
+    if (!updatedRow) {
+      console.error('[apply-mask] DB update returned no row for', utteranceId)
+      return c.json({ error: 'Utterance row not found after update' }, 500)
+    }
+
+    // 작업 로그 타임라인 기록 (jobId가 전달된 경우만)
+    if (jobId) {
+      try {
+        const { data: job } = await supabaseAdmin
+          .from('export_jobs')
+          .select('logs')
+          .eq('id', jobId)
+          .single()
+        if (job) {
+          const logEntry = {
+            timestamp: maskedAt,
+            level: 'info',
+            message: `PII 마스킹 적용 — utt_${utteranceId.slice(0, 8)} (구간 ${intervals.length}건, v${nextVersion}) by ${adminUser?.email ?? adminUser?.id ?? 'unknown'}`,
+          }
+          const logs = Array.isArray(job.logs) ? [...job.logs, logEntry] : [logEntry]
+          await supabaseAdmin.from('export_jobs').update({ logs }).eq('id', jobId)
+        }
+      } catch (logErr) {
+        console.error('[apply-mask] job log append failed:', logErr)
+      }
+    }
 
     // Cleanup temp files
     try {
@@ -383,7 +464,17 @@ adminUtterances.post('/utterances/:id/apply-mask', async (c) => {
       // ignore cleanup errors
     }
 
-    return c.json({ data: { ok: true, intervalsProcessed: intervals.length } })
+    return c.json({
+      data: {
+        ok: true,
+        intervalsProcessed: intervals.length,
+        piiMasked: true,
+        piiMaskedAt: maskedAt,
+        piiMaskedBy: adminUser?.id ?? null,
+        piiMaskedByEmail: adminUser?.email ?? null,
+        piiMaskVersion: nextVersion,
+      },
+    })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
@@ -454,6 +545,11 @@ adminUtterances.post('/utterances/:id/restore-original', async (c) => {
       .from('utterances')
       .update({
         file_size_bytes: bytes.byteLength,
+        pii_masked: false,
+        pii_masked_at: null,
+        pii_masked_by: null,
+        pii_masked_by_email: null,
+        pii_mask_version: 0,
         updated_at: new Date().toISOString(),
       })
       .eq('id', utteranceId)
