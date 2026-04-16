@@ -752,11 +752,11 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
  * 발화 검수 결과를 백그라운드에서 일괄 반영한다.
  *
  * 개별 토글은 PATCH /utterances/:id/review-status 로 즉시 저장되므로,
- * 이 PUT은 finalize 직전 안전망 역할이다. 데이터 정합성이 이미 보장된
- * 상태에서 실행되므로 fire-and-forget으로 처리해도 안전하다.
+ * 이 PUT은 finalize 직전 안전망 역할이다.
  *
- * N×2 순차 DB 쿼리 → 그룹별 IN 절 일괄 업데이트로 교체하여
- * Cloudflare 524 타임아웃(100s) 회피.
+ * v2: N×2 순차 DB 쿼리 → 그룹별 IN 절 일괄 업데이트로 교체.
+ * v3: review_sync_status 컬럼으로 진행 상태 추적.
+ *     클라이언트는 폴링으로 완료를 확인한 뒤 finalize 호출.
  */
 async function runReviewInBackground(
   jobId: string,
@@ -817,9 +817,28 @@ async function runReviewInBackground(
         console.warn(`[review bg] job=${jobId} excluded(${reason}) legacy batch error: ${error.message}`)
       }
     }
+
+    // 완료: review_sync_status → done
+    const { error: doneErr } = await supabaseAdmin
+      .from('export_jobs')
+      .update({ review_sync_status: 'done' })
+      .eq('id', jobId)
+    if (doneErr) {
+      console.warn(`[review bg] job=${jobId} failed to set done status: ${doneErr.message}`)
+    }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     console.error(`[review bg] job=${jobId} unexpected error: ${message}`)
+    // 실패: review_sync_status → failed + 에러 메시지 기록
+    try {
+      await supabaseAdmin
+        .from('export_jobs')
+        .update({ review_sync_status: 'failed', review_sync_error: message })
+        .eq('id', jobId)
+    } catch (statusErr: unknown) {
+      const statusMsg = statusErr instanceof Error ? statusErr.message : String(statusErr)
+      console.warn(`[review bg] job=${jobId} failed to set error status: ${statusMsg}`)
+    }
   }
 }
 
@@ -849,10 +868,21 @@ adminExports.put('/export-requests/:id/utterances/review', async (c) => {
       return c.json({ error: 'Export job not found' }, 404)
     }
 
-    // 백그라운드에서 일괄 업데이트 실행 (await 하지 않음)
+    // review_sync_status → syncing (폴링 추적 시작)
+    await supabaseAdmin
+      .from('export_jobs')
+      .update({
+        review_sync_status: 'syncing',
+        review_sync_started_at: new Date().toISOString(),
+        review_sync_error: null,
+      })
+      .eq('id', id)
+
+    // 백그라운드에서 일괄 업데이트 실행 (완료 시 review_sync_status → done)
     void runReviewInBackground(id, updates)
 
     // 즉시 202 Accepted 반환 — Cloudflare 524 회피
+    // 클라이언트는 review_sync_status 폴링으로 완료 확인 후 finalize 호출
     return c.json({ data: { queued: true, updated: 0, failed: 0, total: updates.length } }, 202)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
