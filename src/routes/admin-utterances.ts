@@ -83,7 +83,8 @@ adminUtterances.get('/utterances/:id/audio/stream', async (c) => {
 
     c.header('Content-Type', 'audio/wav')
     c.header('Content-Length', String(bytes.byteLength))
-    c.header('Cache-Control', 'private, max-age=3600')
+    // no-store: 마스킹 적용 후 동일 URL에 대한 캐시 히트로 원본이 보이는 버그 방지
+    c.header('Cache-Control', 'no-store')
     return c.body(bytes.buffer as ArrayBuffer)
   } catch (err: any) {
     return c.json({ error: err.message }, 500)

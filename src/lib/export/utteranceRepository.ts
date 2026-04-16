@@ -1,7 +1,7 @@
 // ── Utterance metadata CRUD (export_package_items) ─────────────────────
 // utterance 메타데이터를 export_package_items 테이블에 저장/조회/갱신
 
-import { supabaseAdmin } from '../supabase.js'
+import { supabaseAdmin, fetchAllPaginated } from '../supabase.js'
 
 export interface UtteranceItem {
   id: string
@@ -99,22 +99,20 @@ export async function saveUtterances(
 }
 
 /**
- * Get all utterances for an export request, ordered by utterance_id
+ * Get all utterances for an export request, ordered by utterance_id.
+ * 페이지네이션으로 1000행 초과에도 전체 수집.
  */
 export async function getUtterancesByExportRequest(
   exportRequestId: string,
 ): Promise<UtteranceItem[]> {
-  const { data, error } = await supabaseAdmin
-    .from('export_package_items')
-    .select('*')
-    .eq('export_request_id', exportRequestId)
-    .eq('file_type', 'wav')
-    .order('utterance_id', { ascending: true })
-
-  if (error) {
-    throw new Error(`getUtterancesByExportRequest failed: ${error.message}`)
-  }
-  return (data ?? []) as UtteranceItem[]
+  return fetchAllPaginated<UtteranceItem>(() =>
+    supabaseAdmin
+      .from('export_package_items')
+      .select('*')
+      .eq('export_request_id', exportRequestId)
+      .eq('file_type', 'wav')
+      .order('utterance_id', { ascending: true }),
+  )
 }
 
 /**

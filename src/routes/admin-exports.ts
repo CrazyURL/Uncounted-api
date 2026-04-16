@@ -3,7 +3,7 @@
 // admin.ts에서 분리된 익스포트 관련 라우트
 
 import { Hono } from 'hono'
-import { supabaseAdmin } from '../lib/supabase.js'
+import { supabaseAdmin, fetchAllPaginated } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
 import { encryptId } from '../lib/crypto.js'
 import { getSkuInventory } from '../lib/export/inventoryService.js'
@@ -12,7 +12,6 @@ import { segmentBulk } from '../lib/export/utteranceSegmentationService.js'
 import { analyzeBulk } from '../lib/export/qualityMetricsService.js'
 import {
   getUtterancesByExportRequest,
-  updateUtteranceStatus,
   saveUtterances,
 } from '../lib/export/utteranceRepository.js'
 import { getSignedUrl, S3_AUDIO_BUCKET } from '../lib/s3.js'
@@ -38,23 +37,23 @@ function billableUnitFromRow(row: Record<string, unknown>) {
   const rawUserId = (row.user_id ?? row.userId) as string
 
   return {
-    id:               encryptId(rawId),
-    sessionId:        rawUserId ? encryptId(rawSessionId) : null,
-    minuteIndex:      (row.minute_index ?? row.minuteIndex) as number,
+    id: encryptId(rawId),
+    sessionId: rawUserId ? encryptId(rawSessionId) : null,
+    minuteIndex: (row.minute_index ?? row.minuteIndex) as number,
     effectiveSeconds: Number(row.effective_seconds ?? row.effectiveSeconds ?? 0),
-    qualityGrade:     ((row.quality_grade ?? row.qualityGrade) as 'A' | 'B' | 'C') ?? 'C',
-    qaScore:          Number(row.qa_score ?? row.qaScore ?? 0),
-    qualityTier:      ((row.quality_tier ?? row.qualityTier) as string) ?? 'basic',
-    labelSource:      ((row.label_source ?? row.labelSource) as string) ?? null,
-    hasLabels:        ((row.has_labels ?? row.hasLabels) as boolean) ?? false,
-    consentStatus:    ((row.consent_status ?? row.consentStatus) as string) ?? 'PRIVATE',
-    piiStatus:        ((row.pii_status ?? row.piiStatus) as string) ?? 'CLEAR',
-    lockStatus:       ((row.lock_status ?? row.lockStatus) as string) ?? 'available',
-    lockedByJobId:    ((row.locked_by_job_id ?? row.lockedByJobId) as string) ?? null,
-    sessionDate:      ((row.session_date ?? row.sessionDate) as string) ?? '',
-    userId:           rawUserId ? encryptId(rawUserId) : null,
+    qualityGrade: ((row.quality_grade ?? row.qualityGrade) as 'A' | 'B' | 'C') ?? 'C',
+    qaScore: Number(row.qa_score ?? row.qaScore ?? 0),
+    qualityTier: ((row.quality_tier ?? row.qualityTier) as string) ?? 'basic',
+    labelSource: ((row.label_source ?? row.labelSource) as string) ?? null,
+    hasLabels: ((row.has_labels ?? row.hasLabels) as boolean) ?? false,
+    consentStatus: ((row.consent_status ?? row.consentStatus) as string) ?? 'PRIVATE',
+    piiStatus: ((row.pii_status ?? row.piiStatus) as string) ?? 'CLEAR',
+    lockStatus: ((row.lock_status ?? row.lockStatus) as string) ?? 'available',
+    lockedByJobId: ((row.locked_by_job_id ?? row.lockedByJobId) as string) ?? null,
+    sessionDate: ((row.session_date ?? row.sessionDate) as string) ?? '',
+    userId: rawUserId ? encryptId(rawUserId) : null,
     sourceSessionIds: ((row.source_session_ids ?? row.sourceSessionIds) as string[]) ?? undefined,
-    deviceContext:    ((row.device_context ?? row.deviceContext) as any) ?? undefined,
+    deviceContext: ((row.device_context ?? row.deviceContext) as any) ?? undefined,
   }
 }
 
@@ -637,17 +636,27 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
     }
 
     if (hasClientUtterances) {
-      // v3: utterances 테이블에서 직접 조회
-      const { data: uttRows, error: uttError } = await supabaseAdmin
-        .from('utterances')
-        .select('*')
-        .in('session_id', lockedSessionIds)
-        .eq('upload_status', 'uploaded')
-        .order('session_id', { ascending: true })
-        .order('sequence_order', { ascending: true })
-
-      if (uttError) {
-        return c.json({ error: uttError.message }, 500)
+      // v3: utterances 테이블에서 직접 조회 — 페이지네이션으로 1000행 초과 수집
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let uttRows: any[]
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        uttRows = await fetchAllPaginated<any>(() =>
+          supabaseAdmin
+            .from('utterances')
+            .select('*')
+            .in('session_id', lockedSessionIds)
+            .eq('upload_status', 'uploaded')
+            .order('session_id', { ascending: true })
+            .order('sequence_order', { ascending: true }),
+        )
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return c.json({ error: msg }, 500)
+      }
+      // 1000행 cap 재발 조기 감지: 정확히 배수면 페이지네이션 누락 의심
+      if (uttRows.length >= 1000 && uttRows.length % 1000 === 0) {
+        console.warn(`[loadExportUtterances] job=${id} v3 returned ${uttRows.length} — suspicious round number, verify pagination`)
       }
 
       // 선택된 BU minute_index 범위에 속하는 발화만 포함
@@ -783,26 +792,91 @@ adminExports.put('/export-requests/:id/utterances/review', async (c) => {
     }
 
     let updated = 0
+    let failed = 0
+    let v3Matched = 0
+    let legacyMatched = 0
+    const failures: Array<{ utteranceId: string; reason: string }> = []
+
     for (const { utteranceId, isIncluded, excludeReason } of updates) {
+      let v3Rows = 0
+      let legacyRows = 0
+      let errorMsg: string | null = null
+
       try {
         // v3 path: utterances.review_status 업데이트 (packageBuilder v3가 이 컬럼으로 필터링)
-        await supabaseAdmin
+        const { data: v3Data, error: v3Err } = await supabaseAdmin
           .from('utterances')
           .update({
             review_status: isIncluded ? 'pending' : 'excluded',
             ...(isIncluded ? { exclude_reason: null } : { exclude_reason: excludeReason ?? 'manual' }),
           })
           .eq('id', utteranceId)
+          .select('id')
 
-        // legacy path: export_package_items.content_hash 업데이트
-        await updateUtteranceStatus(utteranceId, isIncluded, excludeReason)
-        updated++
-      } catch {
-        // skip individual failures
+        if (v3Err) {
+          errorMsg = `v3: ${v3Err.message}`
+        } else {
+          v3Rows = v3Data?.length ?? 0
+          v3Matched += v3Rows
+        }
+
+        // legacy path: export_package_items.content_hash 업데이트 (영향 행 수 확인)
+        const legacyUpdate: Record<string, unknown> = {}
+        if (!isIncluded && excludeReason) {
+          legacyUpdate.content_hash = `excluded:${excludeReason}`
+        } else if (isIncluded) {
+          legacyUpdate.content_hash = null
+        }
+
+        if (Object.keys(legacyUpdate).length > 0) {
+          const { data: legData, error: legErr } = await supabaseAdmin
+            .from('export_package_items')
+            .update(legacyUpdate)
+            .eq('utterance_id', utteranceId)
+            .select('utterance_id')
+
+          if (legErr) {
+            errorMsg = errorMsg ? `${errorMsg}; legacy: ${legErr.message}` : `legacy: ${legErr.message}`
+          } else {
+            legacyRows = legData?.length ?? 0
+            legacyMatched += legacyRows
+          }
+        }
+
+        if (v3Rows === 0 && legacyRows === 0) {
+          failed++
+          failures.push({ utteranceId, reason: errorMsg ?? 'no matching row in utterances or export_package_items' })
+        } else if (errorMsg) {
+          failed++
+          failures.push({ utteranceId, reason: errorMsg })
+        } else {
+          updated++
+        }
+      } catch (err) {
+        failed++
+        const msg = err instanceof Error ? err.message : String(err)
+        failures.push({ utteranceId, reason: msg })
       }
     }
 
-    return c.json({ data: { updated, total: updates.length } })
+    // 성공 케이스는 응답으로 충분 — 로그는 실패/부분실패일 때만
+    if (failed > 0) {
+      console.warn(
+        `[review] job=${id} partial failure: updated=${updated} failed=${failed} v3Matched=${v3Matched} legacyMatched=${legacyMatched} total=${updates.length}`,
+      )
+      console.warn(`[review] job=${id} failures (first 5):`, failures.slice(0, 5))
+    }
+
+    return c.json({
+      data: {
+        updated,
+        failed,
+        total: updates.length,
+        v3Matched,
+        legacyMatched,
+        ...(failures.length > 0 && { failures: failures.slice(0, 10) }),
+      },
+    })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     return c.json({ error: message }, 500)
@@ -824,25 +898,89 @@ adminExports.put('/export-requests/:id/utterances/review', async (c) => {
  */
 const STUCK_THRESHOLD_MINUTES = 30
 
+const BUILD_PACKAGE_MAX_ATTEMPTS = 3
+const BUILD_PACKAGE_RETRY_BASE_MS = 2_000
+
+// S3/네트워크 transient 에러 패턴 — 이 경우만 재시도 대상
+function isTransientNetworkError(err: unknown): boolean {
+  const e = err as { name?: string; code?: string; message?: string }
+  const msg = (e?.message ?? '').toLowerCase()
+  const code = e?.code ?? ''
+  const name = e?.name ?? ''
+  return (
+    msg.includes('socket hang up') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('econnrefused') ||
+    msg.includes('eai_again') ||
+    msg.includes('network') ||
+    code === 'ECONNRESET' ||
+    code === 'ETIMEDOUT' ||
+    code === 'EPIPE' ||
+    name === 'TimeoutError' ||
+    name === 'NetworkingError'
+  )
+}
+
+type BuildPackageErrorAction = 'retry' | 'restore_reviewing' | 'fail'
+
+function classifyBuildPackageError(
+  err: unknown,
+  attempt: number,
+): { action: BuildPackageErrorAction; message: string } {
+  const message = err instanceof Error ? err.message : String(err)
+
+  // No utterances found: BU는 유지한 채 reviewing으로 복원 → 사용자가 재시도 가능
+  if (typeof message === 'string' && message.includes('No utterances found')) {
+    return { action: 'restore_reviewing', message }
+  }
+  // Transient 네트워크 에러 + 남은 시도 있음 → 재시도
+  if (isTransientNetworkError(err) && attempt < BUILD_PACKAGE_MAX_ATTEMPTS) {
+    return { action: 'retry', message }
+  }
+  // 그 외 또는 최종 시도 실패 → 영구 실패
+  return { action: 'fail', message }
+}
+
+async function restoreReviewingStatus(id: string): Promise<void> {
+  await supabaseAdmin
+    .from('export_jobs')
+    .update({ status: 'reviewing', packaging_started_at: null, packaging_stage: null })
+    .eq('id', id)
+}
+
+async function waitBeforeRetry(id: string, attempt: number, prevMsg: string): Promise<void> {
+  const delayMs = BUILD_PACKAGE_RETRY_BASE_MS * Math.pow(2, attempt - 2)
+  console.warn(
+    `[buildPackage] retry ${attempt}/${BUILD_PACKAGE_MAX_ATTEMPTS} for ${id} after ${delayMs}ms (prev: ${prevMsg})`,
+  )
+  await new Promise((r) => setTimeout(r, delayMs))
+  await supabaseAdmin
+    .from('export_jobs')
+    .update({ packaging_stage: null })
+    .eq('id', id)
+}
+
 async function runBuildPackageInBackground(id: string): Promise<void> {
-  try {
-    await buildPackage(id)
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
-    console.error(`Finalize background task failed for ${id}:`, message)
+  for (let attempt = 1; attempt <= BUILD_PACKAGE_MAX_ATTEMPTS; attempt++) {
+    try {
+      await buildPackage(id)
+      return
+    } catch (err: unknown) {
+      const { action, message } = classifyBuildPackageError(err, attempt)
 
-    const isNoUtterancesError =
-      typeof message === 'string' && message.includes('No utterances found')
-
-    if (isNoUtterancesError) {
-      // 발화 없음: BU는 유지한 채 reviewing으로 복원 → 재시도 가능
-      await supabaseAdmin
-        .from('export_jobs')
-        .update({ status: 'reviewing', packaging_started_at: null, packaging_stage: null })
-        .eq('id', id)
-    } else {
-      // 그 외 에러: BU unlock + status='failed' 원자적 처리
-      await supabaseAdmin.rpc('fail_export_job', { p_job_id: id, p_error: message })
+      if (action === 'restore_reviewing') {
+        console.error(`Finalize background task failed for ${id}: ${message}`)
+        await restoreReviewingStatus(id)
+        return
+      }
+      if (action === 'fail') {
+        console.error(`Finalize background task failed for ${id} (attempt ${attempt}/${BUILD_PACKAGE_MAX_ATTEMPTS}):`, message)
+        await supabaseAdmin.rpc('fail_export_job', { p_job_id: id, p_error: message })
+        return
+      }
+      // action === 'retry'
+      await waitBeforeRetry(id, attempt + 1, message)
     }
   }
 }

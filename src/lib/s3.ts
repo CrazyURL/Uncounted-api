@@ -10,6 +10,9 @@ import {
   GetObjectCommand,
 } from '@aws-sdk/client-s3'
 import { getSignedUrl as awsGetSignedUrl } from '@aws-sdk/s3-request-presigner'
+import { NodeHttpHandler } from '@smithy/node-http-handler'
+import { Agent as HttpsAgent } from 'https'
+import { Agent as HttpAgent } from 'http'
 
 const endpoint = process.env.S3_ENDPOINT
 const region = process.env.S3_REGION ?? 'kr-standard'
@@ -26,16 +29,71 @@ if (!endpoint || !accessKeyId || !secretAccessKey) {
   )
 }
 
+// iwinv S3 호환 엔드포인트는 idle 연결을 빠르게 끊기 때문에
+// 명시적인 keep-alive 풀과 충분한 timeout이 필요하다.
+// 기본 핸들러는 socket pooling 없이 매 요청마다 새 TCP 연결을 만들고
+// idle 시 서버측에서 끊어 socket hang up이 자주 발생한다.
+const httpsAgent = new HttpsAgent({
+  keepAlive: true,
+  keepAliveMsecs: 30_000,
+  maxSockets: 64,
+  maxFreeSockets: 16,
+})
+const httpAgent = new HttpAgent({
+  keepAlive: true,
+  keepAliveMsecs: 30_000,
+  maxSockets: 64,
+  maxFreeSockets: 16,
+})
+
+const requestHandler = new NodeHttpHandler({
+  connectionTimeout: 10_000,   // TCP 연결 수립 한도
+  requestTimeout: 300_000,     // 5분 — 대용량 multipart part 1개 업로드 여유
+  httpsAgent,
+  httpAgent,
+})
+
 export const s3Client = new S3Client({
   endpoint,
   region,
   credentials: { accessKeyId, secretAccessKey },
   forcePathStyle: true,
+  requestHandler,
+  // SDK 레벨 자동 재시도 (지수 backoff). socket hang up은 retryable로 분류됨.
+  maxAttempts: 5,
+})
+
+console.log('[s3] client initialized', {
+  endpoint,
+  region,
+  forcePathStyle: true,
+  accessKeyIdPrefix: accessKeyId.slice(0, 4),
+  keepAlive: true,
+  maxSockets: 64,
+  requestTimeoutMs: 300_000,
+  maxAttempts: 5,
 })
 
 export const S3_AUDIO_BUCKET = process.env.S3_AUDIO_BUCKET ?? 'sanitized-audio'
 export const S3_META_BUCKET = process.env.S3_META_BUCKET ?? 'meta-jsonl'
 export const EXPORTS_PREFIX = 'exports/'
+
+function describeS3Error(err: unknown): Record<string, unknown> {
+  const e = err as {
+    name?: string
+    message?: string
+    Code?: string
+    $metadata?: { httpStatusCode?: number; requestId?: string }
+    $response?: { statusCode?: number }
+  }
+  return {
+    name: e?.name,
+    code: e?.Code,
+    message: e?.message,
+    httpStatus: e?.$metadata?.httpStatusCode ?? e?.$response?.statusCode,
+    requestId: e?.$metadata?.requestId,
+  }
+}
 
 /** 파일 업로드 (upsert 동작: 동일 키 덮어쓰기) */
 export async function uploadObject(
@@ -44,9 +102,29 @@ export async function uploadObject(
   body: Uint8Array | string,
   contentType: string,
 ): Promise<void> {
-  await s3Client.send(
-    new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType }),
-  )
+  const size = typeof body === 'string' ? Buffer.byteLength(body) : body.byteLength
+  const startedAt = Date.now()
+  console.log('[s3] uploadObject:start', { bucket, key, contentType, bytes: size })
+  try {
+    await s3Client.send(
+      new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType }),
+    )
+    console.log('[s3] uploadObject:ok', {
+      bucket,
+      key,
+      bytes: size,
+      ms: Date.now() - startedAt,
+    })
+  } catch (err) {
+    console.error('[s3] uploadObject:fail', {
+      bucket,
+      key,
+      bytes: size,
+      ms: Date.now() - startedAt,
+      ...describeS3Error(err),
+    })
+    throw err
+  }
 }
 
 /** 파일 다건 삭제 */
@@ -143,6 +221,7 @@ export async function uploadExportPackage(
   zipBuffer: Uint8Array,
 ): Promise<string> {
   const key = `${EXPORTS_PREFIX}${requestId}.zip`
+  console.log('[s3] uploadExportPackage', { requestId, key, bytes: zipBuffer.byteLength })
   await uploadObject(S3_AUDIO_BUCKET, key, zipBuffer, 'application/zip')
   return key
 }
