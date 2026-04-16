@@ -870,11 +870,8 @@ adminExports.put('/export-requests/:id/utterances/review', async (c) => {
  * Cloudflare Tunnel 등 프록시 100s 타임아웃으로 인한 503 회피.
  * 클라이언트는 status 폴링으로 진행 상황을 확인한다.
  *
- * Stuck 복구: status가 'packaging'이지만 STUCK_THRESHOLD_MINUTES 이상
- * 경과한 경우 자동으로 'reviewing'으로 복원 후 재시작한다.
+ * Stuck 복구: status가 'packaging'이면 재시도 시 자동으로 'reviewing'으로 복원 후 재시작한다.
  */
-const STUCK_THRESHOLD_MINUTES = 30
-
 const BUILD_PACKAGE_MAX_ATTEMPTS = 3
 const BUILD_PACKAGE_RETRY_BASE_MS = 2_000
 
@@ -977,30 +974,8 @@ adminExports.post('/export-requests/:id/finalize', async (c) => {
       return c.json({ error: 'Export job not found' }, 404)
     }
 
-    // 2. status별 진입 가능성 판정
-    if (job.status === 'packaging') {
-      // stuck 복구 시도
-      const { data: resetCount, error: resetError } = await supabaseAdmin.rpc(
-        'reset_stuck_packaging',
-        { p_job_id: id, p_stale_minutes: STUCK_THRESHOLD_MINUTES },
-      )
-
-      if (resetError) {
-        return c.json({ error: `Stuck recovery failed: ${resetError.message}` }, 500)
-      }
-
-      // resetCount가 0이면 아직 정상 진행 중 → 409 Conflict
-      if (!resetCount || (typeof resetCount === 'number' && resetCount === 0)) {
-        return c.json(
-          {
-            error: '이미 패키징이 진행 중입니다. 잠시 후 상태를 확인해 주세요.',
-            data: { status: 'packaging' },
-          },
-          409,
-        )
-      }
-      // resetCount > 0: stuck 복구됨 → reviewing으로 떨어진 상태, 아래로 진행
-    } else if (job.status !== 'reviewing') {
+    // 2. status별 진입 가능성 판정 (reviewing, ready, packaging 허용)
+    if (job.status !== 'reviewing' && job.status !== 'ready' && job.status !== 'packaging') {
       return c.json(
         { error: `Cannot finalize: current status is '${job.status}', expected 'reviewing'` },
         400,
@@ -1012,7 +987,7 @@ adminExports.post('/export-requests/:id/finalize', async (c) => {
       .from('export_jobs')
       .update({ status: 'packaging', packaging_started_at: new Date().toISOString() })
       .eq('id', id)
-      .eq('status', 'reviewing')
+      .in('status', ['reviewing', 'ready', 'packaging'])
       .select('id')
 
     if (updateError) {
