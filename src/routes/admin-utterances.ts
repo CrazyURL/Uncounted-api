@@ -83,7 +83,8 @@ adminUtterances.get('/utterances/:id/audio/stream', async (c) => {
 
     c.header('Content-Type', 'audio/wav')
     c.header('Content-Length', String(bytes.byteLength))
-    c.header('Cache-Control', 'private, max-age=3600')
+    // no-store: 마스킹 적용 후 동일 URL에 대한 캐시 히트로 원본이 보이는 버그 방지
+    c.header('Cache-Control', 'no-store')
     return c.body(bytes.buffer as ArrayBuffer)
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
@@ -156,6 +157,89 @@ adminUtterances.put('/utterances/:id/pii', async (c) => {
     return c.json({ data: { ok: true } })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * POST /admin/utterances/labels
+ * 발화 라벨 배치 업데이트 (merge)
+ * Body: { utteranceIds: string[], labels: Record<string, unknown> }
+ *
+ * labels는 utterances.labels jsonb 컬럼에 머지한다.
+ * labelSource가 포함되면 label_source 컬럼에도 반영한다.
+ */
+adminUtterances.post('/utterances/labels', async (c) => {
+  const { utteranceIds, labels } = getBody<{
+    utteranceIds: string[]
+    labels: Record<string, unknown>
+  }>(c)
+
+  if (!Array.isArray(utteranceIds) || utteranceIds.length === 0) {
+    return c.json({ error: 'utteranceIds must be a non-empty array' }, 400)
+  }
+  if (!labels || typeof labels !== 'object') {
+    return c.json({ error: 'labels must be an object' }, 400)
+  }
+
+  const MAX_BATCH = 2000
+  if (utteranceIds.length > MAX_BATCH) {
+    return c.json({ error: `utteranceIds exceeds max batch size ${MAX_BATCH}` }, 400)
+  }
+
+  const { labelSource, ...labelFields } = labels as Record<string, unknown> & { labelSource?: string }
+
+  const now = new Date().toISOString()
+  const ID_CHUNK = 100
+  let updated = 0
+
+  try {
+    for (let i = 0; i < utteranceIds.length; i += ID_CHUNK) {
+      const idChunk = utteranceIds.slice(i, i + ID_CHUNK)
+
+      const { data: rows, error: fetchError } = await supabaseAdmin
+        .from('utterances')
+        .select('id, labels')
+        .in('id', idChunk)
+
+      if (fetchError) {
+        console.error('[admin-utterances:labels] fetch error', {
+          chunkStart: i,
+          chunkSize: idChunk.length,
+          error: fetchError.message,
+        })
+        return c.json({ error: fetchError.message }, 500)
+      }
+
+      for (const row of rows ?? []) {
+        const mergedLabels = { ...((row.labels as Record<string, unknown>) ?? {}), ...labelFields }
+        const patch: Record<string, unknown> = {
+          labels: mergedLabels,
+          updated_at: now,
+        }
+        if (typeof labelSource === 'string') patch.label_source = labelSource
+
+        const { error: updateError } = await supabaseAdmin
+          .from('utterances')
+          .update(patch)
+          .eq('id', row.id)
+
+        if (updateError) {
+          console.error('[admin-utterances:labels] update error', {
+            id: row.id,
+            error: updateError.message,
+          })
+          return c.json({ error: updateError.message }, 500)
+        }
+        updated++
+      }
+    }
+
+    console.log('[admin-utterances:labels] ok', { requested: utteranceIds.length, updated })
+    return c.json({ data: { updated } })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error('[admin-utterances:labels] unexpected error', message)
+    return c.json({ error: message }, 500)
   }
 })
 

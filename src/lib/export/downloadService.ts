@@ -28,8 +28,13 @@ export async function getSignedDownloadUrl(
     throw new Error(`Export job ${exportJobId} has no package yet`)
   }
 
-  // Generate signed URL using the actual stored path (24h)
-  const downloadUrl = await getSignedUrl(S3_AUDIO_BUCKET, job.package_storage_path, DOWNLOAD_EXPIRES_SEC)
+  // Generate signed URL using the actual stored path (24h), force attachment
+  const downloadUrl = await getSignedUrl(
+    S3_AUDIO_BUCKET,
+    job.package_storage_path,
+    DOWNLOAD_EXPIRES_SEC,
+    { downloadFilename: `uncounted_${exportJobId}.zip` },
+  )
   const expiresAt = new Date(Date.now() + DOWNLOAD_EXPIRES_SEC * 1000).toISOString()
 
   // Update export_jobs
