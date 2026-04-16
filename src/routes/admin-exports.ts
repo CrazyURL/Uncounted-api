@@ -748,6 +748,81 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
 
 // ── Export Request: Review Utterances ────────────────────────────────────
 
+/**
+ * 발화 검수 결과를 백그라운드에서 일괄 반영한다.
+ *
+ * 개별 토글은 PATCH /utterances/:id/review-status 로 즉시 저장되므로,
+ * 이 PUT은 finalize 직전 안전망 역할이다. 데이터 정합성이 이미 보장된
+ * 상태에서 실행되므로 fire-and-forget으로 처리해도 안전하다.
+ *
+ * N×2 순차 DB 쿼리 → 그룹별 IN 절 일괄 업데이트로 교체하여
+ * Cloudflare 524 타임아웃(100s) 회피.
+ */
+async function runReviewInBackground(
+  jobId: string,
+  updates: Array<{ utteranceId: string; isIncluded: boolean; excludeReason?: string }>,
+): Promise<void> {
+  try {
+    const includedIds = updates.filter((u) => u.isIncluded).map((u) => u.utteranceId)
+
+    // 제외 발화를 reason별로 그룹화
+    const excludedByReason = new Map<string, string[]>()
+    for (const { utteranceId, isIncluded, excludeReason } of updates) {
+      if (!isIncluded) {
+        const reason = excludeReason ?? 'manual'
+        const arr = excludedByReason.get(reason) ?? []
+        arr.push(utteranceId)
+        excludedByReason.set(reason, arr)
+      }
+    }
+
+    // v3 path: utterances 테이블 일괄 업데이트
+    if (includedIds.length > 0) {
+      const { error } = await supabaseAdmin
+        .from('utterances')
+        .update({ review_status: 'pending', exclude_reason: null })
+        .in('id', includedIds)
+      if (error) {
+        console.warn(`[review bg] job=${jobId} included v3 batch error: ${error.message}`)
+      }
+    }
+
+    for (const [reason, ids] of excludedByReason) {
+      const { error } = await supabaseAdmin
+        .from('utterances')
+        .update({ review_status: 'excluded', exclude_reason: reason })
+        .in('id', ids)
+      if (error) {
+        console.warn(`[review bg] job=${jobId} excluded(${reason}) v3 batch error: ${error.message}`)
+      }
+    }
+
+    // legacy path: export_package_items 일괄 업데이트
+    if (includedIds.length > 0) {
+      const { error } = await supabaseAdmin
+        .from('export_package_items')
+        .update({ content_hash: null })
+        .in('utterance_id', includedIds)
+      if (error) {
+        console.warn(`[review bg] job=${jobId} included legacy batch error: ${error.message}`)
+      }
+    }
+
+    for (const [reason, ids] of excludedByReason) {
+      const { error } = await supabaseAdmin
+        .from('export_package_items')
+        .update({ content_hash: `excluded:${reason}` })
+        .in('utterance_id', ids)
+      if (error) {
+        console.warn(`[review bg] job=${jobId} excluded(${reason}) legacy batch error: ${error.message}`)
+      }
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`[review bg] job=${jobId} unexpected error: ${message}`)
+  }
+}
+
 adminExports.put('/export-requests/:id/utterances/review', async (c) => {
   const id = c.req.param('id')
   const { updates } = getBody<{
@@ -774,92 +849,11 @@ adminExports.put('/export-requests/:id/utterances/review', async (c) => {
       return c.json({ error: 'Export job not found' }, 404)
     }
 
-    let updated = 0
-    let failed = 0
-    let v3Matched = 0
-    let legacyMatched = 0
-    const failures: Array<{ utteranceId: string; reason: string }> = []
+    // 백그라운드에서 일괄 업데이트 실행 (await 하지 않음)
+    void runReviewInBackground(id, updates)
 
-    for (const { utteranceId, isIncluded, excludeReason } of updates) {
-      let v3Rows = 0
-      let legacyRows = 0
-      let errorMsg: string | null = null
-
-      try {
-        // v3 path: utterances.review_status 업데이트 (packageBuilder v3가 이 컬럼으로 필터링)
-        const { data: v3Data, error: v3Err } = await supabaseAdmin
-          .from('utterances')
-          .update({
-            review_status: isIncluded ? 'pending' : 'excluded',
-            ...(isIncluded ? { exclude_reason: null } : { exclude_reason: excludeReason ?? 'manual' }),
-          })
-          .eq('id', utteranceId)
-          .select('id')
-
-        if (v3Err) {
-          errorMsg = `v3: ${v3Err.message}`
-        } else {
-          v3Rows = v3Data?.length ?? 0
-          v3Matched += v3Rows
-        }
-
-        // legacy path: export_package_items.content_hash 업데이트 (영향 행 수 확인)
-        const legacyUpdate: Record<string, unknown> = {}
-        if (!isIncluded && excludeReason) {
-          legacyUpdate.content_hash = `excluded:${excludeReason}`
-        } else if (isIncluded) {
-          legacyUpdate.content_hash = null
-        }
-
-        if (Object.keys(legacyUpdate).length > 0) {
-          const { data: legData, error: legErr } = await supabaseAdmin
-            .from('export_package_items')
-            .update(legacyUpdate)
-            .eq('utterance_id', utteranceId)
-            .select('utterance_id')
-
-          if (legErr) {
-            errorMsg = errorMsg ? `${errorMsg}; legacy: ${legErr.message}` : `legacy: ${legErr.message}`
-          } else {
-            legacyRows = legData?.length ?? 0
-            legacyMatched += legacyRows
-          }
-        }
-
-        if (v3Rows === 0 && legacyRows === 0) {
-          failed++
-          failures.push({ utteranceId, reason: errorMsg ?? 'no matching row in utterances or export_package_items' })
-        } else if (errorMsg) {
-          failed++
-          failures.push({ utteranceId, reason: errorMsg })
-        } else {
-          updated++
-        }
-      } catch (err) {
-        failed++
-        const msg = err instanceof Error ? err.message : String(err)
-        failures.push({ utteranceId, reason: msg })
-      }
-    }
-
-    // 성공 케이스는 응답으로 충분 — 로그는 실패/부분실패일 때만
-    if (failed > 0) {
-      console.warn(
-        `[review] job=${id} partial failure: updated=${updated} failed=${failed} v3Matched=${v3Matched} legacyMatched=${legacyMatched} total=${updates.length}`,
-      )
-      console.warn(`[review] job=${id} failures (first 5):`, failures.slice(0, 5))
-    }
-
-    return c.json({
-      data: {
-        updated,
-        failed,
-        total: updates.length,
-        v3Matched,
-        legacyMatched,
-        ...(failures.length > 0 && { failures: failures.slice(0, 10) }),
-      },
-    })
+    // 즉시 202 Accepted 반환 — Cloudflare 524 회피
+    return c.json({ data: { queued: true, updated: 0, failed: 0, total: updates.length } }, 202)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     return c.json({ error: message }, 500)
@@ -876,11 +870,8 @@ adminExports.put('/export-requests/:id/utterances/review', async (c) => {
  * Cloudflare Tunnel 등 프록시 100s 타임아웃으로 인한 503 회피.
  * 클라이언트는 status 폴링으로 진행 상황을 확인한다.
  *
- * Stuck 복구: status가 'packaging'이지만 STUCK_THRESHOLD_MINUTES 이상
- * 경과한 경우 자동으로 'reviewing'으로 복원 후 재시작한다.
+ * Stuck 복구: status가 'packaging'이면 재시도 시 자동으로 'reviewing'으로 복원 후 재시작한다.
  */
-const STUCK_THRESHOLD_MINUTES = 30
-
 const BUILD_PACKAGE_MAX_ATTEMPTS = 3
 const BUILD_PACKAGE_RETRY_BASE_MS = 2_000
 
@@ -983,30 +974,8 @@ adminExports.post('/export-requests/:id/finalize', async (c) => {
       return c.json({ error: 'Export job not found' }, 404)
     }
 
-    // 2. status별 진입 가능성 판정
-    if (job.status === 'packaging') {
-      // stuck 복구 시도
-      const { data: resetCount, error: resetError } = await supabaseAdmin.rpc(
-        'reset_stuck_packaging',
-        { p_job_id: id, p_stale_minutes: STUCK_THRESHOLD_MINUTES },
-      )
-
-      if (resetError) {
-        return c.json({ error: `Stuck recovery failed: ${resetError.message}` }, 500)
-      }
-
-      // resetCount가 0이면 아직 정상 진행 중 → 409 Conflict
-      if (!resetCount || (typeof resetCount === 'number' && resetCount === 0)) {
-        return c.json(
-          {
-            error: '이미 패키징이 진행 중입니다. 잠시 후 상태를 확인해 주세요.',
-            data: { status: 'packaging' },
-          },
-          409,
-        )
-      }
-      // resetCount > 0: stuck 복구됨 → reviewing으로 떨어진 상태, 아래로 진행
-    } else if (job.status !== 'reviewing') {
+    // 2. status별 진입 가능성 판정 (reviewing, ready, packaging 허용)
+    if (job.status !== 'reviewing' && job.status !== 'ready' && job.status !== 'packaging') {
       return c.json(
         { error: `Cannot finalize: current status is '${job.status}', expected 'reviewing'` },
         400,
@@ -1018,7 +987,7 @@ adminExports.post('/export-requests/:id/finalize', async (c) => {
       .from('export_jobs')
       .update({ status: 'packaging', packaging_started_at: new Date().toISOString() })
       .eq('id', id)
-      .eq('status', 'reviewing')
+      .in('status', ['reviewing', 'ready', 'packaging'])
       .select('id')
 
     if (updateError) {
