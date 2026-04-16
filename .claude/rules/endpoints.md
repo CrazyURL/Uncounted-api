@@ -83,7 +83,11 @@ paths: src/routes/**
 | | `/api/admin/export-requests/:id/confirm` | PUT | 어드민 | draft → queued 확정 |
 | | `/api/admin/export-requests/:id/process` | POST | 어드민 | BU 풀링 + 발화 분할 + 품질 분석 |
 | | `/api/admin/export-requests/:id/utterances` | GET | 어드민 | 발화 목록 조회 |
-| | `/api/admin/export-requests/:id/utterances/review` | PUT | 어드민 | 발화 검수 반영 |
+| | `/api/admin/export-requests/:id/utterances/review` | PUT | 어드민 | 발화 검수 일괄 반영 (finalize 전 안전망) |
+| | `/api/admin/utterances/:id/review-status` | PATCH | 어드민 | 단건 검수 상태 즉시 저장 (검수 화면 토글) |
+| | `/api/admin/utterances/:id/pii` | GET/PUT | 어드민 | PII 구간 조회/저장 (응답 마스킹 메타 포함) |
+| | `/api/admin/utterances/:id/apply-mask` | POST | 어드민 | 마스킹 실행 + 감사 메타 기록 (jobId 시 작업 로그) |
+| | `/api/admin/utterances/:id/restore-original` | POST | 어드민 | 원본 복원 + 마스킹 메타 전체 리셋 |
 | | `/api/admin/utterances/labels` | POST | 어드민 | 발화 라벨 배치 저장 |
 | | `/api/admin/export-requests/:id/finalize` | POST | 어드민 | ZIP 패키징 + S3 업로드 |
 | | `/api/admin/export-requests/:id/download` | GET | 어드민 | 서명 URL 발급 |
