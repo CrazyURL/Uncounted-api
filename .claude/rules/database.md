@@ -4,12 +4,13 @@ paths: supabase/**
 
 # DB 마이그레이션 규칙
 
-`supabase/migrations/` 디렉토리에 001~036번까지의 SQL 마이그레이션 파일.
-새 마이그레이션 추가 시 번호를 순차적으로 증가 (예: `037_xxx.sql`).
+`supabase/migrations/` 디렉토리에 001~037번까지의 SQL 마이그레이션 파일.
+새 마이그레이션 추가 시 번호를 순차적으로 증가 (예: `038_xxx.sql`).
 
 034번: `fail_export_job(p_job_id UUID, p_error TEXT)` RPC — BU 잠금 해제 + export_jobs 상태를 'failed'로 원자적 처리 (SECURITY DEFINER).
 035번: `export_jobs.packaging_progress` 컬럼 추가 (패키징 진행 상태 추적).
 036번: `utterances`에 PII 마스킹 감사 컬럼 5개 추가 — `pii_masked`, `pii_masked_at`, `pii_masked_by`, `pii_masked_by_email`, `pii_mask_version`. apply-mask 적용 이력 추적.
+037번: `export_jobs`에 review sync 추적 컬럼 3개 추가 — `review_sync_status`(idle/syncing/done/failed), `review_sync_started_at`, `review_sync_error`. `reset_stuck_review_sync()` RPC (5분 stale 복구).
 
 주요 테이블:
 - `sessions`, `session_chunks`, `transcripts`, `transcript_chunks` — 세션/전사
