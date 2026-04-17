@@ -2,6 +2,9 @@
 // Uncounted Backend API — Supabase 로직 분리
 
 import './types.js' // Hono Context 타입 확장
+import { readFileSync } from 'node:fs'
+import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
@@ -21,6 +24,13 @@ import transcriptChunks from './routes/transcriptChunks.js'
 import sessionChunks from './routes/sessionChunks.js'
 import user from './routes/user.js'
 import upload from './routes/upload.js'
+
+// package.json에서 버전 정보 읽기
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+const pkg = JSON.parse(
+  readFileSync(resolve(__dirname, '../package.json'), 'utf-8')
+)
 
 const app = new Hono()
 
@@ -59,14 +69,17 @@ app.use('/api/*', devBodyLogger)
 app.get('/', (c) => {
   return c.json({
     service: 'Uncounted Backend API',
-    version: '1.0.0',
+    version: pkg.version,
     status: 'healthy',
     timestamp: new Date().toISOString(),
   })
 })
 
 app.get('/health', (c) => {
-  return c.json({ status: 'ok' })
+  return c.json({
+    status: 'ok',
+    version: pkg.version,
+  })
 })
 
 // ── API 문서 ───────────────────────────────────────────────────────────

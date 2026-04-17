@@ -48,12 +48,17 @@ export const openApiSpec = {
     { name: 'auth', description: '인증 (로그인, 회원가입, 세션 관리)' },
     { name: 'sessions', description: '세션 CRUD (인증 필요)' },
     { name: 'storage', description: '파일 스토리지 (인증 필요)' },
-    { name: 'admin', description: '관리자 API (인증 필요)' },
+    { name: 'admin-config', description: '관리자: 설정 및 기준정보 (클라이언트, SKU)' },
+    { name: 'admin-content', description: '관리자: 세션 및 발화 데이터 검수' },
+    { name: 'admin-export', description: '관리자: 익스포트 작업 및 인벤토리' },
+    { name: 'admin-billing', description: '관리자: 청구 단위 및 정산 원장' },
+    { name: 'admin-system', description: '관리자: 시스템 관리 및 기타' },
     { name: 'logging', description: '이벤트/에러 로그 (인증 선택)' },
     { name: 'transcripts', description: 'STT 전사 데이터 (인증 필요)' },
     { name: 'transcript-chunks', description: '청크별 전사 + 오디오 통계 (인증 필요)' },
     { name: 'session-chunks', description: '청크별 세션 라벨 (인증 필요)' },
     { name: 'user', description: '사용자 프로필/동의 관리 (인증 필요)' },
+    { name: 'upload', description: '메타데이터 업로드 (인증 선택)' },
   ],
   components: {
     securitySchemes: {
@@ -235,6 +240,7 @@ export const openApiSpec = {
                   type: 'object',
                   properties: {
                     status: { type: 'string', example: 'ok' },
+                    version: { type: 'string', example: '0.1.0' },
                   },
                 },
               },
@@ -759,7 +765,7 @@ export const openApiSpec = {
       patch: {
         tags: ['sessions'],
         summary: '세션 부분 수정 (STT 처리)',
-        description: 'transcript, audio_metrics, upload_status를 개별 업데이트합니다. upload_status는 현재 값이 UPLOADED가 아닐 때만 변경됩니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        description: 'audio_metrics, has_diarization, upload_status, pii_status를 개별 업데이트합니다. upload_status는 현재 값이 UPLOADED가 아닐 때만 변경됩니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         requestBody: {
           required: true,
@@ -768,9 +774,10 @@ export const openApiSpec = {
               schema: {
                 type: 'object',
                 properties: {
-                  transcript: { type: 'string', description: '전사 텍스트' },
-                  audio_metrics: { type: 'object', description: '오디오 메트릭' },
+                  audio_metrics: { type: 'object', description: '오디오 메트릭 (RMS, SNR 등)' },
+                  has_diarization: { type: 'boolean', description: '화자 분리 적용 여부' },
                   upload_status: { type: 'string', enum: ['LOCAL', 'UPLOADED', 'FAILED'] },
+                  pii_status: { type: 'string', description: 'PII 처리 상태' },
                 },
               },
             },
@@ -952,6 +959,54 @@ export const openApiSpec = {
             content: { 'application/json': { schema: { $ref: '#/components/schemas/Success' } } },
           },
           400: { description: '잘못된 요청', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    '/api/sessions/{id}/utterances/complete': {
+      post: {
+        tags: ['sessions'],
+        summary: '세션 발화 업로드 완료 신호',
+        description: '모든 발화 청크 업로드 완료를 알리고 세션 상태를 업데이트합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        security: [{ BearerAuth: [] }, { CookieAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['totalCount', 'uploadedCount'],
+                properties: {
+                  totalCount: { type: 'integer', description: '전체 발화 수' },
+                  uploadedCount: { type: 'integer', description: '업로드 성공 수' },
+                  failedCount: { type: 'integer', description: '업로드 실패 수' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '상태 업데이트 성공',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: {
+                      type: 'object',
+                      properties: {
+                        ok: { type: 'boolean' },
+                        uploadStatus: { type: 'string', enum: ['complete', 'partial'] },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
           401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
         },
       },
@@ -1191,10 +1246,76 @@ export const openApiSpec = {
       },
     },
 
+    '/api/storage/session-chunks': {
+      post: {
+        tags: ['storage'],
+        summary: '논리 청크 메타 등록',
+        description: 'WAV 파일 없이 청크 메타데이터만 등록합니다 (v3 logical chunk).\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        security: [{ BearerAuth: [] }, { CookieAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['sessionId', 'chunkIndex', 'startSec', 'endSec'],
+                properties: {
+                  sessionId: { type: 'string', format: 'uuid' },
+                  chunkIndex: { type: 'integer' },
+                  chunkType: { type: 'string', enum: ['wav', 'logical'], default: 'logical' },
+                  utteranceCount: { type: 'integer' },
+                  totalUtteranceDuration: { type: 'number' },
+                  startSec: { type: 'number' },
+                  endSec: { type: 'number' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '등록 성공',
+            content: { 'application/json': { schema: { type: 'object', properties: { chunkId: { type: 'string', format: 'uuid' } } } } },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/storage/audio/utterance': {
+      post: {
+        tags: ['storage'],
+        summary: '발화 WAV + 메타 업로드',
+        description: '발화별 WAV 파일과 암호화된 메타데이터를 multipart/form-data로 업로드합니다.',
+        security: [{ BearerAuth: [] }, { CookieAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'multipart/form-data': {
+              schema: {
+                type: 'object',
+                required: ['wavFile', 'meta'],
+                properties: {
+                  wavFile: { type: 'string', format: 'binary', description: 'WAV binary' },
+                  meta: { type: 'string', description: 'AES-256-GCM 암호화된 발화 메타데이터 JSON' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '업로드 성공',
+            content: { 'application/json': { schema: { type: 'object', properties: { path: { type: 'string' }, utteranceId: { type: 'string', format: 'uuid' } } } } },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
     // ── Admin - Me ───────────────────────────────────────────────────
     '/api/admin/me': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-system'],
         summary: '어드민 본인 확인',
         description: 'JWT 검증 후 Supabase app_metadata.role === "admin" 서버 확인. 200 응답의 id/email은 AES-256-GCM 암호화된 값.',
         security: [{ BearerAuth: [] }, { CookieAuth: [] }],
@@ -1227,7 +1348,7 @@ export const openApiSpec = {
     // ── Admin - Clients ────────────────────────────────────────────────
     '/api/admin/clients': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-config'],
         summary: '클라이언트 목록 조회',
         responses: {
           200: { description: '클라이언트 목록', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'array', items: { type: 'object' } } } } } } },
@@ -1235,7 +1356,7 @@ export const openApiSpec = {
         },
       },
       post: {
-        tags: ['admin'],
+        tags: ['admin-config'],
         summary: '클라이언트 upsert',
         description: '> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -1257,7 +1378,7 @@ export const openApiSpec = {
     },
     '/api/admin/clients/{id}': {
       delete: {
-        tags: ['admin'],
+        tags: ['admin-config'],
         summary: '클라이언트 삭제',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
@@ -1270,7 +1391,7 @@ export const openApiSpec = {
     // ── Admin - Delivery Profiles ───────────────────────────────────────
     '/api/admin/delivery-profiles': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-config'],
         summary: '배송 프로필 목록 조회',
         parameters: [{ name: 'clientId', in: 'query', schema: { type: 'string' } }],
         responses: {
@@ -1279,7 +1400,7 @@ export const openApiSpec = {
         },
       },
       post: {
-        tags: ['admin'],
+        tags: ['admin-config'],
         summary: '배송 프로필 upsert',
         description: '> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -1294,7 +1415,7 @@ export const openApiSpec = {
     },
     '/api/admin/delivery-profiles/{id}': {
       delete: {
-        tags: ['admin'],
+        tags: ['admin-config'],
         summary: '배송 프로필 삭제',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
@@ -1307,7 +1428,7 @@ export const openApiSpec = {
     // ── Admin - SKU Rules ───────────────────────────────────────────────
     '/api/admin/client-sku-rules': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-config'],
         summary: 'SKU 규칙 조회',
         parameters: [{ name: 'clientId', in: 'query', required: true, schema: { type: 'string' } }],
         responses: {
@@ -1317,7 +1438,7 @@ export const openApiSpec = {
         },
       },
       post: {
-        tags: ['admin'],
+        tags: ['admin-config'],
         summary: 'SKU 규칙 upsert',
         description: '> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -1332,7 +1453,7 @@ export const openApiSpec = {
     },
     '/api/admin/client-sku-rules/{id}': {
       delete: {
-        tags: ['admin'],
+        tags: ['admin-config'],
         summary: 'SKU 규칙 삭제',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
@@ -1345,7 +1466,7 @@ export const openApiSpec = {
     // ── Admin - SKU Presets ─────────────────────────────────────────────
     '/api/admin/sku-presets': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-config'],
         summary: 'SKU 프리셋 목록 조회',
         responses: {
           200: { description: '목록', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'array', items: { type: 'object' } } } } } } },
@@ -1353,7 +1474,7 @@ export const openApiSpec = {
         },
       },
       post: {
-        tags: ['admin'],
+        tags: ['admin-config'],
         summary: 'SKU 프리셋 upsert',
         description: '> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -1368,7 +1489,7 @@ export const openApiSpec = {
     },
     '/api/admin/sku-presets/{id}': {
       delete: {
-        tags: ['admin'],
+        tags: ['admin-config'],
         summary: 'SKU 프리셋 삭제',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
@@ -1381,7 +1502,7 @@ export const openApiSpec = {
     // ── Admin - Export Jobs ─────────────────────────────────────────────
     '/api/admin/export-jobs': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-export'],
         summary: '익스포트 작업 목록 (최근 200건)',
         responses: {
           200: { description: '목록', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'array', items: { type: 'object' } } } } } } },
@@ -1389,7 +1510,7 @@ export const openApiSpec = {
         },
       },
       post: {
-        tags: ['admin'],
+        tags: ['admin-export'],
         summary: '익스포트 작업 upsert',
         description: '> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -1404,7 +1525,7 @@ export const openApiSpec = {
     },
     '/api/admin/export-jobs/{id}': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-export'],
         summary: '익스포트 작업 상세 조회',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
@@ -1413,7 +1534,7 @@ export const openApiSpec = {
         },
       },
       delete: {
-        tags: ['admin'],
+        tags: ['admin-export'],
         summary: '익스포트 작업 삭제',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
         responses: {
@@ -1424,7 +1545,7 @@ export const openApiSpec = {
     },
     '/api/admin/export-jobs/{id}/logs': {
       post: {
-        tags: ['admin'],
+        tags: ['admin-export'],
         summary: '익스포트 작업 로그 추가',
         description: '작업의 logs 배열에 로그 항목을 추가합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
@@ -1450,10 +1571,153 @@ export const openApiSpec = {
       },
     },
 
+    '/api/admin/inventory': {
+      get: {
+        tags: ['admin-export'],
+        summary: 'SKU별 인벤토리 조회',
+        description: '각 SKU별로 풀링 가능한 발화/세션 통계를 조회합니다.',
+        responses: {
+          200: {
+            description: '인벤토리 목록',
+            content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'array', items: { type: 'object' } } } } } },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    '/api/admin/export-requests/{id}/preview': {
+      get: {
+        tags: ['admin-export'],
+        summary: '익스포트 요청 미리보기',
+        description: '설정된 필터로 풀링 가능한 예상 수량 및 품질 분포를 확인합니다.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: {
+            description: '미리보기 결과',
+            content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object' } } } } },
+          },
+          404: { description: '요청 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    '/api/admin/export-requests/{id}/confirm': {
+      put: {
+        tags: ['admin-export'],
+        summary: '익스포트 요청 확정',
+        description: 'draft 상태의 요청을 queued 상태로 변경하여 프로세싱을 시작할 수 있게 합니다.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { description: '확정 성공', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object' } } } } } },
+          400: { description: '이미 처리 중이거나 완료됨', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    '/api/admin/export-requests/{id}/process': {
+      post: {
+        tags: ['admin-export'],
+        summary: '익스포트 프로세싱 실행',
+        description: 'BU 풀링, 발화 분할, 품질 분석을 실행하여 reviewing 상태로 전환합니다.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          202: { description: '프로세싱 시작', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object' } } } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    '/api/admin/export-requests/{id}/utterances': {
+      get: {
+        tags: ['admin-export'],
+        summary: '익스포트 발화 목록 조회',
+        description: '검수용 발화 목록과 서명된 오디오 URL을 조회합니다.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: {
+            description: '발화 목록',
+            content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'array', items: { type: 'object' } } } } } },
+          },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    '/api/admin/export-requests/{id}/utterances/review': {
+      put: {
+        tags: ['admin-export'],
+        summary: '발화 검수 결과 반영',
+        description: '선택된 발화들의 포함/제외 상태를 일괄 업데이트합니다 (비동기).\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['updates'],
+                properties: {
+                  updates: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      required: ['utteranceId', 'isIncluded'],
+                      properties: {
+                        utteranceId: { type: 'string' },
+                        isIncluded: { type: 'boolean' },
+                        excludeReason: { type: 'string', nullable: true },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          202: { description: '동기화 시작', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object' } } } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    '/api/admin/export-requests/{id}/finalize': {
+      post: {
+        tags: ['admin-export'],
+        summary: '익스포트 최종 확정 (패키징)',
+        description: '검수 완료된 발화들을 패키징하여 ready 상태로 전환합니다 (비동기).',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          202: { description: '패키징 시작', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object' } } } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
+    '/api/admin/export-requests/{id}/download': {
+      get: {
+        tags: ['admin-export'],
+        summary: '패키지 다운로드 URL 발급',
+        description: 'ready 상태인 패키지의 서명된 다운로드 URL을 반환합니다.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: {
+            description: '다운로드 정보',
+            content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object', properties: { downloadUrl: { type: 'string' }, expiresAt: { type: 'string' } } } } } } },
+          },
+          400: { description: '준비되지 않음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+
     // ── Admin - Billable Units ──────────────────────────────────────────
     '/api/admin/billable-units': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-billing'],
         summary: '청구 단위 조회 (전체 페이지네이션)',
         parameters: [
           { name: 'qualityGrade', in: 'query', schema: { type: 'string' }, description: '콤마 구분 복수값 가능' },
@@ -1470,7 +1734,7 @@ export const openApiSpec = {
         },
       },
       post: {
-        tags: ['admin'],
+        tags: ['admin-billing'],
         summary: '청구 단위 일괄 upsert',
         description: '배치당 500건씩 처리합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -1514,7 +1778,7 @@ export const openApiSpec = {
     },
     '/api/admin/billable-units/lock': {
       post: {
-        tags: ['admin'],
+        tags: ['admin-billing'],
         summary: '청구 단위 잠금 (작업 할당)',
         description: '지정된 단위들을 특정 작업에 잠급니다. `available` 상태인 단위만 잠깁니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -1556,7 +1820,7 @@ export const openApiSpec = {
     },
     '/api/admin/billable-units/unlock': {
       post: {
-        tags: ['admin'],
+        tags: ['admin-billing'],
         summary: '청구 단위 잠금 해제',
         description: '특정 작업에 잠긴 단위들을 다시 `available` 상태로 변경합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -1582,7 +1846,7 @@ export const openApiSpec = {
     },
     '/api/admin/billable-units/mark-delivered': {
       post: {
-        tags: ['admin'],
+        tags: ['admin-billing'],
         summary: '청구 단위 납품 완료 처리',
         description: '특정 작업에 잠긴 단위들을 `delivered` 상태로 변경합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -1610,7 +1874,7 @@ export const openApiSpec = {
     // ── Admin - Sessions & Transcripts ─────────────────────────────────
     '/api/admin/sessions': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-content'],
         summary: '전체 세션 조회 (어드민)',
         description: '사용자 필터 없이 전체 세션을 조회합니다. 다양한 필터를 조합할 수 있습니다.',
         parameters: [
@@ -1651,7 +1915,7 @@ export const openApiSpec = {
     },
     '/api/admin/transcripts': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-content'],
         summary: '전체 전사 데이터 조회 (어드민)',
         parameters: [
           { name: 'limit', in: 'query', schema: { type: 'integer', default: 500, maximum: 1000 } },
@@ -1692,7 +1956,7 @@ export const openApiSpec = {
     // ── Admin - Ledger Entries ──────────────────────────────────────────
     '/api/admin/ledger-entries': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-billing'],
         summary: '원장 항목 조회',
         description: '`user_asset_ledger` 테이블을 전체 페이지네이션으로 조회합니다.',
         parameters: [
@@ -1707,7 +1971,7 @@ export const openApiSpec = {
         },
       },
       post: {
-        tags: ['admin'],
+        tags: ['admin-billing'],
         summary: '원장 항목 일괄 upsert',
         description: '배치당 500건씩 처리합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -1751,7 +2015,7 @@ export const openApiSpec = {
     },
     '/api/admin/ledger-entries/update-status': {
       post: {
-        tags: ['admin'],
+        tags: ['admin-billing'],
         summary: '원장 항목 상태 일괄 변경',
         description: '여러 항목의 status를 한 번에 변경합니다. `confirmed` 시 `confirmed_at`, `withdrawable` 시 `withdrawable_at`, `paid` 시 `paid_at`이 자동 설정됩니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -1794,7 +2058,7 @@ export const openApiSpec = {
     },
     '/api/admin/ledger-entries/confirm-job': {
       post: {
-        tags: ['admin'],
+        tags: ['admin-billing'],
         summary: '익스포트 작업 정산 확정',
         description: '특정 export_job에 속한 `estimated` 상태의 원장 항목들을 `confirmed`로 변경하고, `totalPayment`를 `amount_high` 비율로 배분합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -1838,7 +2102,7 @@ export const openApiSpec = {
     // ── Admin - Delivery Records ─────────────────────────────────────────
     '/api/admin/delivery-records': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-billing'],
         summary: '납품 기록 조회',
         parameters: [
           { name: 'clientId', in: 'query', required: true, schema: { type: 'string' }, description: '클라이언트 ID (필수)' },
@@ -1850,7 +2114,7 @@ export const openApiSpec = {
         },
       },
       post: {
-        tags: ['admin'],
+        tags: ['admin-billing'],
         summary: '납품 기록 생성',
         description: 'BU ID 목록을 특정 클라이언트/익스포트 작업에 납품 기록으로 등록합니다. 배치당 500건 처리. `bu_id + client_id` 중복 시 무시(idempotent).\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -1897,7 +2161,7 @@ export const openApiSpec = {
 
     '/api/admin/reset-all': {
       delete: {
-        tags: ['admin'],
+        tags: ['admin-system'],
         summary: '전체 데이터 초기화',
         description:
           '⚠️ **위험** - sessions, export_jobs, billable_units, error_logs, funnel_events 테이블의 모든 데이터를 삭제합니다. 테스트 환경 전용.',
@@ -2344,7 +2608,7 @@ export const openApiSpec = {
     // ── Admin - Additional endpoints ─────────────────────────────────
     '/api/admin/users/stats': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-system'],
         summary: '사용자별 통계 (어드민)',
         description: '사용자별 세션 수, 총 시간, 평균 QA, 라벨 비율, 품질 분포를 조회합니다.',
         parameters: [
@@ -2392,7 +2656,7 @@ export const openApiSpec = {
     },
     '/api/admin/transcript-ids': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-content'],
         summary: '전사 보유 세션 ID 목록',
         description: '전사 데이터가 있는 세션 ID 목록을 반환합니다.',
         responses: {
@@ -2406,7 +2670,7 @@ export const openApiSpec = {
     },
     '/api/admin/transcripts/bulk': {
       post: {
-        tags: ['admin'],
+        tags: ['admin-content'],
         summary: '전사 데이터 일괄 조회',
         description: '세션 ID 목록으로 전사 데이터를 일괄 조회합니다. 배치당 500건.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -2455,7 +2719,7 @@ export const openApiSpec = {
     },
     '/api/admin/storage/wavs': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-content'],
         summary: '전체 WAV 파일 목록 (어드민)',
         description: 'sanitized-audio 버킷의 모든 WAV 파일을 반환합니다.',
         responses: {
@@ -2488,7 +2752,7 @@ export const openApiSpec = {
     },
     '/api/admin/storage/metas': {
       get: {
-        tags: ['admin'],
+        tags: ['admin-content'],
         summary: '전체 Meta JSONL 파일 목록 (어드민)',
         description: 'meta-jsonl 버킷의 모든 JSONL 파일을 반환합니다.',
         responses: {
@@ -2521,7 +2785,7 @@ export const openApiSpec = {
     },
     '/api/admin/storage/signed-url': {
       post: {
-        tags: ['admin'],
+        tags: ['admin-content'],
         summary: '서명 URL 발급 (어드민)',
         description: '어드민용 스토리지 서명 URL.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -2551,7 +2815,7 @@ export const openApiSpec = {
     },
     '/api/admin/session-chunks/batch-signed-urls': {
       post: {
-        tags: ['admin'],
+        tags: ['admin-content'],
         summary: '세션 청크 일괄 서명 URL',
         description: '세션 ID 목록으로 청크별 서명 URL을 일괄 발급합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
         requestBody: {
@@ -2600,7 +2864,7 @@ export const openApiSpec = {
     },
     '/api/admin/sync-audio-urls': {
       post: {
-        tags: ['admin'],
+        tags: ['admin-system'],
         summary: '오디오 URL 동기화',
         description: '스토리지를 스캔하여 sessions.audio_url이 NULL인 세션의 URL을 자동 설정합니다.',
         responses: {
@@ -2627,5 +2891,215 @@ export const openApiSpec = {
         },
       },
     },
+    '/api/admin/utterances/{id}/audio': {
+      get: {
+        tags: ['admin-content'],
+        summary: '발화 오디오 signed URL 발급',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { description: 'URL 발급 성공', content: { 'application/json': { schema: { type: 'object', properties: { signedUrl: { type: 'string' } } } } } },
+          404: { description: '발화 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/utterances/{id}/audio/stream': {
+      get: {
+        tags: ['admin-content'],
+        summary: '발화 오디오 스트림 (바이너리)',
+        description: 'Wavesurfer.js 등에서 CORS 우회 및 마스킹 즉시 반영 확인을 위해 오디오를 바이너리로 스트리밍합니다.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { description: '오디오 바이너리', content: { 'audio/wav': { schema: { type: 'string', format: 'binary' } } } },
+          404: { description: '발화 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/utterances/{id}/pii': {
+      get: {
+        tags: ['admin-content'],
+        summary: '발화 PII 데이터 조회',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { description: 'PII 데이터', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object' } } } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+      put: {
+        tags: ['admin-content'],
+        summary: '발화 PII 구간 수정',
+        description: '수동으로 검수한 PII 구간 정보를 저장합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['piiIntervals'],
+                properties: {
+                  piiIntervals: { type: 'array', items: { type: 'object' } },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: { description: '저장 성공', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object', properties: { ok: { type: 'boolean' } } } } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/utterances/{id}/review-status': {
+      patch: {
+        tags: ['admin-content'],
+        summary: '발화 검수 상태 즉시 업데이트',
+        description: '단건 발화의 포함/제외 상태를 즉시 DB에 저장합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['isIncluded'],
+                properties: {
+                  isIncluded: { type: 'boolean' },
+                  excludeReason: { type: 'string', nullable: true },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: { description: '업데이트 성공', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object' } } } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/utterances/{id}/preview-mask': {
+      get: {
+        tags: ['admin-content'],
+        summary: 'PII 마스킹 미리보기 오디오',
+        description: '실제 파일을 변경하지 않고 마스킹이 적용된 오디오를 실시간 생성하여 반환합니다.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { description: '마스킹된 오디오 바이너리', content: { 'audio/wav': { schema: { type: 'string', format: 'binary' } } } },
+          400: { description: '구간 정보 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/utterances/{id}/apply-mask': {
+      post: {
+        tags: ['admin-content'],
+        summary: 'PII 마스킹 실행 (파일 변경)',
+        description: 'S3 원본 파일을 마스킹 처리된 파일로 덮어씁니다 (원본은 original/ 경로로 백업됨).\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  maskType: { type: 'string', enum: ['beep', 'silence'], default: 'beep' },
+                  jobId: { type: 'string', description: '타임라인 로그 기록용 Job ID' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: { description: '마스킹 적용 성공', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object' } } } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/utterances/{id}/original-backup': {
+      get: {
+        tags: ['admin-content'],
+        summary: '원본 백업 존재 여부 확인',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { description: '조회 성공', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object', properties: { hasBackup: { type: 'boolean' } } } } } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/utterances/{id}/restore-original': {
+      post: {
+        tags: ['admin-content'],
+        summary: '원본 파일로 복원',
+        description: '마스킹된 파일을 삭제하고 original/ 백업 파일로 복구합니다.',
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: { description: '복원 성공', content: { 'application/json': { schema: { $ref: '#/components/schemas/Success' } } } },
+          404: { description: '백업 없음', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/admin/utterances/labels': {
+      post: {
+        tags: ['admin-content'],
+        summary: '발화 라벨 일괄 업데이트',
+        description: '선택한 여러 발화의 labels와 label_source를 일괄 변경합니다.\n\n> ⚠️ 요청 바디는 AES-256-GCM 암호화 필요',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['utteranceIds', 'labels'],
+                properties: {
+                  utteranceIds: { type: 'array', items: { type: 'string' } },
+                  labels: { type: 'object' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: { description: '업데이트 성공', content: { 'application/json': { schema: { type: 'object', properties: { data: { type: 'object', properties: { updated: { type: 'integer' } } } } } } } },
+          401: { description: '인증 필요', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
+    '/api/upload': {
+      post: {
+        tags: ['upload'],
+        summary: '메타데이터 배치 업로드 (NDJSON)',
+        description: '클라이언트 큐에 쌓인 메타데이터(퍼널, 통계 등)를 NDJSON 포맷으로 한 번에 전송합니다.',
+        security: [{ BearerAuth: [] }, { CookieAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/x-ndjson': {
+              schema: { type: 'string', description: 'NDJSON 형식의 메타데이터 문자열' },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: '수신 결과',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    accepted: { type: 'integer' },
+                    duplicates: { type: 'integer' },
+                    parseErrors: { type: 'integer' },
+                  },
+                },
+              },
+            },
+          },
+          400: { description: '잘못된 형식', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+          413: { description: '용량 초과', content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } } },
+        },
+      },
+    },
   },
-} as const
+  },
+  } as const
+
