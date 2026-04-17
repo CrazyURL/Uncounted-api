@@ -174,6 +174,7 @@ adminUtterances.put('/utterances/:id/pii', async (c) => {
  */
 adminUtterances.patch('/utterances/:id/review-status', async (c) => {
   const utteranceId = c.req.param('id')
+  const userId = c.get('userId') as string
   const { isIncluded, excludeReason } = getBody<{
     isIncluded: boolean
     excludeReason?: string
@@ -184,12 +185,15 @@ adminUtterances.patch('/utterances/:id/review-status', async (c) => {
   }
 
   try {
+    const now = new Date().toISOString()
     const { error } = await supabaseAdmin
       .from('utterances')
       .update({
         review_status: isIncluded ? 'pending' : 'excluded',
         exclude_reason: isIncluded ? null : (excludeReason ?? 'manual'),
-        updated_at: new Date().toISOString(),
+        reviewed_at: now,
+        reviewed_by: userId,
+        updated_at: now,
       })
       .eq('id', utteranceId)
 
@@ -198,6 +202,60 @@ adminUtterances.patch('/utterances/:id/review-status', async (c) => {
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
+})
+
+/**
+ * PATCH /admin/utterances/review-status/batch
+ * 다건 검수 상태 일괄 저장 (벌크 선택/자동필터에서 호출)
+ * Body: { updates: Array<{ utteranceId: string, isIncluded: boolean, excludeReason?: string }> }
+ */
+adminUtterances.patch('/utterances/review-status/batch', async (c) => {
+  const userId = c.get('userId') as string
+  const { updates } = getBody<{
+    updates: Array<{ utteranceId: string; isIncluded: boolean; excludeReason?: string }>
+  }>(c)
+
+  if (!Array.isArray(updates) || updates.length === 0) {
+    return c.json({ error: 'updates must be a non-empty array' }, 400)
+  }
+
+  if (updates.length > 2000) {
+    return c.json({ error: 'Maximum 2000 updates per batch' }, 400)
+  }
+
+  const now = new Date().toISOString()
+  const failures: string[] = []
+
+  await Promise.all(
+    updates.map(async ({ utteranceId, isIncluded, excludeReason }) => {
+      try {
+        const { error } = await supabaseAdmin
+          .from('utterances')
+          .update({
+            review_status: isIncluded ? 'pending' : 'excluded',
+            exclude_reason: isIncluded ? null : (excludeReason ?? 'manual'),
+            reviewed_at: now,
+            reviewed_by: userId,
+            updated_at: now,
+          })
+          .eq('id', utteranceId)
+
+        if (error) failures.push(utteranceId)
+      } catch {
+        failures.push(utteranceId)
+      }
+    })
+  )
+
+  return c.json({
+    data: {
+      ok: failures.length === 0,
+      total: updates.length,
+      succeeded: updates.length - failures.length,
+      failed: failures.length,
+      failures,
+    },
+  })
 })
 
 /**

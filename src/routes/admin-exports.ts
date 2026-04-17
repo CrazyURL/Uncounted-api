@@ -681,6 +681,8 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
             isIncluded: u.review_status !== 'excluded',
             reviewStatus: u.review_status,
             excludeReason: u.exclude_reason,
+            reviewedAt: u.reviewed_at,
+            reviewedBy: u.reviewed_by,
             transcriptText: u.transcript_text,
             piiIntervals: u.pii_intervals ?? [],
             piiReviewedAt: u.pii_reviewed_at,
@@ -731,6 +733,8 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
           isIncluded: true,
           reviewStatus: undefined,
           excludeReason: undefined,
+          reviewedAt: undefined,
+          reviewedBy: undefined,
           transcriptText: undefined,
           audioUrl: signedUrl ?? undefined,
           signedUrl,
@@ -761,9 +765,11 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
 async function runReviewInBackground(
   jobId: string,
   updates: Array<{ utteranceId: string; isIncluded: boolean; excludeReason?: string }>,
+  adminUserId: string | null,
 ): Promise<void> {
   try {
     const includedIds = updates.filter((u) => u.isIncluded).map((u) => u.utteranceId)
+    const now = new Date().toISOString()
 
     // 제외 발화를 reason별로 그룹화
     const excludedByReason = new Map<string, string[]>()
@@ -780,7 +786,12 @@ async function runReviewInBackground(
     if (includedIds.length > 0) {
       const { error } = await supabaseAdmin
         .from('utterances')
-        .update({ review_status: 'pending', exclude_reason: null })
+        .update({
+          review_status: 'pending',
+          exclude_reason: null,
+          reviewed_at: now,
+          reviewed_by: adminUserId,
+        })
         .in('id', includedIds)
       if (error) {
         console.warn(`[review bg] job=${jobId} included v3 batch error: ${error.message}`)
@@ -790,7 +801,12 @@ async function runReviewInBackground(
     for (const [reason, ids] of excludedByReason) {
       const { error } = await supabaseAdmin
         .from('utterances')
-        .update({ review_status: 'excluded', exclude_reason: reason })
+        .update({
+          review_status: 'excluded',
+          exclude_reason: reason,
+          reviewed_at: now,
+          reviewed_by: adminUserId,
+        })
         .in('id', ids)
       if (error) {
         console.warn(`[review bg] job=${jobId} excluded(${reason}) v3 batch error: ${error.message}`)
@@ -878,8 +894,10 @@ adminExports.put('/export-requests/:id/utterances/review', async (c) => {
       })
       .eq('id', id)
 
+    const userId = c.get('userId') as string | null
+
     // 백그라운드에서 일괄 업데이트 실행 (완료 시 review_sync_status → done)
-    void runReviewInBackground(id, updates)
+    void runReviewInBackground(id, updates, userId)
 
     // 즉시 202 Accepted 반환 — Cloudflare 524 회피
     // 클라이언트는 review_sync_status 폴링으로 완료 확인 후 finalize 호출
