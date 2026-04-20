@@ -25,6 +25,11 @@ const SKU_REQUIRES_LABELS: Record<string, boolean> = {
   'U-A02': true,
 }
 
+// 발화 WAV 재생용 signed URL TTL.
+// 검수 화면을 장시간 열어둔 채로도 재생 버튼이 만료되지 않도록 S3 SigV4 최대값(7일)을 사용한다.
+// 트레이드오프: URL 유출 시 최대 7일간 유효. 어드민 전용 라우트 + 사전 인증 필수이므로 수용 가능.
+const UTTERANCE_SIGNED_URL_TTL_SEC = 604800
+
 // 모든 라우트에 인증 + 관리자 권한 필수
 adminExports.use('/*', authMiddleware)
 adminExports.use('/*', adminMiddleware)
@@ -655,7 +660,7 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
           let signedUrl: string | null = null
           if (u.storage_path) {
             try {
-              signedUrl = await getSignedUrl(S3_AUDIO_BUCKET, u.storage_path, 600)
+              signedUrl = await getSignedUrl(S3_AUDIO_BUCKET, u.storage_path, UTTERANCE_SIGNED_URL_TTL_SEC)
             } catch {
               // ignore
             }
@@ -712,7 +717,7 @@ adminExports.get('/export-requests/:id/utterances', async (c) => {
         if (u.utterance_id && u.session_id) {
           try {
             const s3Key = `utterances/${u.session_id}/${u.utterance_id}.wav`
-            signedUrl = await getSignedUrl(S3_AUDIO_BUCKET, s3Key, 600)
+            signedUrl = await getSignedUrl(S3_AUDIO_BUCKET, s3Key, UTTERANCE_SIGNED_URL_TTL_SEC)
           } catch {
             // ignore — URL generation may fail for missing files
           }
