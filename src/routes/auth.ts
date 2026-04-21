@@ -241,21 +241,33 @@ auth.get('/me', async (c) => {
  */
 auth.post('/refresh', async (c) => {
   const body = getBody<{ refresh_token?: string }>(c)
+  const cookieRefresh = getCookie(c, 'uncounted_refresh')
+  const bodyToken = body.refresh_token
+  console.log('[refresh]', {
+    has_body_token: !!bodyToken,
+    body_token_has_suffix: bodyToken?.endsWith('@enc_uncounted') ?? false,
+    body_token_len: bodyToken?.length ?? 0,
+    body_token_tail: bodyToken ? bodyToken.slice(-16) : null,
+    has_cookie: !!cookieRefresh,
+    ua: c.req.header('User-Agent')?.slice(0, 60),
+  })
 
   // body의 refresh_token은 클라이언트가 encryptId()로 암호화해 저장한 값이므로 복호화 필요.
   // 쿠키의 uncounted_refresh는 setAuthCookies()가 raw Supabase 토큰을 직접 저장하므로 그대로 사용.
   let raw_refresh_token: string | undefined
-  if (body.refresh_token) {
+  if (bodyToken) {
     try {
-      raw_refresh_token = decryptId(body.refresh_token)
-    } catch {
+      raw_refresh_token = decryptId(bodyToken)
+    } catch (err: any) {
+      console.warn('[refresh] 400 decrypt_throw', { msg: err?.message })
       return c.json({ error: 'Invalid refresh token format' }, 400)
     }
   } else {
-    raw_refresh_token = getCookie(c, 'uncounted_refresh')
+    raw_refresh_token = cookieRefresh
   }
 
   if (!raw_refresh_token) {
+    console.warn('[refresh] 400 missing_token')
     return c.json({ error: 'Refresh token is required' }, 400)
   }
 
