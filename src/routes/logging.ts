@@ -103,4 +103,57 @@ logging.post('/errors', async (c) => {
   }
 })
 
+/**
+ * POST /logging/upload-blocked
+ * 동의 게이팅 컴플라이언스: 업로드 차단 로그
+ *
+ * uploadSanitizedAudio() 가드가 동의 미충족으로 WAV 업로드를 차단했을 때
+ * 운영 추적용 로그 1건씩 또는 batch로 수신.
+ *
+ * Body: { logs: [{ session_id, consent_status, visibility_status,
+ *                  block_reason, attempted_at, metadata }] }
+ *
+ * block_reason 허용값: 'consent_locked' | 'visibility_private' | 'diarization_pending'
+ */
+logging.post('/upload-blocked', async (c) => {
+  const { logs } = getBody<{ logs: any[] }>(c)
+
+  if (!Array.isArray(logs) || logs.length === 0) {
+    return c.json({ error: 'Logs array is required' }, 400)
+  }
+
+  const userId = (c.get('userId') as string | undefined) ?? null
+
+  try {
+    const rows = logs.map((e) => ({
+      user_id: userId,
+      session_id: e.session_id ?? null,
+      consent_status: e.consent_status ?? null,
+      visibility_status: e.visibility_status ?? null,
+      block_reason: e.block_reason,
+      attempted_at: e.attempted_at ?? new Date().toISOString(),
+      metadata: e.metadata ?? null,
+    }))
+
+    const { error } = await supabaseAdmin
+      .from('upload_block_logs')
+      .insert(rows)
+
+    if (error) {
+      console.error('upload_block_logs insert error:', error)
+      return c.json({ error: 'Internal Server Error' }, 500)
+    }
+
+    return c.json({
+      data: {
+        count: rows.length,
+        success: true,
+      },
+    })
+  } catch (err: any) {
+    console.error('upload-blocked handler error:', err)
+    return c.json({ error: 'Internal Server Error' }, 500)
+  }
+})
+
 export default logging
