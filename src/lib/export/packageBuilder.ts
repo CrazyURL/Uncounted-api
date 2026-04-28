@@ -107,7 +107,10 @@ export interface LabelsSummary {
   labeledUtterances: number
   labelCoverage: number
   labelDistribution: Record<string, Record<string, number>>
-  labelSources: { user_confirmed: number; auto_suggested: number; none: number }
+  // 동적 카운터: 'user_confirmed', 'auto_suggested', 'admin', 'auto', 'user', 'multi_confirmed', 'none' 등
+  // 모든 label_source 값을 누적. 하드코딩된 키 집합으로는 'admin' 같은 신규 값을 'none'으로
+  // 잘못 흡수하는 버그(Bug 2)가 발생하므로 Record로 변경.
+  labelSources: Record<string, number>
 }
 
 export interface DialogActSummary {
@@ -408,6 +411,16 @@ async function _buildPackageInner(
   }
 
   // Build manifest
+  // Bug 4 fix: speakerCount는 distinct `speaker_id` (SPEAKER_00, SPEAKER_01 등) 기준으로
+  // 집계해야 함. 이전에는 `pseudoId ?? sessionId` 기준으로 집계해 한 세션에 여러 화자가
+  // 있어도 1로 카운트되던 버그가 있었음.
+  const distinctSpeakerIds = new Set<string>()
+  for (const m of metaLines) {
+    if (m.speaker_id) distinctSpeakerIds.add(m.speaker_id)
+  }
+  const manifestSpeakerCount =
+    distinctSpeakerIds.size > 0 ? distinctSpeakerIds.size : speakerMap.size
+
   const manifest: PackageManifest = {
     sku: skuId,
     version: '1.0',
@@ -415,7 +428,7 @@ async function _buildPackageInner(
     client: clientName,
     totalDurationHours: Math.round((totalDurationSec / 3600) * 100) / 100,
     utteranceCount: utterances.length,
-    speakerCount: speakerMap.size,
+    speakerCount: manifestSpeakerCount,
     format: { sampleRate: 16000, bitDepth: 16, channels: 1, encoding: 'PCM' },
     license: 'Uncounted Data License v1',
     consentLevel: 'both_agreed',
@@ -746,22 +759,23 @@ function buildLabelsSummary(
   utterances: Record<string, unknown>[],
 ): LabelsSummary {
   const labelDistribution: Record<string, Record<string, number>> = {}
-  const labelSources = { user_confirmed: 0, auto_suggested: 0, none: 0 }
+  const labelSources: Record<string, number> = {}
   let labeledUtterances = 0
 
   for (const utt of utterances) {
     const labels = utt.labels as Record<string, unknown> | null
     if (!labels) {
-      labelSources.none++
+      labelSources.none = (labelSources.none ?? 0) + 1
       continue
     }
 
     labeledUtterances++
 
-    const labelSource = (utt.label_source as string) ?? null
-    if (labelSource === 'user_confirmed') labelSources.user_confirmed++
-    else if (labelSource === 'auto_suggested') labelSources.auto_suggested++
-    else labelSources.none++
+    // Bug 2 fix: 'admin', 'auto', 'user', 'multi_confirmed' 등 모든 label_source 값을
+    // 동적으로 카운트. 이전에는 'user_confirmed'/'auto_suggested'만 인식하고 나머지를
+    // 'none'으로 잘못 분류하던 버그가 있었음.
+    const labelSource = (utt.label_source as string) ?? 'none'
+    labelSources[labelSource] = (labelSources[labelSource] ?? 0) + 1
 
     for (const [key, value] of Object.entries(labels)) {
       if (!labelDistribution[key]) labelDistribution[key] = {}
@@ -789,20 +803,27 @@ function buildDialogActSummary(
   let labeledUtterances = 0
 
   for (const utt of utterances) {
-    const labels = utt.labels as Record<string, unknown> | null
-    if (!labels) continue
+    // Bug 3 fix: 이전에는 utt.labels JSONB 안의 'speech_act' / 'intensity' 키를 읽었으나,
+    // 실제 데이터는 utterances 테이블의 독립 컬럼 dialog_act / dialog_intensity에
+    // 저장됨 (labels JSONB에는 해당 키가 없음). 따라서 항상 빈 객체가 반환되던
+    // 버그가 있었음. 직접 컬럼 참조로 변경.
+    const dialogAct = (utt.dialog_act as string | null | undefined) ?? null
+    const dialogIntensityRaw = utt.dialog_intensity
+    const hasAnyDialogField = dialogAct != null || dialogIntensityRaw != null
+
+    if (!hasAnyDialogField) continue
 
     labeledUtterances++
 
-    if (labels.speech_act != null) {
-      const act = String(labels.speech_act)
+    if (dialogAct != null) {
+      const act = String(dialogAct)
       speechActDistribution[act] = (speechActDistribution[act] ?? 0) + 1
     }
 
-    if (labels.intensity != null) {
-      const intensityKey = String(labels.intensity)
+    if (dialogIntensityRaw != null) {
+      const intensityKey = String(dialogIntensityRaw)
       intensityDistribution[intensityKey] = (intensityDistribution[intensityKey] ?? 0) + 1
-      const numIntensity = Number(labels.intensity)
+      const numIntensity = Number(dialogIntensityRaw)
       if (!isNaN(numIntensity)) {
         intensitySum += numIntensity
         intensityCount++
@@ -833,4 +854,12 @@ async function downloadStreamFromS3(
   }
 
   return response.Body as Readable
+}
+
+// ── Test-only Exports ──────────────────────────────────────────────────
+// 회귀 테스트(packageBuilder.regression.test.ts)에서 internal builder 함수를
+// 직접 검증할 수 있도록 노출. 다른 위치에서 import하지 말 것.
+export const _testInternals = {
+  buildLabelsSummary,
+  buildDialogActSummary,
 }
