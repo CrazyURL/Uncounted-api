@@ -27,6 +27,9 @@ export interface PackageManifest {
   version: string
   exportDate: string
   client: string
+  /** 원본 초 단위 (반올림 없음) — 정밀도 검증용 */
+  totalDurationSec: number
+  /** 시간 단위 — 4자리 반올림 (이전 2자리에서 정밀도 강화: Bug 5 fix, 2026-04-29) */
   totalDurationHours: number
   utteranceCount: number
   speakerCount: number
@@ -38,6 +41,8 @@ export interface PackageManifest {
   }
   license: string
   consentLevel: string
+  /** v1.3 5.3 — 세그먼트 앞뒤 padding (밀리초). 자연스러운 호흡 보존 + 자음 잘림 방지. */
+  segmentPaddingMs: number
 }
 
 export interface QualitySummary {
@@ -352,16 +357,27 @@ async function _buildPackageInner(
     if (speechRatio != null) { speechRatioSum += speechRatio; speechRatioCount++ }
     if (qaScore != null) { qaScoreSum += qaScore; qaScoreCount++ }
 
-    // Speaker demographics
-    const speakerKey = pseudoId ?? sessionId
-    const existing = speakerMap.get(speakerKey) ?? { count: 0, durationSec: 0 }
+    // Speaker demographics (Bug 6 fix, 2026-04-29):
+    //  - owner 발화(is_user=true)만 owner pseudoId에 집계 → demographics와 길이 정합
+    //  - 상대방 발화(is_user=false)는 speaker_id별 익명 화자로 분리 (demographics 없음)
+    //  - 이전: pseudoId 기준 모든 발화 합산 → owner+상대 발화 시간이 owner 통계로 흘러
+    //          speaker_demographics와 utterance 합산 길이 불일치 발생
+    const isUser = (utt.is_user as boolean | null) ?? null
+    const speakerId = (utt.speaker_id as string | null) ?? null
     const demo = userDemoMap.get(utt.user_id as string)
+
+    const speakerKey =
+      isUser === false
+        ? `${sessionId}::${speakerId ?? 'unknown'}` // 상대방 — 세션별 speaker_id 분리
+        : pseudoId ?? sessionId                       // owner 또는 미판정 — pseudoId 기준
+    const existing = speakerMap.get(speakerKey) ?? { count: 0, durationSec: 0 }
     speakerMap.set(speakerKey, {
       count: existing.count + 1,
       durationSec: existing.durationSec + durationSec,
-      ageBand: existing.ageBand ?? demo?.ageBand,
-      gender: existing.gender ?? demo?.gender,
-      regionGroup: existing.regionGroup ?? demo?.regionGroup,
+      // demographics는 owner 발화에만 부여 (상대방은 미수집 정보)
+      ageBand: existing.ageBand ?? (isUser !== false ? demo?.ageBand : undefined),
+      gender: existing.gender ?? (isUser !== false ? demo?.gender : undefined),
+      regionGroup: existing.regionGroup ?? (isUser !== false ? demo?.regionGroup : undefined),
     })
 
     // Fill metrics from quality metrics table if not on item itself
@@ -426,12 +442,15 @@ async function _buildPackageInner(
     version: '1.0',
     exportDate: today,
     client: clientName,
-    totalDurationHours: Math.round((totalDurationSec / 3600) * 100) / 100,
+    // Bug 5 fix (2026-04-29): 원본 초 보존 + 4자리 반올림으로 역산 오차 해소
+    totalDurationSec: Math.round(totalDurationSec * 100) / 100,
+    totalDurationHours: Math.round((totalDurationSec / 3600) * 10000) / 10000,
     utteranceCount: utterances.length,
     speakerCount: manifestSpeakerCount,
     format: { sampleRate: 16000, bitDepth: 16, channels: 1, encoding: 'PCM' },
     license: 'Uncounted Data License v1',
     consentLevel: 'both_agreed',
+    segmentPaddingMs: 250, // v1.3 5.3 채택 (utteranceSegmentationService 적용)
   }
 
   // Build quality summary

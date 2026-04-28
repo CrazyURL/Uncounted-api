@@ -19,6 +19,7 @@ import adminExports from './routes/admin-exports.js'
 import adminLedger from './routes/admin-ledger.js'
 import adminUtterances from './routes/admin-utterances.js'
 import logging from './routes/logging.js'
+import consent from './routes/consent.js'
 import transcripts from './routes/transcripts.js'
 import transcriptChunks from './routes/transcriptChunks.js'
 import sessionChunks from './routes/sessionChunks.js'
@@ -97,6 +98,7 @@ app.route('/api/admin', adminExports)
 app.route('/api/admin', adminLedger)
 app.route('/api/admin', adminUtterances)
 app.route('/api/logging', logging)
+app.route('/api/consent', consent)
 app.route('/api/transcripts', transcripts)
 app.route('/api/transcript-chunks', transcriptChunks)
 app.route('/api/session-chunks', sessionChunks)

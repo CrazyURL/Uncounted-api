@@ -23,6 +23,12 @@ import { supabaseAdmin } from '../supabase.js'
 const MIN_UTTERANCE_SEC = 5
 const MAX_UTTERANCE_SEC = 30
 
+// v1.3 5.3 Segment Padding (Option A 게이트 C+, 2026-04-29):
+//   화자분리·VAD 타임스탬프는 음성 활동 기준으로 잡혀 단어 첫 자음/끝 숨소리가 잘림.
+//   업계 표준 250ms를 앞뒤에 추가하여 자연스러운 경계 확보.
+//   세그먼트 합산은 원본보다 3~8% 길어지지만 AI 학습 데이터로는 표준 관행.
+const SEGMENT_PADDING_SEC = 0.25
+
 export interface SegmentationOptions {
   silenceThreshold?: string   // default '-40dB'
   minSilenceDuration?: number // default 0.5s
@@ -106,12 +112,16 @@ export async function segmentSession(
 
     for (let i = 0; i < final.length; i++) {
       const { start, end } = final[i]
-      const durationSec = Math.round((end - start) * 100) / 100
+      // v1.3 padding: 앞뒤 250ms 추가 (자연스러운 호흡·자음 보존)
+      // 시작 0초 미만 보정. 끝은 ffmpeg가 EOF 도달 시 자동 종료하므로 over-shoot OK.
+      const paddedStart = Math.max(0, start - SEGMENT_PADDING_SEC)
+      const paddedEnd = end + SEGMENT_PADDING_SEC
+      const durationSec = Math.round((paddedEnd - paddedStart) * 100) / 100
       const utteranceId = buildUtteranceId(sessionId, i)
       const uttFileName = `${utteranceId}.wav`
       const localPath = join(workDir, uttFileName)
 
-      await extractSegment(processedPath, localPath, start, end)
+      await extractSegment(processedPath, localPath, paddedStart, paddedEnd)
 
       const fileSizeBytes = (await stat(localPath)).size
 
@@ -119,11 +129,12 @@ export async function segmentSession(
       const wavBuffer = await readFileAsBuffer(localPath)
       await uploadObject(S3_AUDIO_BUCKET, s3Key, wavBuffer, 'audio/wav')
 
+      // 메타데이터는 클립 실제 위치 (padded) 기준으로 기록 — 다운로드한 파일과 일치
       segments.push({
         utteranceId,
         utteranceIndex: i,
-        startSec: Math.round(start * 100) / 100,
-        endSec: Math.round(end * 100) / 100,
+        startSec: Math.round(paddedStart * 100) / 100,
+        endSec: Math.round(paddedEnd * 100) / 100,
         durationSec,
         storagePath: s3Key,
         fileSizeBytes,

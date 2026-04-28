@@ -193,7 +193,9 @@ user.get('/voice-profile', async (c) => {
 
   const { data, error } = await supabaseAdmin
     .from('voice_profiles')
-    .select('enrollment_status, embeddings, reference_embedding, enrollment_count, min_enrollments, enrolled_at, updated_at')
+    .select(
+      'enrollment_status, embeddings, reference_embedding, enrollment_count, min_enrollments, enrolled_at, updated_at, origin_reference_embedding, origin_confirmed_at, drift_from_origin, drift_event_count, clean_calls, processed_calls',
+    )
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -213,6 +215,13 @@ user.get('/voice-profile', async (c) => {
       minEnrollments: data.min_enrollments,
       enrolledAt: data.enrolled_at ?? null,
       updatedAt: data.updated_at ?? null,
+      // Origin Anchor (마이그레이션 042, 2026-04-29)
+      originReferenceEmbedding: data.origin_reference_embedding ?? null,
+      originConfirmedAt: data.origin_confirmed_at ?? null,
+      driftFromOrigin: data.drift_from_origin ?? null,
+      driftEventCount: data.drift_event_count ?? 0,
+      cleanCalls: data.clean_calls ?? 0,
+      processedCalls: data.processed_calls ?? 0,
     },
   })
 })
@@ -230,6 +239,9 @@ user.put('/voice-profile', async (c) => {
     minEnrollments: number
     enrolledAt: string | null
     updatedAt: string | null
+    // Origin Anchor (선택 — 신규 enrollment 시 origin도 함께 전달)
+    originReferenceEmbedding?: unknown[] | null
+    originConfirmedAt?: string | null
   }
 
   if (body.enrollmentStatus !== 'enrolled') {
@@ -244,7 +256,25 @@ user.put('/voice-profile', async (c) => {
     return c.json({ error: 'referenceEmbedding: 최대 256개의 숫자 배열이어야 합니다' }, 400)
   }
 
+  // Origin Anchor 보호: 기존 origin이 있으면 절대 덮어쓰지 않음 (이탈 감지의 기준선)
+  const { data: existing } = await supabaseAdmin
+    .from('voice_profiles')
+    .select('origin_reference_embedding, origin_confirmed_at')
+    .eq('user_id', userId)
+    .maybeSingle()
+
   const now = new Date().toISOString()
+  const hasExistingOrigin = !!existing?.origin_reference_embedding
+
+  // 최초 enrollment 시에만 origin 설정. 이후 PUT은 origin 컬럼 미변경.
+  const originUpdate = hasExistingOrigin
+    ? {}
+    : {
+        origin_reference_embedding:
+          body.originReferenceEmbedding ?? body.referenceEmbedding,
+        origin_confirmed_at: body.originConfirmedAt ?? now,
+      }
+
   const { error } = await supabaseAdmin
     .from('voice_profiles')
     .upsert(
@@ -258,6 +288,7 @@ user.put('/voice-profile', async (c) => {
         enrolled_at: body.enrolledAt,
         updated_at: now,
         created_at: now,
+        ...originUpdate,
       },
       { onConflict: 'user_id' },
     )
