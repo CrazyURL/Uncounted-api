@@ -159,7 +159,8 @@ COMMENT ON COLUMN user_reward_log.fiscal_year IS
 -- ──────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS kept_data_pool (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  utterance_id        UUID NOT NULL REFERENCES utterances(id) ON DELETE CASCADE,
+  -- utterances.id는 TEXT (encryptId 패턴, migrations/026 정의). UUID 아님.
+  utterance_id        TEXT NOT NULL REFERENCES utterances(id) ON DELETE CASCADE,
   user_id             UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
 
   -- 이월 사유
@@ -272,17 +273,21 @@ COMMENT ON COLUMN operating_cost_quarterly.speaker_pool_krw IS
 -- ──────────────────────────────────────────────────────────────────────
 -- 6. RLS (Row Level Security) — 사용자는 본인 데이터만 조회
 -- ──────────────────────────────────────────────────────────────────────
+-- POLICY는 IF NOT EXISTS 미지원 — 사전 DROP으로 idempotent 보장 (재실행 안전)
 ALTER TABLE version_contributors ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS version_contributors_self_select ON version_contributors;
 CREATE POLICY version_contributors_self_select
   ON version_contributors FOR SELECT
   USING (auth.uid() = user_id);
 
 ALTER TABLE user_reward_log ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS user_reward_log_self_select ON user_reward_log;
 CREATE POLICY user_reward_log_self_select
   ON user_reward_log FOR SELECT
   USING (auth.uid() = user_id);
 
 ALTER TABLE kept_data_pool ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS kept_data_pool_self_select ON kept_data_pool;
 CREATE POLICY kept_data_pool_self_select
   ON kept_data_pool FOR SELECT
   USING (auth.uid() = user_id);
@@ -290,11 +295,13 @@ CREATE POLICY kept_data_pool_self_select
 -- data_versions / operating_cost_quarterly 는 공개 정보 (분배 알고리즘 + 운영비 결산 공개 의무)
 -- → RLS 활성화 + SELECT 모두 허용 (anon 포함)
 ALTER TABLE data_versions ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS data_versions_public_select ON data_versions;
 CREATE POLICY data_versions_public_select
   ON data_versions FOR SELECT
   USING (TRUE);
 
 ALTER TABLE operating_cost_quarterly ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS opcost_public_select ON operating_cost_quarterly;
 CREATE POLICY opcost_public_select
   ON operating_cost_quarterly FOR SELECT
   USING (published_at IS NOT NULL);  -- 공개된 결산만 조회 가능
