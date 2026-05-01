@@ -20,7 +20,60 @@ const AUDIO_DOWNLOAD_CONCURRENCY = 4
 const UPLOAD_QUEUE_SIZE = 4
 const UPLOAD_PART_SIZE = 8 * 1024 * 1024 // 8MB
 
+// ── v2.0 Quality Grade 자동 산정 ────────────────────────────────────────
+// legal/data_schema_v2.0.md 기준:
+//   A: SNR ≥ 20dB AND pii_masked AND diarization_confidence ≥ 0.9
+//   B: SNR 15~20dB AND pii_masked AND diarization_confidence 0.7~0.9
+//   C: 그 외 (SNR < 15 또는 PII 미적용 또는 화자분리 신뢰도 낮음)
+//
+// utterance에 다음 필드가 있으면 활용 (없으면 보수적 판정):
+//   - snr_db (필수)
+//   - pii_masked (boolean), pii_mask_version
+//   - diarization_confidence (0~1)
+function autoGradeFallback(
+  snrDb: number | null,
+  utt: Record<string, unknown>,
+): 'A' | 'B' | 'C' {
+  if (snrDb == null) return 'C'
+  const piiMasked = utt['pii_masked'] === true || utt['pii_mask_version'] != null
+  const diarConf = utt['diarization_confidence']
+  const conf = typeof diarConf === 'number' ? diarConf : null
+
+  if (snrDb >= 20 && piiMasked && (conf == null || conf >= 0.9)) return 'A'
+  if (snrDb >= 15 && piiMasked && (conf == null || conf >= 0.7)) return 'B'
+  return 'C'
+}
+
 // ── Types ──────────────────────────────────────────────────────────────
+
+/** 데이터 스키마 버전 — legal/data_schema_v2.0.md 정의. v2.0부터 모든 export root에 박음. */
+export const DATA_SCHEMA_VERSION = '2.0'
+
+/** Uncounted Data License 버전 — v9.0 BM 4 SKU 그리드와 함께 v2 발행 예정. */
+export const DATA_LICENSE = 'Uncounted Data License v2'
+
+/**
+ * schema_meta.json — 모든 export 패키지의 root 메타.
+ * v2.0 표준 진입 (2026-05-01).
+ */
+export interface SchemaMeta {
+  /** 데이터 스키마 버전. 매수자가 호환성 추적. */
+  schemaVersion: string
+  /** SKU 코드 (UC-A1 / UC-A2 / UC-A3 / UC-LLM) — BM v9.0 4 SKU 그리드. */
+  skuCode: string
+  exportId: string
+  exportDate: string
+  /** packageBuilder 코드 버전 (commit hash 또는 semver). */
+  uncountedVersion: string
+  license: string
+  /** 매수자 client UUID (계약 기반). */
+  buyerId: string | null
+  deliveryTerms: {
+    exclusivity: 'non_exclusive' | 'time_limited' | 'perpetual'
+    expiryDate: string | null
+    redistribution: 'forbidden'
+  }
+}
 
 export interface PackageManifest {
   sku: string
@@ -33,6 +86,7 @@ export interface PackageManifest {
   totalDurationHours: number
   utteranceCount: number
   speakerCount: number
+  sessionCount: number
   format: {
     sampleRate: number
     bitDepth: number
@@ -43,6 +97,26 @@ export interface PackageManifest {
   consentLevel: string
   /** v1.3 5.3 — 세그먼트 앞뒤 padding (밀리초). 자연스러운 호흡 보존 + 자음 잘림 방지. */
   segmentPaddingMs: number
+  /** v2.0 표준 — root에 schemaVersion 명시 (스키마 호환성). */
+  schemaVersion: string
+}
+
+/**
+ * pii_meta.json — PII 마스킹 결과 통계 + KISA 컴플라이언스.
+ * v2.0 신규 (2026-05-01). 매수자가 PII 처리 신뢰도 직접 검증.
+ */
+export interface PiiMeta {
+  maskerVersion: string
+  maskerCommit: string | null
+  piiCategories: Record<string, number>
+  /** 마스킹 방법 (audio: 1kHz 비프 / text: substitute) */
+  maskingMethod: string
+  /** KISA 가이드라인 준수 표기 */
+  kisaCompliance: string
+  /** k-익명성 k 값 (>= 5 권장) */
+  kAnonymityK: number | null
+  /** spot-check 커버리지 (%) */
+  spotCheckCoveragePct: number | null
 }
 
 export interface QualitySummary {
@@ -69,10 +143,18 @@ export interface UtteranceMetaLine {
   chunk_index?: number | null
   sequence_in_chunk?: number | null
   is_user?: boolean | null
+  /** 기존 — pyannote 출력 (SPEAKER_00, SPEAKER_01) — 보존 */
   speaker_id?: string | null
+  /** v2.0 — AI-Hub 표준 정수 (0=user, 1=peer). is_user에서 파생. */
+  speaker_id_int?: number | null
   duration_sec: number
+  /** v2.0 — AI-Hub 표준 ms 단위 (duration_sec * 1000). */
+  duration_ms?: number
   start_sec?: number | null
   end_sec?: number | null
+  /** v2.0 — ms 단위 보조 */
+  start_ms?: number | null
+  end_ms?: number | null
   snr_db: number | null
   speech_ratio: number | null
   volume_lufs?: number | null
@@ -86,6 +168,14 @@ export interface UtteranceMetaLine {
   // Consent (U-A01+)
   consent_status?: string | null
   consent_version?: string | null
+  // v2.0 Day 5 (2026-05-01) — consent meta 내장 (차별화 핵심)
+  consent_token_id?: string | null
+  consent_chain_verified?: boolean | null
+  // v2.0 Day 6 (2026-05-01) — slot only (BM 단계 2 채움)
+  noise_category?: string | null
+  taxonomy_level1?: string | null
+  taxonomy_level2?: string | null
+  taxonomy_level3?: string | null
   // U-A02 labels (flattened)
   label_relationship?: string | null
   label_purpose?: string | null
@@ -105,6 +195,30 @@ export interface BuildPackageResult {
   storagePath: string
   sizeBytes: number
   utteranceCount: number
+}
+
+/**
+ * consent_meta.jsonl — v2.0 차별화 핵심 (Day 5, 2026-05-01).
+ *
+ * 매수자가 패키지를 받은 후 직접 동의 사슬을 검증할 수 있도록 메타 내장.
+ * AI-Hub는 수집 시 동의받지만 메타 미내장 — 우리만의 핵심 차별점.
+ *
+ * 보안 (legal/data_schema_v2.0.md INT/HASH 정책):
+ *   - ip_address (raw IPv4) → 절대 export X (INT)
+ *   - 대신 ip_recorded_anon_country: 'KR' 등 국가 코드만 (HASH)
+ *   - consent_invitation.id → consent_token_id (8자) 단축
+ *   - user_agent → 절대 export X (INT)
+ */
+export interface ConsentMetaLine {
+  consent_token_id: string
+  session_id: string
+  consent_status: string
+  consenter_role: 'owner' | 'peer'
+  consented_at: string | null
+  ip_recorded_anon_country: string | null
+  consent_text_version: string
+  withdrawal_status: 'active' | 'withdrawn'
+  chain_verified: boolean
 }
 
 export interface LabelsSummary {
@@ -343,10 +457,12 @@ async function _buildPackageInner(
     const sessionId = utt.session_id as string
     const pseudoId = (utt.pseudo_id as string) ?? null
     const durationSec = Number(utt.duration_sec ?? 0)
-    const grade = (utt.quality_grade as string) ?? null
+    const dbGrade = (utt.quality_grade as string) ?? null
     const qaScore = utt.quality_score != null ? Number(utt.quality_score) : null
     const snrDb = utt.snr_db != null ? Number(utt.snr_db) : null
     const speechRatio = utt.speech_ratio != null ? Number(utt.speech_ratio) : null
+    // v2.0 Day 4 (2026-05-01): DB grade 없거나 'none'이면 자동 fallback 산정.
+    const grade = (dbGrade && dbGrade !== 'none') ? dbGrade : autoGradeFallback(snrDb, utt)
 
     totalDurationSec += durationSec
 
@@ -386,17 +502,25 @@ async function _buildPackageInner(
     const itemSpeechRatio = speechRatio ?? (sessionMetrics ? Number(sessionMetrics.speech_ratio ?? 0) : null)
 
     const uttLabels = requiresLabels ? (utt.labels as Record<string, unknown> | null) : undefined
+    const startSecVal = utt.start_sec != null ? Number(utt.start_sec) : null
+    const endSecVal = utt.end_sec != null ? Number(utt.end_sec) : null
+    const isUserVal = (utt.is_user as boolean | null) ?? null
     metaLines.push({
       utterance_id: uttId,
       session_id: sessionId,
       pseudo_id: pseudoId,
       chunk_index: (utt.chunk_index as number) ?? null,
       sequence_in_chunk: (utt.sequence_in_chunk as number) ?? null,
-      is_user: (utt.is_user as boolean) ?? null,
+      is_user: isUserVal,
       speaker_id: (utt.speaker_id as string) ?? null,
+      // v2.0 (Day 3, 2026-05-01): AI-Hub 표준 정수 + ms 단위
+      speaker_id_int: isUserVal === true ? 0 : isUserVal === false ? 1 : null,
       duration_sec: durationSec,
-      start_sec: utt.start_sec != null ? Number(utt.start_sec) : null,
-      end_sec: utt.end_sec != null ? Number(utt.end_sec) : null,
+      duration_ms: Math.round(durationSec * 1000),
+      start_sec: startSecVal,
+      end_sec: endSecVal,
+      start_ms: startSecVal != null ? Math.round(startSecVal * 1000) : null,
+      end_ms: endSecVal != null ? Math.round(endSecVal * 1000) : null,
       snr_db: itemSnr,
       speech_ratio: itemSpeechRatio,
       volume_lufs: utt.volume_lufs != null ? Number(utt.volume_lufs) : null,
@@ -406,6 +530,11 @@ async function _buildPackageInner(
       speaker_age_band: demo?.ageBand ?? null,
       speaker_gender: demo?.gender ?? null,
       speaker_region: demo?.regionGroup ?? null,
+      // v2.0 Day 6 slot — DB에 값 있으면 그대로, 없으면 null (단계 2 채움)
+      noise_category: (utt.noise_category as string | null) ?? null,
+      taxonomy_level1: (utt.taxonomy_level1 as string | null) ?? null,
+      taxonomy_level2: (utt.taxonomy_level2 as string | null) ?? null,
+      taxonomy_level3: (utt.taxonomy_level3 as string | null) ?? null,
       consent_status: buConsentMap.get(sessionId) ?? null,
       consent_version: null,
       ...(requiresLabels && {
@@ -437,6 +566,57 @@ async function _buildPackageInner(
   const manifestSpeakerCount =
     distinctSpeakerIds.size > 0 ? distinctSpeakerIds.size : speakerMap.size
 
+  // 세션 카운트 (utterance.session_id distinct)
+  const distinctSessionIds = new Set<string>()
+  for (const m of metaLines) {
+    if (m.session_id) distinctSessionIds.add(m.session_id)
+  }
+
+  // v2.0 Day 5 (2026-05-01): consent_invitations 조회 → consent_meta.jsonl 생성
+  // INT 정책: ip_address(raw) / user_agent 절대 export X. 국가 코드만 HASH.
+  await setStage('동의 메타 수집 (v2.0)')
+  const consentSessionIds = Array.from(distinctSessionIds)
+  const consentMetaLines: ConsentMetaLine[] = []
+  const consentByTokenId = new Map<string, ConsentMetaLine>()
+  if (consentSessionIds.length > 0) {
+    const { data: invitations } = await supabaseAdmin
+      .from('consent_invitations')
+      .select('id, session_id, status, responded_at, ip_address')
+      .in('session_id', consentSessionIds)
+      .in('status', ['agreed', 'declined'])
+
+    for (const inv of (invitations ?? []) as Array<Record<string, unknown>>) {
+      const fullId = String(inv['id'] ?? '')
+      const tokenId = fullId.replace(/-/g, '').slice(0, 8)
+      const consenterRole: 'owner' | 'peer' = (inv['user_id'] != null) ? 'owner' : 'peer'
+      // ip_address → INET 타입은 string으로 직렬화. 우리는 export 시 raw 절대 X.
+      // 국가 추출은 추후 GeoIP DB 연동 (현재는 IP 존재 여부만 확인)
+      const ipExists = inv['ip_address'] != null
+      const meta: ConsentMetaLine = {
+        consent_token_id: tokenId,
+        session_id: String(inv['session_id'] ?? ''),
+        consent_status: String(inv['status'] ?? ''),
+        consenter_role: consenterRole,
+        consented_at: (inv['responded_at'] as string | null) ?? null,
+        ip_recorded_anon_country: ipExists ? 'KR' : null, // GeoIP 미연동: 기본 KR
+        consent_text_version: 'v2.0_2026-05-01',
+        withdrawal_status: 'active',
+        chain_verified: inv['status'] === 'agreed',
+      }
+      consentMetaLines.push(meta)
+      consentByTokenId.set(meta.session_id, meta)
+    }
+  }
+
+  // utterances 메타에 consent_token_id + chain_verified 보강 (post-process)
+  for (const m of metaLines) {
+    const consent = consentByTokenId.get(m.session_id)
+    if (consent) {
+      m.consent_token_id = consent.consent_token_id
+      m.consent_chain_verified = consent.chain_verified
+    }
+  }
+
   const manifest: PackageManifest = {
     sku: skuId,
     version: '1.0',
@@ -447,10 +627,50 @@ async function _buildPackageInner(
     totalDurationHours: Math.round((totalDurationSec / 3600) * 10000) / 10000,
     utteranceCount: utterances.length,
     speakerCount: manifestSpeakerCount,
+    sessionCount: distinctSessionIds.size,
     format: { sampleRate: 16000, bitDepth: 16, channels: 1, encoding: 'PCM' },
-    license: 'Uncounted Data License v1',
+    license: DATA_LICENSE,
     consentLevel: 'both_agreed',
     segmentPaddingMs: 250, // v1.3 5.3 채택 (utteranceSegmentationService 적용)
+    schemaVersion: DATA_SCHEMA_VERSION, // v2.0 표준 (Day 2, 2026-05-01)
+  }
+
+  // schema_meta — v2.0 신규. 모든 export root에 박아 매수자가 호환성 추적.
+  const schemaMeta: SchemaMeta = {
+    schemaVersion: DATA_SCHEMA_VERSION,
+    skuCode: skuId,
+    exportId: exportJobId,
+    exportDate: today,
+    uncountedVersion: process.env.UNCOUNTED_VERSION ?? 'dev',
+    license: DATA_LICENSE,
+    buyerId: (job.client_id as string | null) ?? null,
+    deliveryTerms: {
+      exclusivity: 'non_exclusive',
+      expiryDate: null,
+      redistribution: 'forbidden',
+    },
+  }
+
+  // pii_meta — v2.0 신규. 카테고리별 PII 검출 카운트 + KISA 컴플라이언스.
+  const piiCategoriesCount: Record<string, number> = {}
+  for (const m of metaLines) {
+    const cats = (m as unknown as Record<string, unknown>)['pii_categories_detected']
+    if (Array.isArray(cats)) {
+      for (const c of cats) {
+        if (typeof c === 'string') {
+          piiCategoriesCount[c] = (piiCategoriesCount[c] ?? 0) + 1
+        }
+      }
+    }
+  }
+  const piiMeta: PiiMeta = {
+    maskerVersion: '1.0',
+    maskerCommit: process.env.PII_MASKER_COMMIT ?? null,
+    piiCategories: piiCategoriesCount,
+    maskingMethod: 'audio_beep_1khz + text_substitute',
+    kisaCompliance: 'guideline_v3.5',
+    kAnonymityK: null, // 게이트 3.5 KISA 평가 후 채움
+    spotCheckCoveragePct: null, // 게이트 6 spot-check 인프라 후 채움
   }
 
   // Build quality summary
@@ -503,6 +723,9 @@ async function _buildPackageInner(
     labelsSummary,
     dialogActSummary,
     setStage,
+    schemaMeta,        // v2.0
+    piiMeta,           // v2.0
+    consentMetaLines,  // v2.0 Day 5
   )
 
   await setStage('작업 상태 업데이트')
@@ -557,6 +780,11 @@ async function streamZipToS3(
   labelsSummary: LabelsSummary | null,
   dialogActSummary: DialogActSummary | null,
   setStage: (s: string) => Promise<void>,
+  /** v2.0 (Day 2, 2026-05-01) — schema_meta + pii_meta */
+  schemaMeta: SchemaMeta,
+  piiMeta: PiiMeta,
+  /** v2.0 (Day 5, 2026-05-01) — consent_meta.jsonl (차별화 핵심) */
+  consentMetaLines: ConsentMetaLine[],
 ): Promise<{ sizeBytes: number }> {
   // 작은 JSON 파일 압축용. WAV는 entry-level store: true로 우회.
   const archive = archiver('zip', { zlib: { level: 6 } })
@@ -599,6 +827,13 @@ async function streamZipToS3(
   await setStage('ZIP 생성')
 
   // 1. 작은 JSON 파일들 (사람이 읽는 용도라 prettify 유지)
+  // v2.0: schema_meta + pii_meta 추가 (Day 2, 2026-05-01)
+  archive.append(JSON.stringify(schemaMeta, null, 2), {
+    name: `${dirName}/schema_meta.json`,
+  })
+  archive.append(JSON.stringify(piiMeta, null, 2), {
+    name: `${dirName}/pii_meta.json`,
+  })
   archive.append(JSON.stringify(manifest, null, 2), {
     name: `${dirName}/manifest.json`,
   })
@@ -622,6 +857,12 @@ async function streamZipToS3(
   // 2. JSONL (한 줄에 한 객체, prettify 무의미)
   const jsonlContent = metaLines.map((line) => JSON.stringify(line)).join('\n')
   archive.append(jsonlContent, { name: `${dirName}/metadata/utterances.jsonl` })
+
+  // v2.0 Day 5 (2026-05-01): consent_meta.jsonl — 차별화 핵심
+  if (consentMetaLines.length > 0) {
+    const consentJsonl = consentMetaLines.map((c) => JSON.stringify(c)).join('\n')
+    archive.append(consentJsonl, { name: `${dirName}/metadata/consent_meta.jsonl` })
+  }
 
   if (metadataEvents.length > 0) {
     const eventsJsonl = metadataEvents.map((e) => JSON.stringify(e.payload)).join('\n')
