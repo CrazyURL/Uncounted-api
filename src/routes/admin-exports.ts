@@ -17,6 +17,12 @@ import {
 import { getSignedUrl, S3_AUDIO_BUCKET } from '../lib/s3.js'
 import { buildPackage } from '../lib/export/packageBuilder.js'
 import { getSignedDownloadUrl } from '../lib/export/downloadService.js'
+import {
+  buildVManifest,
+  recordVSale,
+  createSeedV,
+  recommendSkuTier,
+} from '../lib/export/buildVPackage.js'
 
 const adminExports = new Hono()
 
@@ -1101,6 +1107,70 @@ adminExports.get('/export-requests/:id/download', async (c) => {
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
+})
+
+// ── BM v10.0 v-aware Endpoints ─────────────────────────────────────────
+// 약관 v1.1 제10조 (4단계 SKU + 600h 단위 + 신선도 차등 + 비독점 N회) 정합
+
+// GET /api/admin/exports/v-manifest/:versionId — v 패키지 매니페스트 미리보기
+adminExports.get('/exports/v-manifest/:versionId', async (c) => {
+  const versionId = c.req.param('versionId')
+  const buyerId = c.req.query('buyerId') ?? null
+  try {
+    const manifest = await buildVManifest(versionId, buyerId)
+    return c.json({ data: manifest })
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 400)
+  }
+})
+
+// POST /api/admin/exports/v-record-sale/:versionId — v 판매 카운트 증가
+adminExports.post('/exports/v-record-sale/:versionId', async (c) => {
+  const versionId = c.req.param('versionId')
+  try {
+    const result = await recordVSale(versionId)
+    return c.json({ data: result })
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 500)
+  }
+})
+
+// POST /api/admin/exports/seed-v-create — 시드 단계 v 즉시 생성 (UC-A1/A2)
+adminExports.post('/exports/seed-v-create', async (c) => {
+  const body = getBody<{
+    totalHours: number
+    skuTier: 'UC-A1' | 'UC-A2'
+    cohortPeriodStart: string
+    cohortPeriodEnd: string
+  }>(c)
+  if (!body?.totalHours || !body?.skuTier || !body?.cohortPeriodStart || !body?.cohortPeriodEnd) {
+    return c.json({
+      error: 'totalHours, skuTier, cohortPeriodStart, cohortPeriodEnd required',
+    }, 400)
+  }
+  if (body.skuTier !== 'UC-A1' && body.skuTier !== 'UC-A2') {
+    return c.json({ error: 'seed-v-create supports UC-A1 / UC-A2 only' }, 400)
+  }
+  try {
+    const result = await createSeedV(body)
+    return c.json({ data: result })
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 400)
+  }
+})
+
+// GET /api/admin/exports/recommend-sku?enrollment=20&hours=6 — 적정 SKU 추천
+adminExports.get('/exports/recommend-sku', async (c) => {
+  const enrollment = Number(c.req.query('enrollment') ?? 0)
+  const hours = Number(c.req.query('hours') ?? 0)
+  if (!Number.isFinite(enrollment) || enrollment < 0) {
+    return c.json({ error: 'enrollment must be non-negative number' }, 400)
+  }
+  if (!Number.isFinite(hours) || hours < 0) {
+    return c.json({ error: 'hours must be non-negative number' }, 400)
+  }
+  const tier = recommendSkuTier(enrollment, hours)
+  return c.json({ data: { tier, enrollment, hours } })
 })
 
 export default adminExports
