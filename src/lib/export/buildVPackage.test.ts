@@ -12,33 +12,41 @@ vi.mock('../supabase.js', () => ({
     from: (table: string) => {
       if (table === 'data_versions') {
         return {
-          select: (_cols?: string, opts?: { count?: string; head?: boolean }) => ({
-            eq: () => ({
-              single: async () => ({
-                data: versionData.value,
-                error: versionData.value ? null : { message: 'not found' },
+          select: (_cols?: string, opts?: { count?: string; head?: boolean }) => {
+            // createSeedV의 .eq('is_test_mode', ...).order().limit().maybeSingle() chain 호환
+            const lastVersionResolver = {
+              maybeSingle: async () => ({
+                data: lastVersionNumber.value !== null
+                  ? { version_number: lastVersionNumber.value }
+                  : null,
+                error: null,
               }),
-            }),
-            order: () => ({
-              limit: () => ({
-                maybeSingle: async () => ({
-                  data: lastVersionNumber.value !== null
-                    ? { version_number: lastVersionNumber.value }
-                    : null,
-                  error: null,
+            }
+            return {
+              eq: () => ({
+                single: async () => ({
+                  data: versionData.value,
+                  error: versionData.value ? null : { message: 'not found' },
+                }),
+                // createSeedV chain: .eq().order().limit().maybeSingle()
+                order: () => ({
+                  limit: () => lastVersionResolver,
                 }),
               }),
-            }),
-            // count: 'exact' head: true 패턴은 select 직접 호출
-            ...(opts?.count === 'exact' && opts?.head ? {
-              eq: () => ({
-                count: contributorCount.value,
-                error: null,
-                then: (resolve: (v: unknown) => void) =>
-                  resolve({ count: contributorCount.value, error: null }),
+              order: () => ({
+                limit: () => lastVersionResolver,
               }),
-            } : {}),
-          }),
+              // count: 'exact' head: true 패턴은 select 직접 호출
+              ...(opts?.count === 'exact' && opts?.head ? {
+                eq: () => ({
+                  count: contributorCount.value,
+                  error: null,
+                  then: (resolve: (v: unknown) => void) =>
+                    resolve({ count: contributorCount.value, error: null }),
+                }),
+              } : {}),
+            }
+          },
           insert: () => ({
             select: () => ({
               single: async () => ({

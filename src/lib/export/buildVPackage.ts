@@ -196,6 +196,7 @@ type VersionRow = {
   business_pct: number | null
   sold_count: number
   max_sold_count: number
+  is_test_mode?: boolean
 }
 
 /**
@@ -214,12 +215,19 @@ export async function buildVManifest(
     .select(
       'version_id, version_number, cohort_period_start, cohort_period_end, ' +
       'total_hours, freshness_quartile, status, sku_tier, ' +
-      'family_pct, friend_pct, business_pct, sold_count, max_sold_count',
+      'family_pct, friend_pct, business_pct, sold_count, max_sold_count, is_test_mode',
     )
     .eq('version_id', versionId)
     .single<VersionRow>()
   if (vErr || !version) {
     throw new Error(`Version not found: ${versionId} (${vErr?.message ?? ''})`)
+  }
+
+  // BM v10.0 정합 — test mode v는 production buyer 패키지 제외 (plan v10.6 수정 2)
+  if (version.is_test_mode && process.env.NODE_ENV === 'production') {
+    throw new Error(
+      `Test-mode v ${versionId} cannot be packaged in production. DEV flavor 토글로 발급된 v는 매수자 거래 불가.`,
+    )
   }
 
   // 표준 단위 검증
@@ -317,24 +325,38 @@ export async function createSeedV(input: {
   skuTier: 'UC-A1' | 'UC-A2'
   cohortPeriodStart: string
   cohortPeriodEnd: string
-}): Promise<{ versionId: string; versionNumber: number }> {
+  // BM v10.0 정합 (plan v10.6 수정 2): DEV 토글로 발급 시 true → live 통계·packageBuilder 제외
+  isTestMode?: boolean
+}): Promise<{ versionId: string; versionNumber: number; isTestMode: boolean }> {
   // 표준 단위 검증
   const sizeCheck = validateVSize(input.skuTier, input.totalHours)
   if (!sizeCheck.valid) {
     throw new Error(`createSeedV size 검증 실패: ${sizeCheck.reason}`)
   }
 
-  // 다음 version_number 산정
-  const { data: lastVersion, error: lvErr } = await supabaseAdmin
-    .from('data_versions')
-    .select('version_number')
-    .order('version_number', { ascending: false })
-    .limit(1)
-    .maybeSingle<{ version_number: number }>()
+  // 다음 version_number 산정 — test mode는 1000+ 시리즈로 분리 (plan v10.6)
+  const isTestMode = input.isTestMode === true
+  const orderClause = isTestMode
+    ? supabaseAdmin
+        .from('data_versions')
+        .select('version_number')
+        .eq('is_test_mode', true)
+        .order('version_number', { ascending: false })
+        .limit(1)
+    : supabaseAdmin
+        .from('data_versions')
+        .select('version_number')
+        .eq('is_test_mode', false)
+        .order('version_number', { ascending: false })
+        .limit(1)
+
+  const { data: lastVersion, error: lvErr } = await orderClause.maybeSingle<{ version_number: number }>()
   if (lvErr) {
     throw new Error(`Failed to read last version: ${lvErr.message}`)
   }
-  const versionNumber = (lastVersion?.version_number ?? 0) + 1
+  // live: 1, 2, 3 ... / test: 1001, 1002, ...
+  const baseStart = isTestMode ? 1000 : 0
+  const versionNumber = Math.max(lastVersion?.version_number ?? baseStart, baseStart) + 1
 
   const spec = SKU_TIER_SPECS[input.skuTier]
   const { data: created, error: cErr } = await supabaseAdmin
@@ -350,12 +372,17 @@ export async function createSeedV(input: {
       max_sold_count: spec.maxSoldCount,
       sold_count: 0,
       sealed_at: new Date().toISOString(),
+      is_test_mode: isTestMode,
     })
-    .select('version_id, version_number')
-    .single<{ version_id: string; version_number: number }>()
+    .select('version_id, version_number, is_test_mode')
+    .single<{ version_id: string; version_number: number; is_test_mode: boolean }>()
   if (cErr || !created) {
     throw new Error(`createSeedV insert failed: ${cErr?.message}`)
   }
 
-  return { versionId: created.version_id, versionNumber: created.version_number }
+  return {
+    versionId: created.version_id,
+    versionNumber: created.version_number,
+    isTestMode: created.is_test_mode,
+  }
 }

@@ -19,16 +19,22 @@ export const WITHHOLDING_PCT = 22
  * 사용자가 해당 역년에 누적 수령한 보상 합계 (KRW).
  * Cap 잔여 = YEARLY_CAP_KRW - 본 함수 결과.
  *
+ * BM v10.0 정합 (plan v10.6 수정 2): liveOnly=true 시 is_test_mode=false만 합산.
+ * Live Cap 산정 시 DEV 토글 데이터 제외.
+ *
  * @param userId 사용자 UUID
  * @param fiscalYear 역년 (예: 2026)
+ * @param liveOnly true 시 is_test_mode=false만 (live 빌드 Cap 산정용). 기본 false (전체).
  */
 export async function getYearlyRewardTotal(
   userId: string,
   fiscalYear: number,
+  liveOnly: boolean = false,
 ): Promise<number> {
   const { data, error } = await supabaseAdmin.rpc('user_yearly_reward_total', {
     p_user_id: userId,
     p_fiscal_year: fiscalYear,
+    p_live_only: liveOnly,
   })
   if (error) {
     throw new Error(`getYearlyRewardTotal failed: ${error.message}`)
@@ -39,30 +45,37 @@ export async function getYearlyRewardTotal(
 /**
  * Cap 잔여 — 본 역년에 추가로 수령 가능한 KRW.
  * 0 이하면 Cap 도달, 추가 분배 시 잉여 데이터 이월 처리.
+ *
+ * @param liveOnly true 시 is_test_mode=false만 (DEV 토글 보상 제외)
  */
 export async function getCapRemaining(
   userId: string,
   fiscalYear: number,
+  liveOnly: boolean = false,
 ): Promise<number> {
-  const ytd = await getYearlyRewardTotal(userId, fiscalYear)
+  const ytd = await getYearlyRewardTotal(userId, fiscalYear, liveOnly)
   return Math.max(YEARLY_CAP_KRW - ytd, 0)
 }
 
 /**
  * 본인 역년 보상 진행률 (0.0 ~ 1.0).
  * 사용자 대시보드 표시용.
+ *
+ * @param liveOnly true 시 is_test_mode=false만 (DEV 토글 보상 제외)
  */
 export async function getCapProgress(
   userId: string,
   fiscalYear: number,
+  liveOnly: boolean = false,
 ): Promise<{
   ytd_krw: number
   cap_krw: number
   remaining_krw: number
   progress_pct: number
   cap_reached: boolean
+  live_only: boolean
 }> {
-  const ytd = await getYearlyRewardTotal(userId, fiscalYear)
+  const ytd = await getYearlyRewardTotal(userId, fiscalYear, liveOnly)
   const remaining = Math.max(YEARLY_CAP_KRW - ytd, 0)
   return {
     ytd_krw: ytd,
@@ -70,6 +83,7 @@ export async function getCapProgress(
     remaining_krw: remaining,
     progress_pct: Math.min((ytd / YEARLY_CAP_KRW) * 100, 100),
     cap_reached: remaining === 0,
+    live_only: liveOnly,
   }
 }
 

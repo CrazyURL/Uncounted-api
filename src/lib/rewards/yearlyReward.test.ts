@@ -41,6 +41,7 @@ describe('getYearlyRewardTotal — 역년 누적 보상 조회', () => {
     expect(rpcMock).toHaveBeenCalledWith('user_yearly_reward_total', {
       p_user_id: 'user-1',
       p_fiscal_year: 2026,
+      p_live_only: false,
     })
   })
 

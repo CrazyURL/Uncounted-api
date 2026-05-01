@@ -20,16 +20,21 @@ const userRewards = new Hono()
 userRewards.use('/*', authMiddleware)
 
 // ── 본인 Cap 진행률 + 누적 보상 ─────────────────────────────────────────
-// GET /api/user/rewards/cap-progress?fiscal_year=2026
+// GET /api/user/rewards/cap-progress?fiscal_year=2026&live_only=true
+//
+// live_only=true (기본): is_test_mode=false만 합산 (DEV 토글 보상 제외).
+// live_only=false: 전체 합산 (admin 검증용).
 userRewards.get('/rewards/cap-progress', async (c) => {
   const userId = c.get('userId')
   if (!userId) {
     return c.json({ error: 'unauthenticated' }, 401)
   }
   const fiscalYear = Number(c.req.query('fiscal_year') ?? currentFiscalYear())
+  // live_only 기본 true (사용자 대시보드는 live 데이터만 보여줌)
+  const liveOnly = c.req.query('live_only') !== 'false'
 
   try {
-    const progress = await getCapProgress(userId, fiscalYear)
+    const progress = await getCapProgress(userId, fiscalYear, liveOnly)
     return c.json({ data: { fiscal_year: fiscalYear, ...progress } })
   } catch (err) {
     return c.json({ error: (err as Error).message }, 500)
@@ -37,7 +42,7 @@ userRewards.get('/rewards/cap-progress', async (c) => {
 })
 
 // ── 본인 보상 지급 내역 (월별/v별) ──────────────────────────────────────
-// GET /api/user/rewards/log?fiscal_year=2026&limit=50
+// GET /api/user/rewards/log?fiscal_year=2026&limit=50&live_only=true
 userRewards.get('/rewards/log', async (c) => {
   const userId = c.get('userId')
   if (!userId) {
@@ -45,6 +50,7 @@ userRewards.get('/rewards/log', async (c) => {
   }
   const fiscalYear = c.req.query('fiscal_year')
   const limit = Math.min(Number(c.req.query('limit') ?? 100), 500)
+  const liveOnly = c.req.query('live_only') !== 'false'
 
   let query = supabaseAdmin
     .from('user_reward_log')
@@ -56,6 +62,9 @@ userRewards.get('/rewards/log', async (c) => {
 
   if (fiscalYear) {
     query = query.eq('fiscal_year', Number(fiscalYear))
+  }
+  if (liveOnly) {
+    query = query.eq('is_test_mode', false)
   }
 
   const { data, error } = await query

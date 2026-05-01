@@ -560,4 +560,114 @@ consent.post('/withdraw', authMiddleware, async (c) => {
   })
 })
 
+// ── BM v10.0 — DEV 토글 시뮬레이션 (plan v10.6 수정 1·2) ──────────────
+// 본 endpoint는 DEV/local 빌드 클라이언트에서만 호출. live 빌드는 카카오톡 등 외부 동의 path 사용.
+
+/**
+ * POST /api/consent/dev-test/promote
+ * DEV 토글로 양자 동의 시뮬레이션 → consent_invitations.status='agreed' + sessions consent_status='both_agreed'
+ * is_test_mode 데이터 격리 marker (DB 측 packageBuilder 제외).
+ */
+consent.post('/dev-test/promote', authMiddleware, async (c) => {
+  const userId = c.get('userId')
+  if (!userId) return c.json({ error: 'unauthenticated' }, 401)
+  const body = getBody<{ session_ids: string[]; peer_label?: string }>(c)
+  if (!Array.isArray(body?.session_ids) || body.session_ids.length === 0) {
+    return c.json({ error: 'session_ids required' }, 400)
+  }
+
+  // sessions consent_status 일괄 both_agreed 승격
+  const { error: sErr } = await supabaseAdmin
+    .from('sessions')
+    .update({ consent_status: 'both_agreed', consented_at: new Date().toISOString() })
+    .in('id', body.session_ids)
+    .eq('user_id', userId)
+  if (sErr) {
+    return c.json({ error: `sessions update failed: ${sErr.message}` }, 500)
+  }
+
+  // consent_invitations에 manual_dev_test marker 기록 (감사 추적)
+  const now = new Date().toISOString()
+  const invitations = body.session_ids.map((sid) => ({
+    user_id: userId,
+    session_id: sid,
+    token: `dev-test-${sid}-${Date.now()}`,
+    consent_method: 'manual_dev_test' as const,
+    status: 'agreed' as const,
+    consented_at: now,
+    expires_at: null,
+    created_at: now,
+  }))
+  const { error: iErr } = await supabaseAdmin.from('consent_invitations').insert(invitations)
+  if (iErr) {
+    // 이미 invitation이 있으면 skip 가능 (best effort)
+    console.warn('[consent.dev-test.promote] invitation insert skipped:', iErr.message)
+  }
+
+  return c.json({
+    data: {
+      promoted: body.session_ids.length,
+      promoted_at: now,
+      consent_method: 'manual_dev_test',
+    },
+  })
+})
+
+/**
+ * POST /api/consent/rollback/stage1
+ * 0~30s 내 — 큐 취소. consent_status='locked' 복귀, consent_invitations.status='pending'.
+ */
+consent.post('/rollback/stage1', authMiddleware, async (c) => {
+  const userId = c.get('userId')
+  if (!userId) return c.json({ error: 'unauthenticated' }, 401)
+  const body = getBody<{ session_ids: string[] }>(c)
+  if (!Array.isArray(body?.session_ids)) {
+    return c.json({ error: 'session_ids required' }, 400)
+  }
+
+  await supabaseAdmin
+    .from('sessions')
+    .update({ consent_status: 'locked' })
+    .in('id', body.session_ids)
+    .eq('user_id', userId)
+
+  await supabaseAdmin
+    .from('consent_invitations')
+    .update({ status: 'pending' })
+    .in('session_id', body.session_ids)
+    .eq('user_id', userId)
+    .eq('consent_method', 'manual_dev_test')
+
+  return c.json({ data: { stage: 1, action: 'cancelled', sessions: body.session_ids.length } })
+})
+
+/**
+ * POST /api/consent/rollback/stage2
+ * 30s~5min — 업로드 abort + cleanup. consent_invitations.status='cancelled'.
+ * 실제 업로드 abort는 클라이언트 측 AbortController + storageUpload 측에서 처리.
+ */
+consent.post('/rollback/stage2', authMiddleware, async (c) => {
+  const userId = c.get('userId')
+  if (!userId) return c.json({ error: 'unauthenticated' }, 401)
+  const body = getBody<{ session_ids: string[] }>(c)
+  if (!Array.isArray(body?.session_ids)) {
+    return c.json({ error: 'session_ids required' }, 400)
+  }
+
+  await supabaseAdmin
+    .from('sessions')
+    .update({ consent_status: 'locked' })
+    .in('id', body.session_ids)
+    .eq('user_id', userId)
+
+  await supabaseAdmin
+    .from('consent_invitations')
+    .update({ status: 'cancelled' })
+    .in('session_id', body.session_ids)
+    .eq('user_id', userId)
+    .eq('consent_method', 'manual_dev_test')
+
+  return c.json({ data: { stage: 2, action: 'aborted', sessions: body.session_ids.length } })
+})
+
 export default consent
