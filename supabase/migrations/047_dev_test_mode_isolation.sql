@@ -52,10 +52,14 @@ COMMENT ON COLUMN consent_invitations.consent_method IS
   'app=앱 PeerConsentPage, web=peer.html, manual_dev_test=DEV 토글로 시뮬레이션 동의. 시드 검증 단계 구분.';
 
 -- ── 5. user_yearly_reward_total 함수 갱신 — live_only 옵션 ────────────
--- 기존 함수: 모든 reward 합산 (test 포함)
--- 신규: live_only=true 옵션 시 is_test_mode=false만 합산
+-- 045에서 (UUID, INTEGER) 시그니처로 정의. 047에서 (UUID, INTEGER, BOOLEAN)로 확장.
+-- PostgreSQL은 시그니처 다른 동일 이름 함수를 별개로 보므로 사전 DROP 필수
+-- (CREATE OR REPLACE는 정확히 같은 시그니처에만 작동).
 
-CREATE OR REPLACE FUNCTION user_yearly_reward_total(
+DROP FUNCTION IF EXISTS user_yearly_reward_total(UUID, INTEGER);
+DROP FUNCTION IF EXISTS user_yearly_reward_total(UUID, INTEGER, BOOLEAN);
+
+CREATE FUNCTION user_yearly_reward_total(
   p_user_id UUID,
   p_fiscal_year INTEGER,
   p_live_only BOOLEAN DEFAULT FALSE
@@ -67,5 +71,5 @@ CREATE OR REPLACE FUNCTION user_yearly_reward_total(
     AND (NOT p_live_only OR is_test_mode = FALSE);
 $$ LANGUAGE SQL STABLE SECURITY DEFINER;
 
-COMMENT ON FUNCTION user_yearly_reward_total IS
+COMMENT ON FUNCTION user_yearly_reward_total(UUID, INTEGER, BOOLEAN) IS
   '사용자의 해당 역년 누적 보상 합계. p_live_only=true 시 test mode 제외 (live 빌드 Cap 산정용). 기본 false (전체 합산, admin 검증용).';
