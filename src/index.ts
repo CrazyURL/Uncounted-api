@@ -25,6 +25,8 @@ import transcriptChunks from './routes/transcriptChunks.js'
 import sessionChunks from './routes/sessionChunks.js'
 import user from './routes/user.js'
 import upload from './routes/upload.js'
+import adminRewards from './routes/admin-rewards.js'
+import userRewards from './routes/user-rewards.js'
 
 // package.json에서 버전 정보 읽기
 const __filename = fileURLToPath(import.meta.url)
@@ -97,6 +99,8 @@ app.route('/api/admin', admin)
 app.route('/api/admin', adminExports)
 app.route('/api/admin', adminLedger)
 app.route('/api/admin', adminUtterances)
+app.route('/api/admin', adminRewards)
+app.route('/api/user', userRewards)
 app.route('/api/logging', logging)
 app.route('/api/consent', consent)
 app.route('/api/transcripts', transcripts)
