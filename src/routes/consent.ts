@@ -61,8 +61,9 @@ function isExpired(row: Pick<InvitationRow, 'expires_at'>): boolean {
  */
 consent.post('/invitations', authMiddleware, async (c) => {
   const userId = c.get('userId') as string
-  const { sessionId, token, expiresAt } = getBody<{
+  const { sessionId, sessionIds, token, expiresAt } = getBody<{
     sessionId: string
+    sessionIds?: string[]
     token: string
     expiresAt?: string | null
   }>(c)
@@ -70,6 +71,11 @@ consent.post('/invitations', authMiddleware, async (c) => {
   if (!sessionId || !token) {
     return c.json({ error: 'sessionId and token are required' }, 400)
   }
+
+  // sessionIds 배열 정규화 — 빈 배열/누락 시 sessionId 단건으로 fallback
+  const normalizedIds = Array.isArray(sessionIds) && sessionIds.length > 0
+    ? sessionIds
+    : [sessionId]
 
   // 기존 활성 초대 확인 (pending/sent/opened)
   const { data: existing } = await supabaseAdmin
@@ -89,6 +95,7 @@ consent.post('/invitations', authMiddleware, async (c) => {
     .insert({
       user_id: userId,
       session_id: sessionId,
+      session_ids: normalizedIds,
       token,
       status: 'pending',
       expires_at: expiresAt ?? null,
@@ -172,11 +179,12 @@ consent.post('/agree/:token', async (c) => {
     return c.json({ data: invitation })
   }
 
+  const now = new Date().toISOString()
   const { data: updated, error: updateErr } = await supabaseAdmin
     .from('consent_invitations')
     .update({
       status: 'agreed',
-      responded_at: new Date().toISOString(),
+      responded_at: now,
       ip_address: ip,
       user_agent: userAgent,
     })
@@ -187,6 +195,32 @@ consent.post('/agree/:token', async (c) => {
   if (updateErr || !updated) {
     console.error('[consent.agree.update] error:', updateErr)
     return c.json({ error: 'Failed to record agreement' }, 500)
+  }
+
+  // ── sessions 일괄 promote (Bug C/D fix) ──────────────────────────
+  // peer가 동의한 시점 = 양측 합의 완료. invitation에 묶인 모든 sessions를
+  // user_only → both_agreed로 승격. session_ids가 비어있으면 단건 session_id로 fallback.
+  // user_only인 sessions만 갱신해서 이전에 철회된 locked 상태는 건드리지 않는다.
+  const sessionIds = Array.isArray((invitation as any).session_ids) && (invitation as any).session_ids.length > 0
+    ? (invitation as any).session_ids as string[]
+    : invitation.session_id
+      ? [invitation.session_id]
+      : []
+
+  if (sessionIds.length > 0) {
+    const { error: promoteErr, count } = await supabaseAdmin
+      .from('sessions')
+      .update({ consent_status: 'both_agreed', consented_at: now }, { count: 'exact' })
+      .in('id', sessionIds)
+      .eq('user_id', invitation.user_id)
+      .eq('consent_status', 'user_only')
+    if (promoteErr) {
+      console.error('[consent.agree.promote-sessions] error:', promoteErr)
+      // invitation은 이미 'agreed' 처리됨 — sessions 갱신 실패는 별도 모니터링
+      // 사용자 측 polling에서 재시도 가능 (idempotent)
+    } else {
+      console.log(`[consent.agree.promote-sessions] ${count}/${sessionIds.length} promoted`)
+    }
   }
 
   return c.json({ data: updated })
