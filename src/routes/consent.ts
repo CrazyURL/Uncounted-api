@@ -587,6 +587,8 @@ consent.post('/dev-test/promote', authMiddleware, async (c) => {
   }
 
   // consent_invitations에 manual_dev_test marker 기록 (감사 추적)
+  // 스키마: token, status, consent_method, session_id, user_id, expires_at, created_at
+  // (consented_at/agreed_at 컬럼은 존재 X — created_at으로 시각 기록)
   const now = new Date().toISOString()
   const invitations = body.session_ids.map((sid) => ({
     user_id: userId,
@@ -594,7 +596,6 @@ consent.post('/dev-test/promote', authMiddleware, async (c) => {
     token: `dev-test-${sid}-${Date.now()}`,
     consent_method: 'manual_dev_test' as const,
     status: 'agreed' as const,
-    consented_at: now,
     expires_at: null,
     created_at: now,
   }))
