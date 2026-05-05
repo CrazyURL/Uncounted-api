@@ -127,6 +127,29 @@ sessions.post('/batch', async (c) => {
       }
     }
 
+    // ── 다운그레이드 방지 가드 ────────────────────────────────────────
+    // 클라이언트가 stale localStorage로 'user_only' 보낼 때 DB의 'both_agreed'를 덮어쓰는 race 방지.
+    // both_agreed는 양측 합의된 영구 상태이므로 batch upsert로 떨어뜨리지 않는다.
+    // 동의 철회는 별도 endpoint (POST /api/consent/rollback/*)로만 가능.
+    const ids = rows.map((r) => r.id).filter(Boolean)
+    if (ids.length > 0) {
+      const { data: existing } = await supabaseAdmin
+        .from('sessions')
+        .select('id, consent_status, consented_at')
+        .in('id', ids)
+        .eq('user_id', userId)
+      const existingMap = new Map(
+        existing?.map((e) => [e.id, { status: e.consent_status, consentedAt: e.consented_at }]) ?? [],
+      )
+      for (const row of rows) {
+        const prev = existingMap.get(row.id)
+        if (prev?.status === 'both_agreed' && row.consent_status !== 'both_agreed') {
+          row.consent_status = 'both_agreed'
+          if (prev.consentedAt) row.consented_at = prev.consentedAt
+        }
+      }
+    }
+
     const { data, error } = await supabaseAdmin
       .from('sessions')
       .upsert(rows, { onConflict: 'id' })
