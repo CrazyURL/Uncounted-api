@@ -114,38 +114,37 @@ sessions.post('/batch', async (c) => {
       profile?.third_party_consent &&
       !profile?.consent_withdrawn
 
+    // ── 동의 필드는 server-authoritative — batch input에서 제거 ──────
+    // consent_status / consented_at은 /api/consent/* endpoint들(promote, withdraw,
+    // rollback, dev-test/promote)을 통해서만 변경되어야 함. batch upsert는
+    // 라벨·오디오 메타·업로드 상태 등의 sync용이지 동의 상태 변경 path가 아님.
+    //
+    // 클라이언트가 stale localStorage로 보내도 DB의 권한 상태를 침해하지 않도록
+    // upsert 페이로드에서 두 필드를 strip한다. 신규 row(첫 upsert)는 DB
+    // default('locked' + null)로 들어감 — isFullyConsented 분기에서만 promote.
+    for (const row of rows) {
+      delete row.consent_status
+      delete row.consented_at
+    }
+
+    // 신규 row만 — 풀 동의 사용자의 첫 sync는 'user_only'로 promote 시작.
+    // 기존 row는 server-authoritative 동의 endpoint가 관리하므로 건드리지 않는다.
     if (isFullyConsented) {
+      const ids = rows.map((r) => r.id).filter(Boolean)
+      const { data: existing } = await supabaseAdmin
+        .from('sessions')
+        .select('id')
+        .in('id', ids)
+        .eq('user_id', userId)
+      const existingIds = new Set(existing?.map((e) => e.id) ?? [])
       const today = new Date().toISOString().slice(0, 10)
       for (const row of rows) {
-        if (row.consent_status === 'locked') {
+        if (!existingIds.has(row.id)) {
           row.consent_status = 'user_only'
           row.is_public = true
           row.visibility_status = 'PUBLIC_CONSENTED'
           row.visibility_source = 'GLOBAL_DEFAULT'
           row.visibility_changed_at = today
-        }
-      }
-    }
-
-    // ── 다운그레이드 방지 가드 ────────────────────────────────────────
-    // 클라이언트가 stale localStorage로 'user_only' 보낼 때 DB의 'both_agreed'를 덮어쓰는 race 방지.
-    // both_agreed는 양측 합의된 영구 상태이므로 batch upsert로 떨어뜨리지 않는다.
-    // 동의 철회는 별도 endpoint (POST /api/consent/rollback/*)로만 가능.
-    const ids = rows.map((r) => r.id).filter(Boolean)
-    if (ids.length > 0) {
-      const { data: existing } = await supabaseAdmin
-        .from('sessions')
-        .select('id, consent_status, consented_at')
-        .in('id', ids)
-        .eq('user_id', userId)
-      const existingMap = new Map(
-        existing?.map((e) => [e.id, { status: e.consent_status, consentedAt: e.consented_at }]) ?? [],
-      )
-      for (const row of rows) {
-        const prev = existingMap.get(row.id)
-        if (prev?.status === 'both_agreed' && row.consent_status !== 'both_agreed') {
-          row.consent_status = 'both_agreed'
-          if (prev.consentedAt) row.consented_at = prev.consentedAt
         }
       }
     }
