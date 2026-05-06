@@ -27,6 +27,13 @@ import user from './routes/user.js'
 import upload from './routes/upload.js'
 import adminRewards from './routes/admin-rewards.js'
 import userRewards from './routes/user-rewards.js'
+import calls from './routes/calls.js'
+import contracts from './routes/contracts.js'
+import adminReviews from './routes/admin-reviews.js'
+import adminDeliveries from './routes/admin-deliveries.js'
+import adminDashboard from './routes/admin-dashboard.js'
+import adminBalances from './routes/admin-balances.js'
+import adminUtterancesV2 from './routes/admin-utterances-v2.js'
 
 // package.json에서 버전 정보 읽기
 const __filename = fileURLToPath(import.meta.url)
@@ -100,6 +107,11 @@ app.route('/api/admin', adminExports)
 app.route('/api/admin', adminLedger)
 app.route('/api/admin', adminUtterances)
 app.route('/api/admin', adminRewards)
+app.route('/api/admin', adminReviews)
+app.route('/api/admin', adminDeliveries)
+app.route('/api/admin', adminDashboard)
+app.route('/api/admin', adminBalances)
+app.route('/api/admin', adminUtterancesV2)
 app.route('/api/user', userRewards)
 app.route('/api/logging', logging)
 app.route('/api/consent', consent)
@@ -108,6 +120,8 @@ app.route('/api/transcript-chunks', transcriptChunks)
 app.route('/api/session-chunks', sessionChunks)
 app.route('/api/user', user)
 app.route('/api/upload', upload)
+app.route('/api/calls', calls)
+app.route('/api/contracts', contracts)
 
 // ── 404 핸들러 ─────────────────────────────────────────────────────────
 
