@@ -105,7 +105,10 @@ consent.post('/invitations', authMiddleware, async (c) => {
 
   if (error || !inserted) {
     console.error('[consent.invitations.insert] error:', error)
-    return c.json({ error: 'Failed to create invitation' }, 500)
+    // 진단 모드 — 실제 에러 코드/메시지를 응답에 포함 (시드 단계 디버깅용).
+    return c.json({
+      error: `Failed to create invitation: ${error?.code ?? '?'} ${error?.message ?? ''} ${error?.details ?? ''}`.slice(0, 300),
+    }, 500)
   }
 
   return c.json({ data: inserted })
