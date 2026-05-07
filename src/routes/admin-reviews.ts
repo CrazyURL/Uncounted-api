@@ -63,7 +63,7 @@ adminReviews.get('/reviews', async (c) => {
   let query = supabaseAdmin
     .from('sessions')
     .select(
-      'id, user_id, title, date, duration, consent_status, consented_at, created_at, ' +
+      'id, user_id, title, date, duration, consent_status, consented_at, ' +
         'gpu_upload_status, gpu_uploaded_at, stt_status, stt_at, diarize_status, diarize_at, ' +
         'gpu_pii_status, gpu_pii_at, quality_status, quality_at, review_status',
       { count: 'exact' },
@@ -114,7 +114,6 @@ adminReviews.get('/reviews', async (c) => {
     duration_seconds: (row.duration as number) ?? 0,
     consent_status: row.consent_status as string,
     consented_at: (row.consented_at as string) ?? null,
-    created_at: row.created_at as string,
     upload_status: (row.gpu_upload_status as string) ?? 'pending',
     uploaded_at: (row.gpu_uploaded_at as string) ?? null,
     stt_status: (row.stt_status as string) ?? 'pending',
@@ -208,7 +207,6 @@ adminReviews.get('/sessions/:sessionId', async (c) => {
       duration_seconds: (row.duration as number) ?? 0,
       consent_status: row.consent_status as string,
       consented_at: row.consented_at as string,
-      created_at: row.created_at as string,
       upload_status: (row.gpu_upload_status as string) ?? 'pending',
       stt_status: (row.stt_status as string) ?? 'pending',
       diarize_status: (row.diarize_status as string) ?? 'pending',
