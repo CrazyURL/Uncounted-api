@@ -128,27 +128,29 @@ adminDashboard.get('/dashboard-stats', async (c) => {
   ])
 
   return c.json({
-    consent: {
-      bothAgreedCount: bothAgreedCount ?? 0,
-      bothAgreed24h: bothAgreed24h ?? 0,
-      totalDurationSec,
-    },
-    pipeline: {
-      upload,
-      stt,
-      diarize,
-      pii,
-      quality,
-    },
-    review,
-    delivery: {
-      total: deliveryTotal,
-      recentRevenue,
-      recent: recentDeliveries,
-    },
-    alerts: {
-      pipelineFailedCount: pipelineFailedCount ?? 0,
-      rejectedCount: rejectedCount ?? 0,
+    data: {
+      consent: {
+        bothAgreedCount: bothAgreedCount ?? 0,
+        bothAgreed24h: bothAgreed24h ?? 0,
+        totalDurationSec,
+      },
+      pipeline: {
+        upload,
+        stt,
+        diarize,
+        pii,
+        quality,
+      },
+      review,
+      delivery: {
+        total: deliveryTotal,
+        recentRevenue,
+        recent: recentDeliveries,
+      },
+      alerts: {
+        pipelineFailedCount: pipelineFailedCount ?? 0,
+        rejectedCount: rejectedCount ?? 0,
+      },
     },
   })
 })

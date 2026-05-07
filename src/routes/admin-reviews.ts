@@ -129,13 +129,15 @@ adminReviews.get('/reviews', async (c) => {
   }))
 
   return c.json({
-    sessions,
-    total: count ?? 0,
-    pendingCount: counts[0].count ?? 0,
-    inReviewCount: counts[1].count ?? 0,
-    approvedCount: counts[2].count ?? 0,
-    rejectedCount: counts[3].count ?? 0,
-    needsRevisionCount: counts[4].count ?? 0,
+    data: {
+      sessions,
+      total: count ?? 0,
+      pendingCount: counts[0].count ?? 0,
+      inReviewCount: counts[1].count ?? 0,
+      approvedCount: counts[2].count ?? 0,
+      rejectedCount: counts[3].count ?? 0,
+      needsRevisionCount: counts[4].count ?? 0,
+    },
   })
 })
 
@@ -183,7 +185,7 @@ adminReviews.post('/reviews/:sessionId', async (c) => {
     return c.json({ error: updateErr.message }, 500)
   }
 
-  return c.json({ ok: true })
+  return c.json({ data: { ok: true } })
 })
 
 // ── GET /api/admin/sessions/:sessionId ───────────────────────────────
@@ -198,20 +200,22 @@ adminReviews.get('/sessions/:sessionId', async (c) => {
   // gpu_* → upload/pii API 키 별칭
   const row = data as unknown as Record<string, unknown>
   return c.json({
-    id: row.id as string,
-    user_id: row.user_id as string,
-    title: row.title as string,
-    date: row.date as string,
-    duration_seconds: (row.duration as number) ?? 0,
-    consent_status: row.consent_status as string,
-    consented_at: row.consented_at as string,
-    created_at: row.created_at as string,
-    upload_status: (row.gpu_upload_status as string) ?? 'pending',
-    stt_status: (row.stt_status as string) ?? 'pending',
-    diarize_status: (row.diarize_status as string) ?? 'pending',
-    pii_status: (row.gpu_pii_status as string) ?? 'pending',
-    quality_status: (row.quality_status as string) ?? 'pending',
-    review_status: (row.review_status as string) ?? 'pending',
+    data: {
+      id: row.id as string,
+      user_id: row.user_id as string,
+      title: row.title as string,
+      date: row.date as string,
+      duration_seconds: (row.duration as number) ?? 0,
+      consent_status: row.consent_status as string,
+      consented_at: row.consented_at as string,
+      created_at: row.created_at as string,
+      upload_status: (row.gpu_upload_status as string) ?? 'pending',
+      stt_status: (row.stt_status as string) ?? 'pending',
+      diarize_status: (row.diarize_status as string) ?? 'pending',
+      pii_status: (row.gpu_pii_status as string) ?? 'pending',
+      quality_status: (row.quality_status as string) ?? 'pending',
+      review_status: (row.review_status as string) ?? 'pending',
+    },
   })
 })
 
@@ -237,14 +241,14 @@ adminReviews.get('/sessions', async (c) => {
 
   const { data, error } = await query
   if (error) return c.json({ error: error.message }, 500)
-  return c.json(
-    (data ?? []).map((row) => ({
+  return c.json({
+    data: (data ?? []).map((row) => ({
       id: row.id,
       title: row.title,
       duration_seconds: row.duration ?? 0,
       consent_status: row.consent_status,
     })),
-  )
+  })
 })
 
 export default adminReviews

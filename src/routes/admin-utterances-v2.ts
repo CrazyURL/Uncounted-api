@@ -69,11 +69,13 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
   })
 
   return c.json({
-    utterances,
-    total: count ?? 0,
-    page,
-    limit,
-    constants: { hourlyRateKrw: HOURLY_RATE_KRW },
+    data: {
+      utterances,
+      total: count ?? 0,
+      page,
+      limit,
+      constants: { hourlyRateKrw: HOURLY_RATE_KRW },
+    },
   })
 })
 
@@ -108,11 +110,13 @@ adminUtterancesV2.get('/utterances-v2/stats', async (c) => {
   }
 
   return c.json({
-    total: totalRes.count ?? 0,
-    settledCount: settledRes.count ?? 0,
-    unsettledCount: unsettledRes.count ?? 0,
-    totalDurationSec,
-    estimatedRevenueKrw: Math.round((totalDurationSec * HOURLY_RATE_KRW) / 3600),
+    data: {
+      total: totalRes.count ?? 0,
+      settledCount: settledRes.count ?? 0,
+      unsettledCount: unsettledRes.count ?? 0,
+      totalDurationSec,
+      estimatedRevenueKrw: Math.round((totalDurationSec * HOURLY_RATE_KRW) / 3600),
+    },
   })
 })
 

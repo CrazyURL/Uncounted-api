@@ -38,7 +38,7 @@ adminDeliveries.get('/deliveries', async (c) => {
 
   const { data, error, count } = await query
   if (error) return c.json({ error: error.message }, 500)
-  return c.json({ deliveries: data ?? [], total: count ?? 0 })
+  return c.json({ data: { deliveries: data ?? [], total: count ?? 0 } })
 })
 
 // ── GET /api/admin/deliveries/check ──────────────────────────────────
@@ -70,7 +70,7 @@ adminDeliveries.get('/deliveries/check', async (c) => {
     delivered_at: r.delivered_at as string,
   }))
 
-  return c.json({ duplicate, alreadyDeliveredToOthers, existingDeliveries })
+  return c.json({ data: { duplicate, alreadyDeliveredToOthers, existingDeliveries } })
 })
 
 // ── POST /api/admin/deliveries ───────────────────────────────────────
@@ -142,7 +142,7 @@ adminDeliveries.post('/deliveries', async (c) => {
     return c.json({ error: insErr.message, code: insErr.code }, 500)
   }
 
-  return c.json(inserted)
+  return c.json({ data: inserted })
 })
 
 export default adminDeliveries
