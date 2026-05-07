@@ -27,8 +27,6 @@ import user from './routes/user.js'
 import upload from './routes/upload.js'
 import adminRewards from './routes/admin-rewards.js'
 import userRewards from './routes/user-rewards.js'
-import calls from './routes/calls.js'
-import contracts from './routes/contracts.js'
 import adminReviews from './routes/admin-reviews.js'
 import adminDeliveries from './routes/admin-deliveries.js'
 import adminDashboard from './routes/admin-dashboard.js'
@@ -120,8 +118,6 @@ app.route('/api/transcript-chunks', transcriptChunks)
 app.route('/api/session-chunks', sessionChunks)
 app.route('/api/user', user)
 app.route('/api/upload', upload)
-app.route('/api/calls', calls)
-app.route('/api/contracts', contracts)
 
 // ── 404 핸들러 ─────────────────────────────────────────────────────────
 
