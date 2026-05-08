@@ -101,6 +101,30 @@ adminReviews.get('/reviews', async (c) => {
     ),
   )
 
+  // 현재 필터에 맞는 sessions 의 duration 전체 합산 (페이지네이션 무관)
+  // — UX: "919건 (총 N시간)" 의 N 은 페이지가 아닌 필터 결과 전체 기준이어야 함
+  let filteredDurationSec = 0
+  {
+    let durQuery = supabaseAdmin.from('sessions').select('duration')
+    if (reviewStatus && VALID_REVIEW.has(reviewStatus)) {
+      durQuery = durQuery.eq('review_status', reviewStatus)
+    }
+    if (consentStatus) {
+      durQuery = durQuery.eq('consent_status', consentStatus)
+    }
+    if (qualityLow) {
+      durQuery = durQuery.eq('quality_status', 'failed')
+    }
+    if (search) {
+      durQuery = durQuery.or(`title.ilike.%${search}%,id.ilike.${search}%`)
+    }
+    const { data: durRows } = await durQuery
+    filteredDurationSec = (durRows ?? []).reduce(
+      (sum, row) => sum + ((row as { duration?: number }).duration ?? 0),
+      0,
+    )
+  }
+
   // 마이그레이션 052의 신규 컬럼은 supabase 타입 생성기에 아직 반영되지 않을 수 있어
   // 안전하게 Record 로 좁혀 사용한다.
   // DB → API 키 매핑: gpu_upload_status → upload_status, gpu_pii_status → pii_status
@@ -131,6 +155,7 @@ adminReviews.get('/reviews', async (c) => {
     data: {
       sessions,
       total: count ?? 0,
+      filteredDurationSec,
       pendingCount: counts[0].count ?? 0,
       inReviewCount: counts[1].count ?? 0,
       approvedCount: counts[2].count ?? 0,
