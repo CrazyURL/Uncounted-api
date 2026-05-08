@@ -55,6 +55,7 @@ adminReviews.get('/reviews', async (c) => {
   const reviewStatus = url.searchParams.get('review_status') ?? undefined
   const consentStatus = url.searchParams.get('consent_status') ?? undefined
   const qualityLow = url.searchParams.get('quality_low') === '1'
+  const pipelineFailed = url.searchParams.get('pipeline_failed') === '1'
   const search = url.searchParams.get('q') ?? undefined
   const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1)
   const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get('limit') ?? '50', 10) || 50))
@@ -80,6 +81,13 @@ adminReviews.get('/reviews', async (c) => {
   if (qualityLow) {
     // 저품질 우선 — quality_status = 'failed' 만 우선 표시 (시드 단계 단순화)
     query = query.eq('quality_status', 'failed')
+  }
+  if (pipelineFailed) {
+    // 처리 흐름 5단계 중 어느 하나라도 failed — 이상 신호 탭 진입 시 활용
+    query = query.or(
+      'gpu_upload_status.eq.failed,stt_status.eq.failed,' +
+        'diarize_status.eq.failed,gpu_pii_status.eq.failed,quality_status.eq.failed',
+    )
   }
   if (search) {
     // ILIKE 검색 — title 또는 id prefix
@@ -114,6 +122,12 @@ adminReviews.get('/reviews', async (c) => {
     }
     if (qualityLow) {
       durQuery = durQuery.eq('quality_status', 'failed')
+    }
+    if (pipelineFailed) {
+      durQuery = durQuery.or(
+        'gpu_upload_status.eq.failed,stt_status.eq.failed,' +
+          'diarize_status.eq.failed,gpu_pii_status.eq.failed,quality_status.eq.failed',
+      )
     }
     if (search) {
       durQuery = durQuery.or(`title.ilike.%${search}%,id.ilike.${search}%`)
