@@ -106,10 +106,12 @@ async function main() {
   // ── 5. 워커 1 cycle 직접 호출 ───────────────────────────────────
   console.log(`\n[5] processOneSession() 호출...`)
   const startedAt = Date.now()
-  const processed = await processOneSession()
+  const result = await processOneSession()
   const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1)
-  if (!processed) {
-    console.error(`[1.5 FAIL] processOneSession 이 false 반환 — 큐 비어있음 또는 픽업 실패`)
+  if (!result.processed) {
+    console.error(
+      `[1.5 FAIL] processOneSession 이 처리 안 함 — 큐 비어있음 또는 503 backoff (${result.backoff503 ? '503 backoff' : '큐 빔'})`,
+    )
     process.exit(1)
   }
   console.log(`[5] processOneSession 완료 (${elapsedSec}s)`)

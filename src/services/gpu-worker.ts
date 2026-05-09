@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════════
-// BM v10 — GPU 처리 워커 (백그라운드 폴링)
+// BM v10 — GPU 처리 워커 (백그라운드 폴링 + 운영 안정성)
 // ════════════════════════════════════════════════════════════════════
 //
 // WHY
@@ -7,41 +7,45 @@
 //   본 워커가 30초마다 폴링하여 1건씩 voice_api 로 전달, 결과를 DB+S3 에 반영.
 //
 // 흐름 (1 trace)
-//   1. SELECT FOR UPDATE SKIP LOCKED — raw_audio_url IS NOT NULL AND status='pending'
-//   2. status='running' (singleton lock)
+//   1. 픽업: pending 신규 OR failed 재시도 (retry_count<3 + 30분 경과)
+//   2. status='running' (singleton lock) + gpu_started_at = NOW()
 //   3. iwinv S3 에서 raw audio 다운로드
 //   4. voice_api POST /api/v1/transcribe (multipart, diarize+split+pii+denoise)
+//      - 503: status 'pending' 으로 되돌리고 60초 backoff (retry_count 증가 X)
 //   5. voice_api GET /api/v1/jobs/{task_id} 폴링 (1초 간격, max 5분)
-//   6. utterances 분리 결과:
-//      - voice_api GET /jobs/{task_id}/audio/{filename} 으로 WAV 다운로드
-//      - iwinv S3 utterances/{sessionId}/utt_{sessionId}_{seq:003}.wav 업로드
-//      - utterances 테이블 INSERT
-//   7. sessions UPDATE: stt_status, diarize_status, gpu_pii_status, quality_status = 'done'
+//   6. utterances 분리 결과를 utterances 테이블 + iwinv S3 에 저장
+//   7. sessions UPDATE: status='done' + 5단계 모두 'done'
 //
-// 단일 인스턴스 보장 (Render auto-scale 시):
-//   GPU_WORKER_ENABLED=true 환경변수 설정한 인스턴스만 워커 시작.
-//   추가 안전장치는 DB-level SKIP LOCKED.
+//   실패 시:
+//   - status='failed', retry_count++, gpu_last_error=메시지
+//   - retry_count<3 이면 30분 후 자동 재시도
+//   - retry_count>=3 이면 영구 failed (admin 수동 재시도 필요)
 //
-// 시작:
-//   src/index.ts 에서 if (process.env.GPU_WORKER_ENABLED === 'true') startGpuWorker()
+// stuck 감지 (별도 sweep, 5분마다):
+//   running 상태로 10분 초과 시 강제 failed 전환 (worker 가 죽었거나 hang 한 경우)
 //
-// STAGE 2 에서 추가 예정:
-//   - 재시도 로직 (gpu_retry_count, max 3)
-//   - 워커 사망 감지 (running 상태 10분 초과 시 stuck → failed 강제전환)
-//   - voice_api 503 backoff
-//   - 30일 lifecycle 자동 삭제
+// 단일 인스턴스 보장:
+//   GPU_WORKER_ENABLED=true 인스턴스만 워커 시작.
+//   추가 안전장치: pickNextSession 의 conditional UPDATE (race-safe)
 // ════════════════════════════════════════════════════════════════════
 
 import { GetObjectCommand } from '@aws-sdk/client-s3'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { s3Client, S3_AUDIO_BUCKET, uploadObject } from '../lib/s3.js'
 
-const POLL_INTERVAL_MS = 30_000  // 30초마다 폴링
+const POLL_INTERVAL_MS = 30_000  // 일반 폴링 30초
+const POLL_BACKOFF_503_MS = 60_000  // voice_api 503 시 60초 추가 대기
+const STUCK_SWEEP_INTERVAL_MS = 5 * 60_000  // stuck 감지 5분마다
+const STUCK_THRESHOLD_MS = 10 * 60_000  // running 10분 초과 = stuck
+const RETRY_DELAY_MIN = 30  // failed 후 30분 뒤 재시도
+const MAX_RETRY_COUNT = 3
+
 const VOICE_API_URL = process.env.VOICE_API_URL ?? 'http://localhost:8001'
-const VOICE_API_POLL_INTERVAL_MS = 1_000   // task_id 폴링 1초 간격
-const VOICE_API_MAX_WAIT_MS = 5 * 60 * 1000 // 한 건당 최대 5분
+const VOICE_API_POLL_INTERVAL_MS = 1_000
+const VOICE_API_MAX_WAIT_MS = 5 * 60 * 1000
 
 let isShuttingDown = false
+let lastStuckSweepAt = 0
 
 // ── voice_api 응답 타입 ─────────────────────────────────────────────
 interface VoiceApiUtterance {
@@ -69,17 +73,45 @@ interface VoiceApiJobResult {
   error?: string
 }
 
-// ── 1. 다음 처리할 세션 1건 picking (SKIP LOCKED) ──────────────────
+// 503 backoff 시그널 — 호출자가 retry_count 증가 안 시키도록
+class Voice503Error extends Error {
+  constructor(msg: string) {
+    super(msg)
+    this.name = 'Voice503Error'
+  }
+}
+
+// ── stuck sweep — running 10분 초과 → failed 강제 전환 ────────────
+async function sweepStuckSessions(): Promise<void> {
+  const cutoff = new Date(Date.now() - STUCK_THRESHOLD_MS).toISOString()
+  const { data, error } = await supabaseAdmin
+    .from('sessions')
+    .update({
+      gpu_upload_status: 'failed',
+      gpu_last_error: 'stuck — running 10분 초과 (워커 사망 또는 hang). 자동 재시도 큐에 진입.',
+    })
+    .eq('gpu_upload_status', 'running')
+    .lt('gpu_started_at', cutoff)
+    .select('id')
+
+  if (error) {
+    console.error('[gpu-worker] sweepStuck error:', error.message)
+    return
+  }
+  if (data && data.length > 0) {
+    console.warn(`[gpu-worker] sweepStuck: ${data.length} stuck session(s) reset to failed`)
+  }
+}
+
+// ── pickup: 신규 pending OR failed 재시도 ────────────────────────────
 async function pickNextSession(): Promise<{
   id: string
   user_id: string
   raw_audio_url: string
+  isRetry: boolean
 } | null> {
-  // PostgREST 가 SKIP LOCKED 를 직접 지원 안 하므로 RPC 또는 단순 SELECT+UPDATE.
-  // STAGE 1 단순화: 단일 인스턴스 가정 → 단순 SELECT + UPDATE.
-  // (Render service 인스턴스 1개 강제 + GPU_WORKER_ENABLED 1개만 true → 충돌 없음)
-  // STAGE 2 에서 advisory lock 또는 RPC 로 강화.
-  const { data, error } = await supabaseAdmin
+  // 우선순위 1: 신규 pending
+  const { data: pendingRow, error: pendingErr } = await supabaseAdmin
     .from('sessions')
     .select('id, user_id, raw_audio_url')
     .eq('gpu_upload_status', 'pending')
@@ -88,31 +120,75 @@ async function pickNextSession(): Promise<{
     .limit(1)
     .maybeSingle()
 
-  if (error) {
-    console.error('[gpu-worker] pickNextSession error:', error.message)
+  if (pendingErr) {
+    console.error('[gpu-worker] pickup pending error:', pendingErr.message)
     return null
   }
-  if (!data) return null
+  if (pendingRow) {
+    return await tryClaim(pendingRow as RowSlim, false)
+  }
 
-  // 'running' 마킹 (다른 인스턴스/재시도 로직과의 race 최소화)
-  const { error: updateError, count } = await supabaseAdmin
+  // 우선순위 2: failed 재시도 큐 (retry_count < 3 + 30분 경과)
+  const retryCutoff = new Date(Date.now() - RETRY_DELAY_MIN * 60_000).toISOString()
+  const { data: failedRow, error: failedErr } = await supabaseAdmin
     .from('sessions')
-    .update({
-      gpu_upload_status: 'running',
-      gpu_uploaded_at: new Date().toISOString(),
-    }, { count: 'exact' })
-    .eq('id', data.id)
-    .eq('gpu_upload_status', 'pending')
+    .select('id, user_id, raw_audio_url, gpu_retry_count')
+    .eq('gpu_upload_status', 'failed')
+    .lt('gpu_retry_count', MAX_RETRY_COUNT)
+    .lt('updated_at', retryCutoff)
+    .not('raw_audio_url', 'is', null)
+    .order('updated_at', { ascending: true })
+    .limit(1)
+    .maybeSingle()
 
-  if (updateError || !count || count === 0) {
-    // 다른 인스턴스가 먼저 픽업 또는 상태 변경됨 — skip
+  if (failedErr) {
+    console.error('[gpu-worker] pickup retry error:', failedErr.message)
     return null
   }
+  if (failedRow) {
+    return await tryClaim(failedRow as RowSlim, true)
+  }
 
-  return data as { id: string; user_id: string; raw_audio_url: string }
+  return null
 }
 
-// ── 2. iwinv S3 에서 raw audio 다운로드 ────────────────────────────
+interface RowSlim {
+  id: string
+  user_id: string
+  raw_audio_url: string
+}
+
+// race-safe claim — conditional UPDATE 가 0 row 면 다른 인스턴스가 이미 픽
+async function tryClaim(
+  row: RowSlim,
+  isRetry: boolean,
+): Promise<{
+  id: string
+  user_id: string
+  raw_audio_url: string
+  isRetry: boolean
+} | null> {
+  const fromStatus = isRetry ? 'failed' : 'pending'
+  const { count, error } = await supabaseAdmin
+    .from('sessions')
+    .update(
+      {
+        gpu_upload_status: 'running',
+        gpu_started_at: new Date().toISOString(),
+        gpu_uploaded_at: new Date().toISOString(),
+      },
+      { count: 'exact' },
+    )
+    .eq('id', row.id)
+    .eq('gpu_upload_status', fromStatus)
+
+  if (error || !count || count === 0) {
+    return null
+  }
+  return { ...row, isRetry }
+}
+
+// ── iwinv S3 raw audio 다운로드 ────────────────────────────────────
 async function downloadRawAudio(rawAudioUrl: string): Promise<Buffer> {
   const response = await s3Client.send(
     new GetObjectCommand({ Bucket: S3_AUDIO_BUCKET, Key: rawAudioUrl }),
@@ -124,7 +200,7 @@ async function downloadRawAudio(rawAudioUrl: string): Promise<Buffer> {
   return Buffer.from(bytes)
 }
 
-// ── 3. voice_api POST /api/v1/transcribe ───────────────────────────
+// ── voice_api POST /api/v1/transcribe ───────────────────────────────
 async function submitToVoiceApi(audioBuffer: Buffer, ext: string): Promise<string> {
   const url =
     `${VOICE_API_URL}/api/v1/transcribe` +
@@ -136,7 +212,8 @@ async function submitToVoiceApi(audioBuffer: Buffer, ext: string): Promise<strin
 
   const res = await fetch(url, { method: 'POST', body: form })
   if (res.status === 503) {
-    throw new Error('voice_api queue full (503) — backoff and retry next tick')
+    const text = await res.text().catch(() => '')
+    throw new Voice503Error(`voice_api queue full (503): ${text.slice(0, 100)}`)
   }
   if (!res.ok) {
     const text = await res.text()
@@ -146,13 +223,12 @@ async function submitToVoiceApi(audioBuffer: Buffer, ext: string): Promise<strin
   return json.task_id
 }
 
-// ── 4. voice_api job 폴링 ───────────────────────────────────────────
+// ── voice_api job 폴링 ──────────────────────────────────────────────
 async function pollVoiceApiJob(taskId: string): Promise<VoiceApiJobResult> {
   const start = Date.now()
   while (Date.now() - start < VOICE_API_MAX_WAIT_MS) {
     const res = await fetch(`${VOICE_API_URL}/api/v1/jobs/${taskId}`)
     if (res.status === 500) {
-      // failed
       const json = (await res.json()) as VoiceApiJobResult
       return { ...json, status: 'failed' }
     }
@@ -168,7 +244,7 @@ async function pollVoiceApiJob(taskId: string): Promise<VoiceApiJobResult> {
   throw new Error(`voice_api job ${taskId} timeout after ${VOICE_API_MAX_WAIT_MS / 1000}s`)
 }
 
-// ── 5. utterance WAV 다운로드 (voice_api → iwinv S3) ───────────────
+// ── utterance WAV 다운로드 (voice_api → iwinv S3) ──────────────────
 async function downloadUtteranceWav(taskId: string, filename: string): Promise<Buffer> {
   const res = await fetch(
     `${VOICE_API_URL}/api/v1/jobs/${taskId}/audio/${encodeURIComponent(filename)}`,
@@ -180,7 +256,7 @@ async function downloadUtteranceWav(taskId: string, filename: string): Promise<B
   return Buffer.from(ab)
 }
 
-// ── 6. utterances INSERT + sessions UPDATE 'done' ──────────────────
+// ── utterances INSERT + sessions UPDATE 'done' ─────────────────────
 async function persistResults(
   session: { id: string; user_id: string },
   taskId: string,
@@ -191,10 +267,9 @@ async function persistResults(
     console.warn(`[gpu-worker] session ${session.id}: 0 utterances returned`)
   }
 
-  // utterance 별로 WAV 다운로드 → iwinv 업로드 → DB INSERT
   for (let i = 0; i < utterances.length; i++) {
     const u = utterances[i]
-    const seq = i + 1 // 1-based
+    const seq = i + 1
     const seqPadded = String(seq).padStart(3, '0')
     const utteranceId = `utt_${session.id}_${seqPadded}`
     const storagePath = `utterances/${session.id}/${utteranceId}.wav`
@@ -211,7 +286,7 @@ async function persistResults(
         sequence_in_chunk: seq,
         sequence_order: seq,
         speaker_id: u.speaker_id,
-        is_user: false, // STAGE 2 에서 voice_profile 매칭으로 보강
+        is_user: false,
         start_sec: u.start_sec,
         end_sec: u.end_sec,
         duration_sec: u.duration_sec,
@@ -221,7 +296,7 @@ async function persistResults(
         transcript_text: u.transcript_text,
         transcript_words: u.words ?? null,
         segmented_by: 'gpu_v10',
-        client_version: 'gpu-worker-1.0',
+        client_version: 'gpu-worker-2.0',
         updated_at: new Date().toISOString(),
       },
       { onConflict: 'session_id,sequence_order' },
@@ -231,7 +306,6 @@ async function persistResults(
     }
   }
 
-  // sessions 5단계 done 으로 마킹
   const now = new Date().toISOString()
   await supabaseAdmin
     .from('sessions')
@@ -246,22 +320,32 @@ async function persistResults(
       quality_status: 'done',
       quality_at: now,
       utterance_count: utterances.length,
+      gpu_last_error: null, // 성공 시 에러 메시지 클리어
     })
     .eq('id', session.id)
 }
 
-// ── 메인 처리 함수 (export — E2E 테스트용) ──────────────────────────
-export async function processOneSession(): Promise<boolean> {
+// ── 메인 처리 함수 ──────────────────────────────────────────────────
+export async function processOneSession(): Promise<{
+  processed: boolean
+  backoff503: boolean
+}> {
+  // stuck sweep — 5분마다 한 번씩만
+  if (Date.now() - lastStuckSweepAt > STUCK_SWEEP_INTERVAL_MS) {
+    await sweepStuckSessions()
+    lastStuckSweepAt = Date.now()
+  }
+
   const session = await pickNextSession()
-  if (!session) return false
+  if (!session) return { processed: false, backoff503: false }
 
   const startedAt = Date.now()
-  console.log(`[gpu-worker] picked session=${session.id} url=${session.raw_audio_url}`)
+  console.log(
+    `[gpu-worker] picked session=${session.id} url=${session.raw_audio_url}${session.isRetry ? ' (retry)' : ''}`,
+  )
 
   try {
-    // ext 추출 (raw-audio/{userId}/{sessionId}.{ext})
     const ext = (session.raw_audio_url.split('.').pop() ?? 'm4a').toLowerCase()
-
     const audioBuffer = await downloadRawAudio(session.raw_audio_url)
     console.log(
       `[gpu-worker] downloaded ${audioBuffer.byteLength} bytes from ${session.raw_audio_url}`,
@@ -279,18 +363,46 @@ export async function processOneSession(): Promise<boolean> {
     console.log(
       `[gpu-worker] session=${session.id} done — utterances=${result.utterances?.length ?? 0}, ms=${Date.now() - startedAt}`,
     )
-    return true
+    return { processed: true, backoff503: false }
   } catch (err: any) {
+    if (err instanceof Voice503Error) {
+      // 503 — pending 으로 되돌리고 backoff. retry_count 안 올림.
+      console.warn(`[gpu-worker] session=${session.id} 503 — revert to pending, backoff`)
+      await supabaseAdmin
+        .from('sessions')
+        .update({
+          gpu_upload_status: 'pending',
+          gpu_started_at: null,
+          gpu_last_error: err.message,
+        })
+        .eq('id', session.id)
+      return { processed: false, backoff503: true }
+    }
+
+    // 일반 실패: failed + retry_count++
     console.error(`[gpu-worker] session=${session.id} FAIL:`, err.message)
-    // 실패 마킹 — STAGE 2 에서 retry 로직 추가
-    await supabaseAdmin
-      .from('sessions')
-      .update({
-        gpu_upload_status: 'failed',
-        // STAGE 2 컬럼 (gpu_last_error) 은 아직 없음 — 로그만으로 충분
-      })
-      .eq('id', session.id)
-    return true // 큐는 계속 진행 (다른 세션 처리 가능)
+    const { error: updateErr } = await supabaseAdmin.rpc('increment_gpu_retry', {
+      p_session_id: session.id,
+      p_error_msg: String(err.message ?? err).slice(0, 1000),
+    })
+    if (updateErr) {
+      // RPC 미존재 시 fallback — 직접 SELECT + UPDATE
+      const { data: row } = await supabaseAdmin
+        .from('sessions')
+        .select('gpu_retry_count')
+        .eq('id', session.id)
+        .single()
+      const nextCount = (row?.gpu_retry_count ?? 0) + 1
+      await supabaseAdmin
+        .from('sessions')
+        .update({
+          gpu_upload_status: 'failed',
+          gpu_retry_count: nextCount,
+          gpu_last_error: String(err.message ?? err).slice(0, 1000),
+        })
+        .eq('id', session.id)
+    }
+    return { processed: true, backoff503: false }
   }
 }
 
@@ -302,9 +414,10 @@ function sleep(ms: number): Promise<void> {
 async function pollLoop(): Promise<void> {
   while (!isShuttingDown) {
     try {
-      const processed = await processOneSession()
-      if (!processed) {
-        // 큐 빈 경우만 대기. 처리한 경우 곧바로 다음 1건 시도.
+      const { processed, backoff503 } = await processOneSession()
+      if (backoff503) {
+        await sleep(POLL_BACKOFF_503_MS)
+      } else if (!processed) {
         await sleep(POLL_INTERVAL_MS)
       }
     } catch (err: any) {
@@ -318,7 +431,7 @@ async function pollLoop(): Promise<void> {
 // ── 시작/정지 export ───────────────────────────────────────────────
 export function startGpuWorker(): void {
   console.log(
-    `[gpu-worker] starting — VOICE_API_URL=${VOICE_API_URL}, poll=${POLL_INTERVAL_MS}ms`,
+    `[gpu-worker] starting v2 — VOICE_API_URL=${VOICE_API_URL}, poll=${POLL_INTERVAL_MS}ms, stuck=${STUCK_THRESHOLD_MS / 60000}min, retry=${MAX_RETRY_COUNT}x@${RETRY_DELAY_MIN}min`,
   )
   pollLoop().catch((err) => {
     console.error('[gpu-worker] FATAL pollLoop crashed:', err)
@@ -328,4 +441,107 @@ export function startGpuWorker(): void {
 export function stopGpuWorker(): void {
   console.log('[gpu-worker] stop requested')
   isShuttingDown = true
+}
+
+// ── 모니터링 export — admin endpoint 용 ───────────────────────────
+export async function getWorkerStatus(): Promise<{
+  voiceApiUrl: string
+  pollIntervalMs: number
+  retryConfig: { maxCount: number; delayMin: number; stuckMin: number }
+  queue: {
+    pending: number
+    running: number
+    failed: number
+    failedRetryEligible: number
+    failedExhausted: number
+    done: number
+  }
+  recentFailures: { id: string; gpu_last_error: string; gpu_retry_count: number; updated_at: string }[]
+  oldestPending: { id: string; raw_audio_uploaded_at: string } | null
+  currentRunning: { id: string; gpu_started_at: string } | null
+}> {
+  const retryCutoff = new Date(Date.now() - RETRY_DELAY_MIN * 60_000).toISOString()
+
+  const [
+    pendingCount,
+    runningCount,
+    failedCount,
+    failedRetryEligibleCount,
+    failedExhaustedCount,
+    doneCount,
+    recentFailures,
+    oldestPending,
+    currentRunning,
+  ] = await Promise.all([
+    supabaseAdmin
+      .from('sessions')
+      .select('id', { count: 'exact', head: true })
+      .eq('gpu_upload_status', 'pending')
+      .not('raw_audio_url', 'is', null),
+    supabaseAdmin
+      .from('sessions')
+      .select('id', { count: 'exact', head: true })
+      .eq('gpu_upload_status', 'running'),
+    supabaseAdmin
+      .from('sessions')
+      .select('id', { count: 'exact', head: true })
+      .eq('gpu_upload_status', 'failed'),
+    supabaseAdmin
+      .from('sessions')
+      .select('id', { count: 'exact', head: true })
+      .eq('gpu_upload_status', 'failed')
+      .lt('gpu_retry_count', MAX_RETRY_COUNT)
+      .lt('updated_at', retryCutoff),
+    supabaseAdmin
+      .from('sessions')
+      .select('id', { count: 'exact', head: true })
+      .eq('gpu_upload_status', 'failed')
+      .gte('gpu_retry_count', MAX_RETRY_COUNT),
+    supabaseAdmin
+      .from('sessions')
+      .select('id', { count: 'exact', head: true })
+      .eq('gpu_upload_status', 'done'),
+    supabaseAdmin
+      .from('sessions')
+      .select('id, gpu_last_error, gpu_retry_count, updated_at')
+      .eq('gpu_upload_status', 'failed')
+      .order('updated_at', { ascending: false })
+      .limit(5),
+    supabaseAdmin
+      .from('sessions')
+      .select('id, raw_audio_uploaded_at')
+      .eq('gpu_upload_status', 'pending')
+      .not('raw_audio_url', 'is', null)
+      .order('raw_audio_uploaded_at', { ascending: true })
+      .limit(1)
+      .maybeSingle(),
+    supabaseAdmin
+      .from('sessions')
+      .select('id, gpu_started_at')
+      .eq('gpu_upload_status', 'running')
+      .order('gpu_started_at', { ascending: true })
+      .limit(1)
+      .maybeSingle(),
+  ])
+
+  return {
+    voiceApiUrl: VOICE_API_URL,
+    pollIntervalMs: POLL_INTERVAL_MS,
+    retryConfig: {
+      maxCount: MAX_RETRY_COUNT,
+      delayMin: RETRY_DELAY_MIN,
+      stuckMin: STUCK_THRESHOLD_MS / 60_000,
+    },
+    queue: {
+      pending: pendingCount.count ?? 0,
+      running: runningCount.count ?? 0,
+      failed: failedCount.count ?? 0,
+      failedRetryEligible: failedRetryEligibleCount.count ?? 0,
+      failedExhausted: failedExhaustedCount.count ?? 0,
+      done: doneCount.count ?? 0,
+    },
+    recentFailures: (recentFailures.data ?? []) as any,
+    oldestPending: (oldestPending.data ?? null) as any,
+    currentRunning: (currentRunning.data ?? null) as any,
+  }
 }

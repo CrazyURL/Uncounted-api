@@ -32,6 +32,7 @@ import adminDeliveries from './routes/admin-deliveries.js'
 import adminDashboard from './routes/admin-dashboard.js'
 import adminBalances from './routes/admin-balances.js'
 import adminUtterancesV2 from './routes/admin-utterances-v2.js'
+import adminGpuWorker from './routes/admin-gpu-worker.js'
 
 // package.json에서 버전 정보 읽기
 const __filename = fileURLToPath(import.meta.url)
@@ -110,6 +111,7 @@ app.route('/api/admin', adminDeliveries)
 app.route('/api/admin', adminDashboard)
 app.route('/api/admin', adminBalances)
 app.route('/api/admin', adminUtterancesV2)
+app.route('/api/admin', adminGpuWorker)
 app.route('/api/user', userRewards)
 app.route('/api/logging', logging)
 app.route('/api/consent', consent)
