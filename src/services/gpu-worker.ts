@@ -380,13 +380,19 @@ export async function processOneSession(): Promise<{
     }
 
     // 일반 실패: failed + retry_count++
-    console.error(`[gpu-worker] session=${session.id} FAIL:`, err.message)
+    // err.cause 도 캡쳐 (undici 의 'fetch failed' 같은 generic 메시지에서 진짜 원인 추출)
+    const causeMsg = err?.cause
+      ? ` cause=${err.cause?.code ?? ''} ${err.cause?.message ?? String(err.cause)}`
+      : ''
+    const fullErrMsg = `${err.message ?? String(err)}${causeMsg}`
+    console.error(`[gpu-worker] session=${session.id} FAIL: ${fullErrMsg}`)
+
     const { error: updateErr } = await supabaseAdmin.rpc('increment_gpu_retry', {
       p_session_id: session.id,
-      p_error_msg: String(err.message ?? err).slice(0, 1000),
+      p_error_msg: fullErrMsg.slice(0, 1000),
     })
     if (updateErr) {
-      // RPC 미존재 시 fallback — 직접 SELECT + UPDATE
+      // RPC 미존재 시 fallback — 직접 SELECT + UPDATE (updated_at 명시 — 30분 retry 간격 적용)
       const { data: row } = await supabaseAdmin
         .from('sessions')
         .select('gpu_retry_count')
@@ -398,7 +404,8 @@ export async function processOneSession(): Promise<{
         .update({
           gpu_upload_status: 'failed',
           gpu_retry_count: nextCount,
-          gpu_last_error: String(err.message ?? err).slice(0, 1000),
+          gpu_last_error: fullErrMsg.slice(0, 1000),
+          updated_at: new Date().toISOString(),
         })
         .eq('id', session.id)
     }
