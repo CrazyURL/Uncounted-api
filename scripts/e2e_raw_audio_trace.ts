@@ -24,6 +24,8 @@
 
 import 'dotenv/config'
 import { readFile } from 'node:fs/promises'
+import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { supabaseAdmin } from '../src/lib/supabase.js'
 import { uploadObject, S3_AUDIO_BUCKET } from '../src/lib/s3.js'
 import { processOneSession } from '../src/services/gpu-worker.js'
@@ -31,8 +33,12 @@ import { processOneSession } from '../src/services/gpu-worker.js'
 // ── 테스트 설정 ─────────────────────────────────────────────────────
 const TEST_USER_ID = 'cbee40db-d490-47f9-908b-b61492b6f63d'  // 919 dummy 의 owner (auth.users 보존됨)
 const TEST_SESSION_ID = `test_e2e_${Date.now().toString(36)}`
-const SAMPLE_AUDIO_PATH = process.env.SAMPLE_AUDIO_PATH ??
-  'C:/Users/user/Downloads/언카운티드/voicebank/data/통화 녹음 문소라_260212_001051.m4a'
+
+// 기본 샘플 경로 — repo 내 scripts/sample-audio/test-utterance.m4a
+// 환경변수 SAMPLE_AUDIO_PATH 로 override 가능 (로컬 voicebank 사용 시)
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const SAMPLE_AUDIO_PATH =
+  process.env.SAMPLE_AUDIO_PATH ?? resolve(__dirname, 'sample-audio/test-utterance.m4a')
 
 async function main() {
   console.log('━'.repeat(60))
