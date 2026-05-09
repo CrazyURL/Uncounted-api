@@ -392,6 +392,127 @@ storage.post('/audio/utterance', async (c) => {
 })
 
 /**
+ * POST /storage/raw-audio
+ * BM v10 — Raw audio 업로드 (GPU 서버 처리 큐 진입)
+ *
+ * 흐름:
+ *   App: 동의 양측 완료 → raw audio (m4a/wav) 를 이 엔드포인트로 업로드
+ *   API: iwinv S3 'raw-audio/{userId}/{sessionId}.{ext}' 에 저장
+ *        sessions.raw_audio_url + size + uploaded_at 업데이트
+ *   Worker: raw_audio_url IS NOT NULL AND gpu_upload_status='pending' 폴링
+ *
+ * Body (multipart/form-data):
+ *   - audioFile: 음성 binary (Blob, m4a/wav/mp3)
+ *   - meta:      AES-256-GCM 암호화된 JSON { sessionId, ext }
+ *
+ * 응답: { storagePath, sizeBytes }
+ *
+ * 제약: 500MB 한도 (voice_api 와 동일)
+ */
+storage.post('/raw-audio', async (c) => {
+  const userId = c.get('userId') as string
+
+  try {
+    const form = await c.req.formData()
+    const audioFile = form.get('audioFile') as File | null
+    const metaRaw = form.get('meta') as string | null
+
+    if (!audioFile || !metaRaw) {
+      return c.json({ error: 'Missing audioFile or meta' }, 400)
+    }
+
+    const meta = decryptData(metaRaw) as {
+      sessionId: string
+      ext: string
+    }
+
+    const { sessionId, ext } = meta
+    if (!sessionId || !ext) {
+      return c.json({ error: 'Missing sessionId or ext in meta' }, 400)
+    }
+
+    // 확장자 화이트리스트 — voice_api 가 처리 가능한 포맷
+    const ALLOWED_EXTS = ['m4a', 'wav', 'mp3', 'ogg', 'flac', 'webm', 'mp4']
+    const normalizedExt = ext.toLowerCase().replace(/^\./, '')
+    if (!ALLOWED_EXTS.includes(normalizedExt)) {
+      return c.json(
+        { error: `Unsupported ext: ${normalizedExt}. Allowed: ${ALLOWED_EXTS.join(', ')}` },
+        400,
+      )
+    }
+
+    // 파일 크기 한도 500MB (voice_api MAX_UPLOAD_SIZE 와 동일)
+    const MAX_RAW_SIZE = 500 * 1024 * 1024
+    if (audioFile.size > MAX_RAW_SIZE) {
+      return c.json({ error: 'Raw audio file too large: max 500MB' }, 413)
+    }
+    if (audioFile.size === 0) {
+      return c.json({ error: 'Empty audio file' }, 400)
+    }
+
+    // 세션 소유권 검증
+    const { data: session } = await supabaseAdmin
+      .from('sessions')
+      .select('id, raw_audio_url')
+      .eq('id', sessionId)
+      .eq('user_id', userId)
+      .single()
+    if (!session) {
+      return c.json({ error: 'Session not found or access denied' }, 403)
+    }
+
+    // 이미 업로드된 raw audio 가 있으면 거부 (중복 업로드 방지)
+    if (session.raw_audio_url) {
+      return c.json(
+        { error: 'Raw audio already uploaded for this session', existing: session.raw_audio_url },
+        409,
+      )
+    }
+
+    const storagePath = `raw-audio/${userId}/${sessionId}.${normalizedExt}`
+    const contentType =
+      normalizedExt === 'm4a' || normalizedExt === 'mp4'
+        ? 'audio/mp4'
+        : normalizedExt === 'wav'
+          ? 'audio/wav'
+          : normalizedExt === 'mp3'
+            ? 'audio/mpeg'
+            : 'application/octet-stream'
+
+    // S3 업로드
+    const bytes = new Uint8Array(await audioFile.arrayBuffer())
+    await uploadObject(S3_AUDIO_BUCKET, storagePath, bytes, contentType)
+
+    // sessions UPDATE — raw_audio_* 채우기. gpu_upload_status 는 'pending' 그대로.
+    // 워커 폴링 조건: raw_audio_url IS NOT NULL AND gpu_upload_status='pending'
+    const { error: dbError } = await supabaseAdmin
+      .from('sessions')
+      .update({
+        raw_audio_url: storagePath,
+        raw_audio_size: bytes.byteLength,
+        raw_audio_uploaded_at: new Date().toISOString(),
+        // gpu_upload_status='pending' 기본값 — 변경하지 않음
+      })
+      .eq('id', sessionId)
+      .eq('user_id', userId)
+
+    if (dbError) {
+      // DB 실패 시 S3 정리 (orphan 방지)
+      try {
+        await deleteObjects(S3_AUDIO_BUCKET, [storagePath])
+      } catch (_) {
+        // S3 정리 실패는 무시 — 30일 lifecycle 이 청소
+      }
+      return c.json({ error: dbError.message }, 500)
+    }
+
+    return c.json({ storagePath, sizeBytes: bytes.byteLength })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
  * DELETE /storage/user
  * 사용자 파일 전체 삭제 (데이터 철회)
  */
