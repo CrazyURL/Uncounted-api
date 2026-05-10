@@ -137,6 +137,7 @@ type SessionFilterParams = {
   uploadStatuses: string[]
   dateFrom?: string
   dateTo?: string
+  consentStatus?: string  // 'both_agreed' | 'user_only' | 'locked' | 'all' (운영 검수용 필터)
 }
 
 function applySessionFilters(query: any, f: SessionFilterParams) {
@@ -169,6 +170,9 @@ function applySessionFilters(query: any, f: SessionFilterParams) {
     if (f.transcriptSessionIds.length) query = query.not('id', 'in', `(${f.transcriptSessionIds.join(',')})`)
   }
   if (f.uploadStatuses.length) query = query.in('upload_status', f.uploadStatuses)
+  if (f.consentStatus && f.consentStatus !== 'all') {
+    query = query.eq('consent_status', f.consentStatus)
+  }
   if (f.dateFrom) query = query.gte('date', f.dateFrom)
   if (f.dateTo) query = query.lte('date', f.dateTo)
   return query
@@ -402,6 +406,7 @@ admin.get('/sessions', async (c) => {
   const uploadStatuses = c.req.queries('uploadStatuses') ?? []
   const dateFrom = c.req.query('dateFrom')
   const dateTo = c.req.query('dateTo')
+  const consentStatus = c.req.query('consentStatus')
   const sortBy = c.req.query('sortBy') ?? 'date'
   const sortDir = c.req.query('sortDir') ?? 'desc'
 
@@ -430,7 +435,7 @@ admin.get('/sessions', async (c) => {
       domains, qualityGrades, labelStatus, labeledSessionIds, publicStatus,
       piiCleanedOnly, hasAudioUrl, diarizationStatus,
       transcriptSessionIds, transcriptStatus,
-      uploadStatuses, dateFrom, dateTo,
+      uploadStatuses, dateFrom, dateTo, consentStatus,
     }
 
     let query = supabaseAdmin
@@ -466,6 +471,78 @@ admin.get('/sessions', async (c) => {
 })
 
 /**
+ * GET /admin/sessions/aggregate
+ * 필터링된 세션의 합계 — count, totalDurationSec.
+ * 페이지에 표시되는 100건 외에 전체 카운트/통화시간을 한 번에 보여주기 위한 집계 전용 엔드포인트.
+ * GET /admin/sessions 와 동일한 query 필터 (limit/offset/sortBy 무시).
+ */
+admin.get('/sessions/aggregate', async (c) => {
+  const domains = c.req.queries('domains') ?? []
+  const qualityGrades = c.req.queries('qualityGrades') ?? []
+  const labelStatus = c.req.query('labelStatus')
+  const publicStatus = c.req.query('publicStatus')
+  const piiCleanedOnly = c.req.query('piiCleanedOnly') === 'true'
+  const hasAudioUrl = c.req.query('hasAudioUrl') === 'true'
+  const diarizationStatus = c.req.query('diarizationStatus')
+  const transcriptStatus = c.req.query('transcriptStatus')
+  const uploadStatuses = c.req.queries('uploadStatuses') ?? []
+  const dateFrom = c.req.query('dateFrom')
+  const dateTo = c.req.query('dateTo')
+  const consentStatus = c.req.query('consentStatus')
+
+  try {
+    let transcriptSessionIds: string[] | null = null
+    if (transcriptStatus === 'done' || transcriptStatus === 'none') {
+      const { data: tData } = await supabaseAdmin.from('transcripts').select('session_id')
+      transcriptSessionIds = (tData ?? []).map((r: any) => r.session_id as string)
+    }
+
+    let labeledSessionIds: string[] | null = null
+    if (labelStatus === 'labeled' || labelStatus === 'unlabeled') {
+      const { data: lData } = await supabaseAdmin
+        .from('utterances')
+        .select('session_id')
+        .not('labels', 'is', null)
+      labeledSessionIds = [...new Set((lData ?? []).map((r: any) => r.session_id as string))]
+    }
+
+    const filterParams: SessionFilterParams = {
+      domains, qualityGrades, labelStatus, labeledSessionIds, publicStatus,
+      piiCleanedOnly, hasAudioUrl, diarizationStatus,
+      transcriptSessionIds, transcriptStatus,
+      uploadStatuses, dateFrom, dateTo, consentStatus,
+    }
+
+    // 1000건씩 페이지네이션해서 duration 합산 (count 는 첫 페이지에서 exact)
+    const PAGE = 1000
+    let totalDurationSec = 0
+    let count = 0
+    let from = 0
+    while (true) {
+      let q = supabaseAdmin
+        .from('sessions')
+        .select('duration', { count: 'exact' })
+        .range(from, from + PAGE - 1)
+      q = applySessionFilters(q, filterParams)
+      const { data, error, count: c0 } = await q
+      if (error) return c.json({ error: error.message }, 500)
+      if (from === 0) count = c0 ?? 0
+      const rows = data ?? []
+      for (const r of rows) {
+        const d = Number((r as any).duration)
+        if (Number.isFinite(d)) totalDurationSec += d
+      }
+      if (rows.length < PAGE) break
+      from += PAGE
+    }
+
+    return c.json({ data: { count, totalDurationSec } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
  * GET /admin/users/stats
  * 사용자별 세션 집계 (필터·페이징 지원)
  * Query params: 위 /sessions와 동일 필터 + sortBy: 'sessionCount'|'totalDuration'|'avgQaScore'
@@ -484,6 +561,7 @@ admin.get('/users/stats', async (c) => {
   const uploadStatuses = c.req.queries('uploadStatuses') ?? []
   const dateFrom = c.req.query('dateFrom')
   const dateTo = c.req.query('dateTo')
+  const consentStatus = c.req.query('consentStatus')
   const userSortBy = c.req.query('sortBy') ?? 'sessionCount'
   const sortDir = c.req.query('sortDir') ?? 'desc'
   const ascending = sortDir === 'asc'
@@ -510,7 +588,7 @@ admin.get('/users/stats', async (c) => {
       domains, qualityGrades, labelStatus, labeledSessionIds, publicStatus,
       piiCleanedOnly, hasAudioUrl, diarizationStatus,
       transcriptSessionIds, transcriptStatus,
-      uploadStatuses, dateFrom, dateTo,
+      uploadStatuses, dateFrom, dateTo, consentStatus,
     }
 
     // 필터 적용해 세션 전체 로드 (집계용, 페이징 없음)
