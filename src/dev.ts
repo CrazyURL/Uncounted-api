@@ -2,9 +2,19 @@
 // Node.js로 Hono 앱 실행 (개발용)
 
 import 'dotenv/config'
+import { setGlobalDispatcher, ProxyAgent } from 'undici'
 import { serve } from '@hono/node-server'
 import app from './index.js'
 import { startGpuWorker, stopGpuWorker } from './services/gpu-worker.js'
+
+// BM v10 — Render container 내 Tailscale userspace networking.
+// HTTP_PROXY 가 설정되면 (render-start.sh 가 설정) 모든 fetch 가 Tailnet
+// 경유. voice_api (Tailscale 망 안) 호출 가능 + 외부 HTTPS 도 동일 경로.
+const httpProxy = process.env.HTTP_PROXY || process.env.HTTPS_PROXY
+if (httpProxy) {
+  setGlobalDispatcher(new ProxyAgent(httpProxy))
+  console.log(`[fetch] global ProxyAgent → ${httpProxy}`)
+}
 
 const port = parseInt(process.env.PORT || '3001', 10)
 

@@ -3,8 +3,8 @@ services:
     name: uncounted-api-dev
     runtime: node
     branch: main
-    buildCommand: yarn --frozen-lockfile install; yarn build
-    startCommand: yarn start
+    buildCommand: npm ci; npm run build; bash ./scripts/install-tailscale.sh
+    startCommand: bash ./scripts/render-start.sh
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
@@ -17,6 +17,12 @@ services:
         sync: false
       - key: ENCRYPTION_KEY
         sync: false
+      - key: TAILSCALE_AUTHKEY
+        sync: false
+      - key: VOICE_API_URL
+        sync: false
+      - key: GPU_WORKER_ENABLED
+        value: "true"
       - key: CORS_ORIGIN
         value: https://uncounted-admin-dev.onrender.com,https://uncounted-web.pages.dev,https://desktop-o49pmfa.tail280251.ts.net:10000,http://localhost:5173,http://localhost:15173,http://localhost:5180,https://localhost,capacitor://localhost
 
@@ -24,8 +30,8 @@ services:
     name: uncounted-api-prod
     runtime: node
     branch: 1.0.0
-    buildCommand: yarn --frozen-lockfile install; yarn build
-    startCommand: yarn start
+    buildCommand: npm ci; npm run build; bash ./scripts/install-tailscale.sh
+    startCommand: bash ./scripts/render-start.sh
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
@@ -38,5 +44,11 @@ services:
         sync: false
       - key: ENCRYPTION_KEY
         sync: false
+      - key: TAILSCALE_AUTHKEY
+        sync: false
+      - key: VOICE_API_URL
+        sync: false
+      - key: GPU_WORKER_ENABLED
+        value: "true"
       - key: CORS_ORIGIN
         value: https://uncounted-admin-prod.onrender.com
