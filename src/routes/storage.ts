@@ -506,6 +506,12 @@ storage.post('/raw-audio', async (c) => {
       return c.json({ error: dbError.message }, 500)
     }
 
+    // BM v10 — DB commit 성공 직후 워커 즉시 깨움 (30초 폴링 latency 제거).
+    // import dynamic 으로 순환 import 회피. resolve 만 호출, 처리는 워커가 비동기 진행.
+    void import('../services/gpu-worker.js').then((m) =>
+      m.triggerWorker(`raw-audio uploaded sessionId=${sessionId}`),
+    ).catch(() => {/* trigger 실패는 polling fallback 에 의지 */})
+
     return c.json({ storagePath, sizeBytes: bytes.byteLength })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)

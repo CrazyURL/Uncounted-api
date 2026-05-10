@@ -33,12 +33,17 @@ import { GetObjectCommand } from '@aws-sdk/client-s3'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { s3Client, S3_AUDIO_BUCKET, uploadObject } from '../lib/s3.js'
 
-const POLL_INTERVAL_MS = 30_000  // 일반 폴링 30초
+const POLL_INTERVAL_MS = 30_000  // safety net 폴링 30초 (immediate trigger 우선, 이건 fallback)
 const POLL_BACKOFF_503_MS = 60_000  // voice_api 503 시 60초 추가 대기
 const STUCK_SWEEP_INTERVAL_MS = 5 * 60_000  // stuck 감지 5분마다
 const STUCK_THRESHOLD_MS = 10 * 60_000  // running 10분 초과 = stuck
 const RETRY_DELAY_MIN = 30  // failed 후 30분 뒤 재시도
 const MAX_RETRY_COUNT = 3
+
+// 워커 동시성 — 단일 GPU 가 bottleneck 이라 2 가 sweet spot.
+// I/O (S3 download/upload) 와 voice_api GPU 처리 중복 → 약간 throughput 향상.
+// voice_api MAX_ACTIVE_JOBS 가 이 값 이상이어야 503 안 남.
+const WORKER_CONCURRENCY = Math.max(1, parseInt(process.env.WORKER_CONCURRENCY ?? '2', 10))
 
 const VOICE_API_URL = process.env.VOICE_API_URL ?? 'http://localhost:8001'
 const VOICE_API_POLL_INTERVAL_MS = 1_000
@@ -46,6 +51,42 @@ const VOICE_API_MAX_WAIT_MS = 5 * 60 * 1000
 
 let isShuttingDown = false
 let lastStuckSweepAt = 0
+
+// ── Wakeup 시그널 — immediate trigger 용 cancellable sleep ────────────
+// /api/storage/raw-audio 핸들러가 raw audio 업로드 직후 호출 → 워커 즉시 깨어남.
+// 30초 폴링 대기 latency 제거. 여러 trigger 가 동시 도착해도 한 번만 깨어남
+// (resolved Promise 의 추가 resolve 는 no-op).
+interface Wakeup {
+  promise: Promise<void>
+  resolve: () => void
+  resolved: boolean
+}
+let wakeup: Wakeup | null = null
+function getWakeup(): Wakeup {
+  if (!wakeup || wakeup.resolved) {
+    let resolve!: () => void
+    const promise = new Promise<void>((r) => { resolve = r })
+    const w: Wakeup = {
+      promise,
+      resolve: () => {
+        if (!w.resolved) {
+          w.resolved = true
+          resolve()
+        }
+      },
+      resolved: false,
+    }
+    wakeup = w
+  }
+  return wakeup
+}
+
+/** raw audio 업로드 핸들러가 호출 — 워커 즉시 1 tick 진행 */
+export function triggerWorker(reason = 'unknown'): void {
+  getWakeup().resolve()
+  // 로그는 trigger 출처 추적용 (debounce 검증)
+  console.log(`[gpu-worker] triggered (${reason})`)
+}
 
 // ── voice_api 응답 타입 ─────────────────────────────────────────────
 interface VoiceApiUtterance {
@@ -417,43 +458,58 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-// ── 폴링 루프 ───────────────────────────────────────────────────────
-async function pollLoop(): Promise<void> {
+// ── 폴링 루프 (cancellable sleep + concurrency-aware) ────────────────
+// 동작:
+//   1. processOneSession() — 한 건 픽업/처리 시도
+//   2. 처리됨 → 즉시 다음 시도 (대기 없음)
+//   3. 큐 비어있음 → POLL_INTERVAL_MS 또는 wakeup 중 빠른 쪽
+//   4. 503 → POLL_BACKOFF_503_MS 만큼 sleep (wakeup 무시 — voice_api 큐 만석 존중)
+async function pollLoop(workerIndex: number): Promise<void> {
+  const tag = `[gpu-worker#${workerIndex}]`
+  console.log(`${tag} loop started`)
   while (!isShuttingDown) {
     try {
       const { processed, backoff503 } = await processOneSession()
       if (backoff503) {
+        // 503 — voice_api 큐 만석. wakeup 무시하고 통째로 sleep.
         await sleep(POLL_BACKOFF_503_MS)
       } else if (!processed) {
-        await sleep(POLL_INTERVAL_MS)
+        // 큐 비어있음 — 30초 대기, 단 wakeup 시그널 오면 즉시 다시 시도
+        await Promise.race([sleep(POLL_INTERVAL_MS), getWakeup().promise])
       }
+      // processed=true → 즉시 다음 픽업 (다른 인스턴스가 아직 처리할 게 있을 수 있음)
     } catch (err: any) {
-      console.error('[gpu-worker] pollLoop error:', err.message)
+      console.error(`${tag} pollLoop error:`, err.message)
       await sleep(POLL_INTERVAL_MS)
     }
   }
-  console.log('[gpu-worker] shutdown complete')
+  console.log(`${tag} shutdown complete`)
 }
 
 // ── 시작/정지 export ───────────────────────────────────────────────
 export function startGpuWorker(): void {
   console.log(
-    `[gpu-worker] starting v2 — VOICE_API_URL=${VOICE_API_URL}, poll=${POLL_INTERVAL_MS}ms, stuck=${STUCK_THRESHOLD_MS / 60000}min, retry=${MAX_RETRY_COUNT}x@${RETRY_DELAY_MIN}min`,
+    `[gpu-worker] starting v3 — VOICE_API_URL=${VOICE_API_URL}, concurrency=${WORKER_CONCURRENCY}, poll=${POLL_INTERVAL_MS}ms (safety net), stuck=${STUCK_THRESHOLD_MS / 60000}min, retry=${MAX_RETRY_COUNT}x@${RETRY_DELAY_MIN}min`,
   )
-  pollLoop().catch((err) => {
-    console.error('[gpu-worker] FATAL pollLoop crashed:', err)
-  })
+  for (let i = 0; i < WORKER_CONCURRENCY; i++) {
+    pollLoop(i).catch((err) => {
+      console.error(`[gpu-worker#${i}] FATAL pollLoop crashed:`, err)
+    })
+  }
 }
 
 export function stopGpuWorker(): void {
   console.log('[gpu-worker] stop requested')
   isShuttingDown = true
+  // wakeup 도 깨워서 sleep 중인 loop 들이 즉시 종료 체크 하도록
+  getWakeup().resolve()
 }
 
 // ── 모니터링 export — admin endpoint 용 ───────────────────────────
 export async function getWorkerStatus(): Promise<{
   voiceApiUrl: string
   pollIntervalMs: number
+  concurrency: number
   retryConfig: { maxCount: number; delayMin: number; stuckMin: number }
   queue: {
     pending: number
@@ -534,6 +590,7 @@ export async function getWorkerStatus(): Promise<{
   return {
     voiceApiUrl: VOICE_API_URL,
     pollIntervalMs: POLL_INTERVAL_MS,
+    concurrency: WORKER_CONCURRENCY,
     retryConfig: {
       maxCount: MAX_RETRY_COUNT,
       delayMin: RETRY_DELAY_MIN,
