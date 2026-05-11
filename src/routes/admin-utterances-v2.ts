@@ -24,6 +24,7 @@ const HOURLY_RATE_KRW = 30_000
 adminUtterancesV2.get('/utterances-v2', async (c) => {
   const url = new URL(c.req.url)
   const settled = url.searchParams.get('settled')  // 'yes' | 'no' | null
+  const review = url.searchParams.get('review')  // 'pending' | 'excluded' | null
   const sessionId = url.searchParams.get('session_id') ?? undefined
   const search = url.searchParams.get('q') ?? undefined
   const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1)
@@ -33,7 +34,7 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
   let query = supabaseAdmin
     .from('utterances')
     .select(
-      'id, session_id, speaker_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at',
+      'id, session_id, speaker_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at',
       { count: 'exact' },
     )
     .order('start_ms', { ascending: true })
@@ -41,6 +42,7 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
 
   if (settled === 'yes') query = query.not('settled_at', 'is', null)
   else if (settled === 'no') query = query.is('settled_at', null)
+  if (review === 'pending' || review === 'excluded') query = query.eq('review_status', review)
   if (sessionId) query = query.eq('session_id', sessionId)
   if (search) query = query.ilike('transcript_text', `%${search}%`)
 
@@ -65,6 +67,9 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
       text: ((row.transcript_text as string) ?? '').slice(0, 200),
       unit_price_krw: storedPrice ?? computedPrice,
       settled_at: (row.settled_at as string) ?? null,
+      review_status: ((row.review_status as string) ?? 'pending') as 'pending' | 'excluded',
+      exclude_reason: (row.exclude_reason as string) ?? null,
+      reviewed_at: (row.reviewed_at as string) ?? null,
     }
   })
 
