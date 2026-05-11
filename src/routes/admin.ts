@@ -161,14 +161,12 @@ function applySessionFilters(query: any, f: SessionFilterParams) {
   else if (f.publicStatus === 'private') query = query.eq('is_public', false)
   if (f.piiCleanedOnly) query = query.eq('is_pii_cleaned', true)
   if (f.hasAudioUrl) query = query.not('audio_url', 'is', null)
-  if (f.diarizationStatus === 'done') query = query.eq('has_diarization', true)
-  else if (f.diarizationStatus === 'none') query = query.eq('has_diarization', false)
-  if (f.transcriptStatus === 'done' && f.transcriptSessionIds) {
-    if (f.transcriptSessionIds.length) query = query.in('id', f.transcriptSessionIds)
-    else query = query.eq('id', '__no_match__')
-  } else if (f.transcriptStatus === 'none' && f.transcriptSessionIds) {
-    if (f.transcriptSessionIds.length) query = query.not('id', 'in', `(${f.transcriptSessionIds.join(',')})`)
-  }
+  // BM v10 — has_diarization boolean 폐기 → diarize_status TEXT 컬럼 사용 (마이그 052)
+  if (f.diarizationStatus === 'done') query = query.eq('diarize_status', 'done')
+  else if (f.diarizationStatus === 'none') query = query.neq('diarize_status', 'done')
+  // BM v10 — transcripts 테이블 폐기 → stt_status TEXT 컬럼 사용 (마이그 052)
+  if (f.transcriptStatus === 'done') query = query.eq('stt_status', 'done')
+  else if (f.transcriptStatus === 'none') query = query.neq('stt_status', 'done')
   if (f.uploadStatuses.length) query = query.in('upload_status', f.uploadStatuses)
   if (f.consentStatus && f.consentStatus !== 'all') {
     query = query.eq('consent_status', f.consentStatus)
