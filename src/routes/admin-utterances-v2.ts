@@ -108,20 +108,30 @@ adminUtterancesV2.get('/utterances-v2/stats', async (c) => {
   ])
 
   // 시간 합산 — duration_seconds 우선, 없으면 (end_ms-start_ms)/1000
-  const { data: durRows } = await supabaseAdmin
-    .from('utterances')
-    .select('duration_seconds, start_ms, end_ms')
-
+  // Supabase 기본 row limit 1000 회피: 1000건씩 페이지 누적
   let totalDurationSec = 0
-  for (const row of (durRows ?? []) as Array<Record<string, unknown>>) {
-    const stored = row.duration_seconds as number | null
-    if (stored != null) {
-      totalDurationSec += stored
-    } else {
-      const startMs = (row.start_ms as number) ?? 0
-      const endMs = (row.end_ms as number) ?? 0
-      totalDurationSec += Math.max(0, (endMs - startMs) / 1000)
+  const PAGE = 1000
+  let offset = 0
+  while (true) {
+    const { data: durRows, error } = await supabaseAdmin
+      .from('utterances')
+      .select('duration_seconds, start_ms, end_ms')
+      .range(offset, offset + PAGE - 1)
+    if (error) return c.json({ error: error.message }, 500)
+    const rows = (durRows ?? []) as Array<Record<string, unknown>>
+    for (const row of rows) {
+      const stored = row.duration_seconds as number | null
+      if (stored != null) {
+        totalDurationSec += stored
+      } else {
+        const startMs = (row.start_ms as number) ?? 0
+        const endMs = (row.end_ms as number) ?? 0
+        totalDurationSec += Math.max(0, (endMs - startMs) / 1000)
+      }
     }
+    if (rows.length < PAGE) break  // 마지막 페이지
+    offset += PAGE
+    if (offset > 100_000) break  // 안전 가드 (10만건 초과 방어)
   }
 
   return c.json({
