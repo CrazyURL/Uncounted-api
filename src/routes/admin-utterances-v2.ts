@@ -34,9 +34,10 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
   let query = supabaseAdmin
     .from('utterances')
     .select(
-      'id, session_id, speaker_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at',
+      'id, session_id, speaker_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at, sessions(title, duration, review_status, consent_status)',
       { count: 'exact' },
     )
+    .order('session_id', { ascending: false })
     .order('start_ms', { ascending: true })
     .range(offset, offset + limit - 1)
 
@@ -57,9 +58,16 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
     const durSec = storedDur ?? Math.max(0, (endMs - startMs) / 1000)
     const storedPrice = row.unit_price_krw as number | null
     const computedPrice = Math.round((durSec * HOURLY_RATE_KRW) / 3600)
+    const sess = row.sessions as
+      | { title?: string | null; duration?: number | null; review_status?: string | null; consent_status?: string | null }
+      | null
     return {
       id: row.id as string,
       session_id: row.session_id as string,
+      session_title: sess?.title ?? null,
+      session_duration_sec: sess?.duration ?? null,
+      session_review_status: (sess?.review_status as string) ?? 'pending',
+      session_consent_status: (sess?.consent_status as string) ?? null,
       speaker_id: (row.speaker_id as string) ?? null,
       start_ms: startMs,
       end_ms: endMs,
