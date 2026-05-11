@@ -28,7 +28,9 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
   const sessionId = url.searchParams.get('session_id') ?? undefined
   const search = url.searchParams.get('q') ?? undefined
   const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1)
-  const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get('limit') ?? '50', 10) || 50))
+  // BM v10 admin 트리는 한 페이지에 모든 발화 표시 (세션 단위 그룹) — cap 5000.
+  // 대량 데이터 시 추후 sessions 단위 page 로 분리.
+  const limit = Math.min(5000, Math.max(1, parseInt(url.searchParams.get('limit') ?? '50', 10) || 50))
   const offset = (page - 1) * limit
 
   let query = supabaseAdmin
