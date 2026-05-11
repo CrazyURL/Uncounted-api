@@ -33,7 +33,7 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
   let query = supabaseAdmin
     .from('utterances')
     .select(
-      'id, session_id, speaker_id, start_ms, end_ms, text, duration_seconds, unit_price_krw, settled_at',
+      'id, session_id, speaker_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at',
       { count: 'exact' },
     )
     .order('start_ms', { ascending: true })
@@ -42,7 +42,7 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
   if (settled === 'yes') query = query.not('settled_at', 'is', null)
   else if (settled === 'no') query = query.is('settled_at', null)
   if (sessionId) query = query.eq('session_id', sessionId)
-  if (search) query = query.ilike('text', `%${search}%`)
+  if (search) query = query.ilike('transcript_text', `%${search}%`)
 
   const { data, error, count } = await query
   if (error) return c.json({ error: error.message }, 500)
@@ -62,7 +62,7 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
       start_ms: startMs,
       end_ms: endMs,
       duration_seconds: durSec,
-      text: ((row.text as string) ?? '').slice(0, 200),
+      text: ((row.transcript_text as string) ?? '').slice(0, 200),
       unit_price_krw: storedPrice ?? computedPrice,
       settled_at: (row.settled_at as string) ?? null,
     }

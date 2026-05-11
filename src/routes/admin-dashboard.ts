@@ -27,6 +27,7 @@ async function pipelineDistribution(column: string): Promise<PipelineCount> {
     const { count } = await supabaseAdmin
       .from('sessions')
       .select('id', { count: 'exact', head: true })
+      .eq('consent_status', 'both_agreed')
       .eq(column, s)
     out[s] = count ?? 0
   }
@@ -74,6 +75,7 @@ adminDashboard.get('/dashboard-stats', async (c) => {
       supabaseAdmin
         .from('sessions')
         .select('id', { count: 'exact', head: true })
+        .eq('consent_status', 'both_agreed')
         .eq('review_status', s),
     ),
   )
@@ -120,10 +122,12 @@ adminDashboard.get('/dashboard-stats', async (c) => {
     supabaseAdmin
       .from('sessions')
       .select('id', { count: 'exact', head: true })
+      .eq('consent_status', 'both_agreed')
       .or('gpu_upload_status.eq.failed,stt_status.eq.failed,diarize_status.eq.failed,gpu_pii_status.eq.failed,quality_status.eq.failed'),
     supabaseAdmin
       .from('sessions')
       .select('id', { count: 'exact', head: true })
+      .eq('consent_status', 'both_agreed')
       .eq('review_status', 'rejected'),
   ])
 
