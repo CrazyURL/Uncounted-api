@@ -51,13 +51,19 @@ function safeNum(n: number, pad = 3): string {
   return String(n).padStart(pad, '0')
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 adminDownloads.get('/sessions/:id/download-package', async (c) => {
   const idParam = c.req.param('id')
   let sessionId: string
-  try {
-    sessionId = decryptId(idParam)
-  } catch {
-    return c.json({ error: 'invalid session id' }, 400)
+  if (UUID_RE.test(idParam)) {
+    sessionId = idParam
+  } else {
+    try {
+      sessionId = decryptId(idParam)
+    } catch {
+      return c.json({ error: 'invalid session id' }, 400)
+    }
   }
 
   const { data: session, error: sessErr } = await supabaseAdmin
