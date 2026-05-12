@@ -4,7 +4,7 @@
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
-import { encryptId } from '../lib/crypto.js'
+import { encryptId, decryptId } from '../lib/crypto.js'
 import { formatDisplayTitle } from '../lib/displayTitle.js'
 import metadataAdmin from './admin-metadata.js'
 import {
@@ -146,6 +146,7 @@ type SessionFilterParams = {
   dateTo?: string
   consentStatus?: string  // 'both_agreed' | 'user_only' | 'locked' | 'all' (운영 검수용 필터)
   searchTitle?: string  // STAGE 6.8 — raw title 매칭 (응답엔 비노출, 검색만)
+  userId?: string  // STAGE 7 — 트리 뷰 인라인 확장용 (특정 user_id 의 세션만)
 }
 
 function applySessionFilters(query: any, f: SessionFilterParams) {
@@ -184,6 +185,10 @@ function applySessionFilters(query: any, f: SessionFilterParams) {
   // STAGE 6.8 — raw title ilike 검색 (응답엔 title 자체 비노출, 매칭에만 사용)
   if (f.searchTitle && f.searchTitle.length > 0) {
     query = query.ilike('title', `%${f.searchTitle}%`)
+  }
+  // STAGE 7 — 트리 뷰 인라인 확장 필터
+  if (f.userId) {
+    query = query.eq('user_id', f.userId)
   }
   return query
 }
@@ -419,6 +424,16 @@ admin.get('/sessions', async (c) => {
   const consentStatus = c.req.query('consentStatus')
   // STAGE 6.8 — title 매칭 검색 (raw title 응답엔 비노출, 매칭만)
   const searchTitle = (c.req.query('q') ?? '').trim()
+  // STAGE 7 — 트리 뷰 인라인 확장 필터 (특정 user_id, admin UI는 암호화된 값 전송)
+  const userIdEnc = (c.req.query('userId') ?? '').trim()
+  let userId: string | undefined
+  if (userIdEnc) {
+    try {
+      userId = decryptId(userIdEnc)
+    } catch {
+      return c.json({ error: 'invalid userId param' }, 400)
+    }
+  }
   const sortBy = c.req.query('sortBy') ?? 'date'
   const sortDir = c.req.query('sortDir') ?? 'desc'
 
@@ -449,6 +464,7 @@ admin.get('/sessions', async (c) => {
       transcriptSessionIds, transcriptStatus,
       uploadStatuses, dateFrom, dateTo, consentStatus,
       searchTitle: searchTitle || undefined,
+      userId,
     }
 
     let query = supabaseAdmin
