@@ -5,6 +5,7 @@ import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
 import { encryptId } from '../lib/crypto.js'
+import { formatDisplayTitle } from '../lib/displayTitle.js'
 import metadataAdmin from './admin-metadata.js'
 import {
   listObjects,
@@ -35,9 +36,14 @@ function sessionFromRow(row: Record<string, unknown>) {
   const rawWavPath = (row.local_sanitized_wav_path as string) ?? null
   const rawTextPreview = (row.local_sanitized_text_preview as string) ?? null
 
+  // STAGE 6: title 응답 제거 — admin 은 합성 display_title 만 노출.
+  // raw title 은 검색 매칭 조건절에만 사용, response payload 에는 절대 X.
+  const sessionSeq = (row.session_seq as number | null) ?? null
+  const createdAt = (row.created_at as string | null) ?? null
+  const duration = (row.duration as number | null) ?? null
   return {
     id: encryptId(rawId),
-    title: row.title as string,
+    title: formatDisplayTitle(sessionSeq, createdAt, duration),
     date: row.date as string,
     duration: row.duration as number,
     qaScore: (row.qa_score as number) ?? 0,
@@ -138,6 +144,7 @@ type SessionFilterParams = {
   dateFrom?: string
   dateTo?: string
   consentStatus?: string  // 'both_agreed' | 'user_only' | 'locked' | 'all' (운영 검수용 필터)
+  searchTitle?: string  // STAGE 6.8 — raw title 매칭 (응답엔 비노출, 검색만)
 }
 
 function applySessionFilters(query: any, f: SessionFilterParams) {
@@ -173,6 +180,10 @@ function applySessionFilters(query: any, f: SessionFilterParams) {
   }
   if (f.dateFrom) query = query.gte('date', f.dateFrom)
   if (f.dateTo) query = query.lte('date', f.dateTo)
+  // STAGE 6.8 — raw title ilike 검색 (응답엔 title 자체 비노출, 매칭에만 사용)
+  if (f.searchTitle && f.searchTitle.length > 0) {
+    query = query.ilike('title', `%${f.searchTitle}%`)
+  }
   return query
 }
 
@@ -405,6 +416,8 @@ admin.get('/sessions', async (c) => {
   const dateFrom = c.req.query('dateFrom')
   const dateTo = c.req.query('dateTo')
   const consentStatus = c.req.query('consentStatus')
+  // STAGE 6.8 — title 매칭 검색 (raw title 응답엔 비노출, 매칭만)
+  const searchTitle = (c.req.query('q') ?? '').trim()
   const sortBy = c.req.query('sortBy') ?? 'date'
   const sortDir = c.req.query('sortDir') ?? 'desc'
 
@@ -434,6 +447,7 @@ admin.get('/sessions', async (c) => {
       piiCleanedOnly, hasAudioUrl, diarizationStatus,
       transcriptSessionIds, transcriptStatus,
       uploadStatuses, dateFrom, dateTo, consentStatus,
+      searchTitle: searchTitle || undefined,
     }
 
     let query = supabaseAdmin

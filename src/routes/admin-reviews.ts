@@ -11,6 +11,7 @@
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
+import { formatDisplayTitle } from '../lib/displayTitle.js'
 
 const adminReviews = new Hono()
 
@@ -64,7 +65,7 @@ adminReviews.get('/reviews', async (c) => {
   let query = supabaseAdmin
     .from('sessions')
     .select(
-      'id, user_id, title, date, duration, consent_status, consented_at, ' +
+      'id, user_id, session_seq, created_at, date, duration, consent_status, consented_at, ' +
         'gpu_upload_status, gpu_uploaded_at, stt_status, stt_at, diarize_status, diarize_at, ' +
         'gpu_pii_status, gpu_pii_at, quality_status, quality_at, review_status',
       { count: 'exact' },
@@ -147,7 +148,12 @@ adminReviews.get('/reviews', async (c) => {
   const sessions = rows.map((row) => ({
     id: row.id as string,
     user_id: row.user_id as string,
-    title: (row.title as string) ?? null,
+    // STAGE 6 — raw title 비노출. 합성 display_title 만.
+    title: formatDisplayTitle(
+      (row.session_seq as number | null) ?? null,
+      (row.created_at as string | null) ?? null,
+      (row.duration as number | null) ?? null,
+    ),
     date: row.date as string,
     duration_seconds: (row.duration as number) ?? 0,
     consent_status: row.consent_status as string,
@@ -241,7 +247,12 @@ adminReviews.get('/sessions/:sessionId', async (c) => {
     data: {
       id: row.id as string,
       user_id: row.user_id as string,
-      title: row.title as string,
+      // STAGE 6 — raw title 비노출. 합성 display_title.
+      title: formatDisplayTitle(
+        (row.session_seq as number | null) ?? null,
+        (row.created_at as string | null) ?? null,
+        (row.duration as number | null) ?? null,
+      ),
       date: row.date as string,
       duration_seconds: (row.duration as number) ?? 0,
       consent_status: row.consent_status as string,
@@ -265,7 +276,7 @@ adminReviews.get('/sessions', async (c) => {
 
   let query = supabaseAdmin
     .from('sessions')
-    .select('id, title, duration, consent_status, review_status')
+    .select('id, session_seq, created_at, duration, consent_status, review_status')
     .order('consented_at', { ascending: false, nullsFirst: false })
     .limit(limit)
 
@@ -273,18 +284,27 @@ adminReviews.get('/sessions', async (c) => {
     query = query.eq('review_status', reviewStatus)
   }
   if (search) {
+    // STAGE 6.8 — raw title 매칭 (응답엔 미노출)
     query = query.or(`title.ilike.%${search}%,id.ilike.${search}%`)
   }
 
   const { data, error } = await query
   if (error) return c.json({ error: error.message }, 500)
   return c.json({
-    data: (data ?? []).map((row) => ({
-      id: row.id,
-      title: row.title,
-      duration_seconds: row.duration ?? 0,
-      consent_status: row.consent_status,
-    })),
+    data: (data ?? []).map((row) => {
+      const r = row as unknown as Record<string, unknown>
+      return {
+        id: r.id as string,
+        // STAGE 6 — 합성 display_title
+        title: formatDisplayTitle(
+          (r.session_seq as number | null) ?? null,
+          (r.created_at as string | null) ?? null,
+          (r.duration as number | null) ?? null,
+        ),
+        duration_seconds: (r.duration as number) ?? 0,
+        consent_status: r.consent_status as string,
+      }
+    }),
   })
 })
 
