@@ -9,7 +9,7 @@
 --     "통화#{seq} · {YYYY-MM-DD} · {duration}"
 --     예) "통화#000042 · 2026-05-02 · 30초"
 --
---   seq 는 created_at 순 단조 증가. 본 마이그가 신규 컬럼 + sequence + 백필 + DEFAULT 설정.
+--   seq 는 consented_at 순 단조 증가 (없으면 updated_at, 없으면 id). 본 마이그가 신규 컬럼 + sequence + 백필 + DEFAULT 설정.
 --
 -- 정책:
 --   - title 컬럼은 그대로 유지 (App 본인 폰 raw 표시 + 백엔드 검색 매칭 용)
@@ -27,12 +27,15 @@ CREATE SEQUENCE IF NOT EXISTS sessions_session_seq_seq START 1;
 -- 2. 컬럼 추가 (NULL 허용 — 백필 후 NOT NULL 강제 가능)
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_seq BIGINT;
 
--- 3. 기존 row 백필 — created_at 순으로 1, 2, 3, ... 부여
---    id 를 tie-break 로 추가 (동일 created_at 시 결정성)
+-- 3. 기존 row 백필 — consented_at 순 (없으면 updated_at, 없으면 id)
+--    dev DB sessions 에 created_at 부재 — consented_at/updated_at 으로 대체.
+--    NULLS LAST 로 동의 안 한 row 는 뒤로 밀어둠. id tie-break.
 UPDATE sessions
 SET session_seq = subq.rn
 FROM (
-  SELECT id, ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS rn
+  SELECT id, ROW_NUMBER() OVER (
+    ORDER BY consented_at ASC NULLS LAST, updated_at ASC NULLS LAST, id ASC
+  ) AS rn
   FROM sessions
 ) subq
 WHERE sessions.id = subq.id

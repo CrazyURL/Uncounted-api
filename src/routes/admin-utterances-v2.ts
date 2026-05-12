@@ -37,7 +37,7 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
   let query = supabaseAdmin
     .from('utterances')
     .select(
-      'id, session_id, speaker_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at, sessions(session_seq, created_at, duration, review_status, consent_status)',
+      'id, session_id, speaker_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at, sessions(session_seq, date, duration, review_status, consent_status)',
       { count: 'exact' },
     )
     .order('session_id', { ascending: false })
@@ -62,10 +62,10 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
     const storedPrice = row.unit_price_krw as number | null
     const computedPrice = Math.round((durSec * HOURLY_RATE_KRW) / 3600)
     const sess = row.sessions as
-      | { session_seq?: number | null; created_at?: string | null; duration?: number | null; review_status?: string | null; consent_status?: string | null }
+      | { session_seq?: number | null; date?: string | null; duration?: number | null; review_status?: string | null; consent_status?: string | null }
       | null
     // STAGE 6 — raw title 응답 금지. 합성 display_title 만 반환.
-    const displayTitle = formatDisplayTitle(sess?.session_seq ?? null, sess?.created_at ?? null, sess?.duration ?? null)
+    const displayTitle = formatDisplayTitle(sess?.session_seq ?? null, sess?.date ?? null, sess?.duration ?? null)
     return {
       id: row.id as string,
       session_id: row.session_id as string,

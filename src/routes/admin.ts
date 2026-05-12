@@ -38,12 +38,13 @@ function sessionFromRow(row: Record<string, unknown>) {
 
   // STAGE 6: title 응답 제거 — admin 은 합성 display_title 만 노출.
   // raw title 은 검색 매칭 조건절에만 사용, response payload 에는 절대 X.
+  // sessions 테이블에 created_at 부재 — date 컬럼(YYYY-MM-DD) 사용.
   const sessionSeq = (row.session_seq as number | null) ?? null
-  const createdAt = (row.created_at as string | null) ?? null
+  const sessionDate = (row.date as string | null) ?? null
   const duration = (row.duration as number | null) ?? null
   return {
     id: encryptId(rawId),
-    title: formatDisplayTitle(sessionSeq, createdAt, duration),
+    title: formatDisplayTitle(sessionSeq, sessionDate, duration),
     date: row.date as string,
     duration: row.duration as number,
     qaScore: (row.qa_score as number) ?? 0,

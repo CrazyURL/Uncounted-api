@@ -65,7 +65,7 @@ adminReviews.get('/reviews', async (c) => {
   let query = supabaseAdmin
     .from('sessions')
     .select(
-      'id, user_id, session_seq, created_at, date, duration, consent_status, consented_at, ' +
+      'id, user_id, session_seq, date, duration, consent_status, consented_at, ' +
         'gpu_upload_status, gpu_uploaded_at, stt_status, stt_at, diarize_status, diarize_at, ' +
         'gpu_pii_status, gpu_pii_at, quality_status, quality_at, review_status',
       { count: 'exact' },
@@ -151,7 +151,7 @@ adminReviews.get('/reviews', async (c) => {
     // STAGE 6 — raw title 비노출. 합성 display_title 만.
     title: formatDisplayTitle(
       (row.session_seq as number | null) ?? null,
-      (row.created_at as string | null) ?? null,
+      (row.date as string | null) ?? null,
       (row.duration as number | null) ?? null,
     ),
     date: row.date as string,
@@ -250,7 +250,7 @@ adminReviews.get('/sessions/:sessionId', async (c) => {
       // STAGE 6 — raw title 비노출. 합성 display_title.
       title: formatDisplayTitle(
         (row.session_seq as number | null) ?? null,
-        (row.created_at as string | null) ?? null,
+        (row.date as string | null) ?? null,
         (row.duration as number | null) ?? null,
       ),
       date: row.date as string,
@@ -276,7 +276,7 @@ adminReviews.get('/sessions', async (c) => {
 
   let query = supabaseAdmin
     .from('sessions')
-    .select('id, session_seq, created_at, duration, consent_status, review_status')
+    .select('id, session_seq, date, duration, consent_status, review_status')
     .order('consented_at', { ascending: false, nullsFirst: false })
     .limit(limit)
 
@@ -298,7 +298,7 @@ adminReviews.get('/sessions', async (c) => {
         // STAGE 6 — 합성 display_title
         title: formatDisplayTitle(
           (r.session_seq as number | null) ?? null,
-          (r.created_at as string | null) ?? null,
+          (r.date as string | null) ?? null,
           (r.duration as number | null) ?? null,
         ),
         duration_seconds: (r.duration as number) ?? 0,
