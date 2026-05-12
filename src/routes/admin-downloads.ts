@@ -54,7 +54,7 @@ function safeNum(n: number, pad = 3): string {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 adminDownloads.get('/sessions/:id/download-package', async (c) => {
-  const idParam = c.req.param('id')
+  const idParam = decodeURIComponent(c.req.param('id'))
   let sessionId: string
   if (UUID_RE.test(idParam)) {
     sessionId = idParam
