@@ -12,6 +12,7 @@ import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
 import { formatDisplayTitle } from '../lib/displayTitle.js'
+import { checkSessionAutoApproval } from '../lib/piiRisk.js'
 
 const adminReviews = new Hono()
 
@@ -186,7 +187,8 @@ adminReviews.get('/reviews', async (c) => {
 })
 
 // ── POST /api/admin/reviews/:sessionId ───────────────────────────────
-adminReviews.post('/reviews/:sessionId', async (c) => {
+// 주의: bulk-auto-approve 가 :sessionId 패턴에 매칭되지 않도록 명시 차단
+adminReviews.post('/reviews/:sessionId{[0-9a-f-]+}', async (c) => {
   const sessionId = c.req.param('sessionId')
   const body = getBody<{ status?: string; note?: string }>(c)
   const status = body?.status
@@ -230,6 +232,106 @@ adminReviews.post('/reviews/:sessionId', async (c) => {
   }
 
   return c.json({ data: { ok: true } })
+})
+
+// ── POST /api/admin/reviews/bulk-auto-approve (STAGE 12) ──────────────
+//
+// 자동 승인 가능한 세션을 일괄 review_status='approved' 로 전환.
+//
+// 자동 승인 조건 (모든 utterance 대상, excluded 제외):
+//   1. quality_grade='A'
+//   2. text 에 숫자 7자리+ 없음
+//   3. duration_seconds >= 1.0
+//   4. transcript_text 비어있지 않음
+//   5. speaker_id 정상 할당
+// + 통화 위험도 not high (분산 PII / 인증정보 키워드 없음)
+//
+// body:
+//   - dryRun?: boolean  → true 면 카운트/사유만 반환, DB 변경 X (기본 false)
+//   - sessionIds?: string[]  → 지정 세션만 검사 (없으면 in_review 전체)
+//
+// 응답:
+//   { approved: N, skipped: M, details: [{sessionId, eligible, reasons}] }
+adminReviews.post('/reviews/bulk-auto-approve', async (c) => {
+  const body = getBody<{ dryRun?: boolean; sessionIds?: string[] }>(c)
+  const dryRun = body?.dryRun ?? false
+
+  // 대상 세션 선정 — in_review + 파이프라인 완료
+  let sessionQuery = supabaseAdmin
+    .from('sessions')
+    .select('id, review_status, gpu_upload_status, stt_status, diarize_status, gpu_pii_status, quality_status')
+    .eq('review_status', 'in_review')
+
+  if (body?.sessionIds && body.sessionIds.length > 0) {
+    sessionQuery = sessionQuery.in('id', body.sessionIds)
+  }
+
+  const { data: sessionRows, error: sessErr } = await sessionQuery
+  if (sessErr) return c.json({ error: sessErr.message }, 500)
+
+  const candidateSessions = (sessionRows ?? []).filter((s) => pipelineComplete(s as Record<string, unknown>))
+  const candidateIds = candidateSessions.map((s) => s.id as string)
+
+  if (candidateIds.length === 0) {
+    return c.json({ data: { approved: 0, skipped: 0, details: [] } })
+  }
+
+  // 모든 utterances 한 번에 로드 (5000건 cap 가정)
+  const { data: utts, error: uttErr } = await supabaseAdmin
+    .from('utterances')
+    .select('id, session_id, transcript_text, duration_seconds, speaker_id, quality_grade, review_status')
+    .in('session_id', candidateIds)
+    .limit(50000)
+
+  if (uttErr) return c.json({ error: uttErr.message }, 500)
+
+  // session_id 별 그루핑
+  const byId = new Map<string, Array<typeof utts[number]>>()
+  for (const u of utts ?? []) {
+    const k = u.session_id as string
+    if (!byId.has(k)) byId.set(k, [])
+    byId.get(k)!.push(u)
+  }
+
+  const eligible: string[] = []
+  const details: Array<{ sessionId: string; eligible: boolean; reasons: string[] }> = []
+
+  for (const sid of candidateIds) {
+    const sessionUtts = (byId.get(sid) ?? []).map((u) => ({
+      id: u.id as string,
+      text: (u.transcript_text as string | null) ?? null,
+      duration_seconds: Number(u.duration_seconds ?? 0),
+      speaker_id: (u.speaker_id as string | null) ?? null,
+      quality_grade: (u.quality_grade as string | null) ?? null,
+      review_status: (u.review_status as string) ?? 'pending',
+    }))
+    const check = checkSessionAutoApproval(sessionUtts)
+    details.push({ sessionId: sid, eligible: check.eligible, reasons: check.reasons.slice(0, 5) })
+    if (check.eligible) eligible.push(sid)
+  }
+
+  if (dryRun) {
+    return c.json({
+      data: { approved: 0, skipped: candidateIds.length - eligible.length, eligibleCount: eligible.length, details },
+    })
+  }
+
+  // 실제 일괄 업데이트
+  if (eligible.length > 0) {
+    const { error: updateErr } = await supabaseAdmin
+      .from('sessions')
+      .update({ review_status: 'approved', label_source: 'auto:bulk_review' })
+      .in('id', eligible)
+    if (updateErr) return c.json({ error: updateErr.message }, 500)
+  }
+
+  return c.json({
+    data: {
+      approved: eligible.length,
+      skipped: candidateIds.length - eligible.length,
+      details,
+    },
+  })
 })
 
 // ── GET /api/admin/sessions/:sessionId ───────────────────────────────
