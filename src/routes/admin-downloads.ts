@@ -51,28 +51,21 @@ function safeNum(n: number, pad = 3): string {
   return String(n).padStart(pad, '0')
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const ENC_SUFFIX = '@enc_uncounted'
 
 adminDownloads.get('/sessions/:id/download-package', async (c) => {
   const idParam = decodeURIComponent(c.req.param('id'))
+  // sessions.id 컬럼은 UUID / 16자 hex deviceId / 기타 텍스트 모두 존재 가능 —
+  // 형식 검증 없이 그대로 사용. 단, @enc_uncounted suffix 가 있으면 복호화 시도.
   let sessionId: string
-  if (UUID_RE.test(idParam)) {
-    sessionId = idParam
-  } else {
+  if (idParam.endsWith(ENC_SUFFIX)) {
     try {
       sessionId = decryptId(idParam)
     } catch (e) {
-      console.warn('[admin-downloads] invalid session id', {
-        idParam,
-        len: idParam.length,
-        first40: idParam.slice(0, 40),
-        decryptErr: (e as Error)?.message,
-      })
-      return c.json({
-        error: 'invalid session id',
-        debug: { len: idParam.length, first40: idParam.slice(0, 40) },
-      }, 400)
+      return c.json({ error: 'invalid encrypted session id', debug: { len: idParam.length } }, 400)
     }
+  } else {
+    sessionId = idParam
   }
 
   const { data: session, error: sessErr } = await supabaseAdmin
