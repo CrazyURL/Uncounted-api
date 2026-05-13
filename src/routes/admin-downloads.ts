@@ -61,8 +61,17 @@ adminDownloads.get('/sessions/:id/download-package', async (c) => {
   } else {
     try {
       sessionId = decryptId(idParam)
-    } catch {
-      return c.json({ error: 'invalid session id' }, 400)
+    } catch (e) {
+      console.warn('[admin-downloads] invalid session id', {
+        idParam,
+        len: idParam.length,
+        first40: idParam.slice(0, 40),
+        decryptErr: (e as Error)?.message,
+      })
+      return c.json({
+        error: 'invalid session id',
+        debug: { len: idParam.length, first40: idParam.slice(0, 40) },
+      }, 400)
     }
   }
 
