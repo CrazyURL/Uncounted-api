@@ -11,14 +11,13 @@
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware } from '../lib/middleware.js'
+import { HOURLY_RATE_KRW, USER_SHARE_RATIO } from '../lib/pricing.js'
 
 const adminBalances = new Hono()
 
 adminBalances.use('/*', authMiddleware)
 adminBalances.use('/*', adminMiddleware)
 
-const HOURLY_RATE_KRW = 30_000
-const USER_SHARE_RATIO = 0.5
 const YEARLY_CAP_KRW = 3_000_000
 
 adminBalances.get('/balances', async (c) => {

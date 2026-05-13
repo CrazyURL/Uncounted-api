@@ -14,13 +14,12 @@ import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware } from '../lib/middleware.js'
 import { formatDisplayTitle } from '../lib/displayTitle.js'
+import { HOURLY_RATE_KRW } from '../lib/pricing.js'
 
 const adminUtterancesV2 = new Hono()
 
 adminUtterancesV2.use('/*', authMiddleware)
 adminUtterancesV2.use('/*', adminMiddleware)
-
-const HOURLY_RATE_KRW = 30_000
 
 adminUtterancesV2.get('/utterances-v2', async (c) => {
   const url = new URL(c.req.url)

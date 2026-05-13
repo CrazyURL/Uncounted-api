@@ -9,6 +9,7 @@
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
+import { splitRevenue } from '../lib/pricing.js'
 
 const adminDeliveries = new Hono()
 
@@ -216,7 +217,15 @@ adminDeliveries.post('/deliveries', async (c) => {
     }
   }
 
-  return c.json({ data: inserted })
+  // 50:50 분배 — 응답에 사용자/플랫폼 수익 포함 (STAGE 13)
+  const share = splitRevenue(Math.floor(priceKrw))
+  return c.json({
+    data: {
+      ...inserted,
+      user_share_krw: share.userShareKrw,
+      platform_share_krw: share.platformShareKrw,
+    },
+  })
 })
 
 export default adminDeliveries
