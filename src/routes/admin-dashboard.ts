@@ -18,19 +18,44 @@ interface PipelineCount {
   running: number
   done: number
   failed: number
+  noAudio: number
 }
 
 async function pipelineDistribution(column: string): Promise<PipelineCount> {
-  const out: PipelineCount = { pending: 0, running: 0, done: 0, failed: 0 }
-  const states: (keyof PipelineCount)[] = ['pending', 'running', 'done', 'failed']
-  for (const s of states) {
-    const { count } = await supabaseAdmin
+  const out: PipelineCount = { pending: 0, running: 0, done: 0, failed: 0, noAudio: 0 }
+
+  // running/done/failed: count all regardless of audio presence
+  const [running, done, failed] = await Promise.all(
+    (['running', 'done', 'failed'] as const).map((s) =>
+      supabaseAdmin
+        .from('sessions')
+        .select('id', { count: 'exact', head: true })
+        .eq('consent_status', 'both_agreed')
+        .eq(column, s),
+    ),
+  )
+  out.running = running.count ?? 0
+  out.done = done.count ?? 0
+  out.failed = failed.count ?? 0
+
+  // pending WITH audio = truly processable by GPU worker
+  const [pendingWithAudio, pendingNoAudio] = await Promise.all([
+    supabaseAdmin
       .from('sessions')
       .select('id', { count: 'exact', head: true })
       .eq('consent_status', 'both_agreed')
-      .eq(column, s)
-    out[s] = count ?? 0
-  }
+      .eq(column, 'pending')
+      .not('raw_audio_url', 'is', null),
+    supabaseAdmin
+      .from('sessions')
+      .select('id', { count: 'exact', head: true })
+      .eq('consent_status', 'both_agreed')
+      .eq(column, 'pending')
+      .is('raw_audio_url', null),
+  ])
+  out.pending = pendingWithAudio.count ?? 0
+  out.noAudio = pendingNoAudio.count ?? 0
+
   return out
 }
 
