@@ -621,6 +621,7 @@ export async function getWorkerStatus(): Promise<{
     failedRetryEligible: number
     failedExhausted: number
     done: number
+    noAudio: number
   }
   recentFailures: { id: string; gpu_last_error: string; gpu_retry_count: number; updated_at: string }[]
   oldestPending: { id: string; raw_audio_uploaded_at: string } | null
@@ -630,6 +631,7 @@ export async function getWorkerStatus(): Promise<{
 
   const [
     pendingCount,
+    noAudioCount,
     runningCount,
     failedCount,
     failedRetryEligibleCount,
@@ -644,6 +646,11 @@ export async function getWorkerStatus(): Promise<{
       .select('id', { count: 'exact', head: true })
       .eq('gpu_upload_status', 'pending')
       .not('raw_audio_url', 'is', null),
+    supabaseAdmin
+      .from('sessions')
+      .select('id', { count: 'exact', head: true })
+      .eq('gpu_upload_status', 'pending')
+      .is('raw_audio_url', null),
     supabaseAdmin
       .from('sessions')
       .select('id', { count: 'exact', head: true })
@@ -701,6 +708,7 @@ export async function getWorkerStatus(): Promise<{
     },
     queue: {
       pending: pendingCount.count ?? 0,
+      noAudio: noAudioCount.count ?? 0,
       running: runningCount.count ?? 0,
       failed: failedCount.count ?? 0,
       failedRetryEligible: failedRetryEligibleCount.count ?? 0,
