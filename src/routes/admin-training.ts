@@ -49,7 +49,7 @@ adminTraining.get('/training/stats', async (c) => {
   const totalConfirmed = autoCount + adminCount
 
   // 감정 분포 집계
-  const emotionDist: Record<string, number> = { 기쁨: 0, 놀람: 0, 슬픔: 0, 분노: 0, 불안: 0, 당황: 0, 중립: 0 }
+  const emotionDist: Record<string, number> = { 긍정: 0, 중립: 0, 부정: 0 }
   for (const row of emotionDistRes.data ?? []) {
     const e = (row as { emotion: string }).emotion
     if (e in emotionDist) emotionDist[e]++
