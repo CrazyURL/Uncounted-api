@@ -10,7 +10,7 @@ import { randomUUID } from 'crypto'
 import { Readable } from 'stream'
 import { pipeline } from 'stream/promises'
 import { GetObjectCommand } from '@aws-sdk/client-s3'
-import { s3Client, S3_AUDIO_BUCKET, uploadObject } from '../s3.js'
+import { s3Client, S3_AUDIO_BUCKET, uploadFile } from '../s3.js'
 import {
   detectSilenceBoundaries,
   extractSegment,
@@ -126,8 +126,7 @@ export async function segmentSession(
       const fileSizeBytes = (await stat(localPath)).size
 
       const s3Key = buildUtteranceS3Key(sessionId, utteranceId)
-      const wavBuffer = await readFileAsBuffer(localPath)
-      await uploadObject(S3_AUDIO_BUCKET, s3Key, wavBuffer, 'audio/wav')
+      await uploadFile(S3_AUDIO_BUCKET, s3Key, localPath, 'audio/wav')
 
       // 메타데이터는 클립 실제 위치 (padded) 기준으로 기록 — 다운로드한 파일과 일치
       segments.push({
@@ -205,8 +204,3 @@ async function downloadFromS3(
   await pipeline(readable, writable)
 }
 
-/** Read a local file into a Buffer */
-async function readFileAsBuffer(filePath: string): Promise<Buffer> {
-  const { readFile } = await import('fs/promises')
-  return readFile(filePath)
-}

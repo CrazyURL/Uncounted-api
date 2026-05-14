@@ -13,6 +13,8 @@ import { getSignedUrl as awsGetSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { NodeHttpHandler } from '@smithy/node-http-handler'
 import { Agent as HttpsAgent } from 'https'
 import { Agent as HttpAgent } from 'http'
+import { createReadStream } from 'fs'
+import { stat } from 'fs/promises'
 
 const endpoint = process.env.S3_ENDPOINT
 const region = process.env.S3_REGION ?? 'kr-standard'
@@ -213,6 +215,40 @@ export async function getSignedUrl(
     }),
     { expiresIn },
   )
+}
+
+/** 로컬 파일을 스트리밍으로 업로드 (전체 Buffer 적재 없음) */
+export async function uploadFile(
+  bucket: string,
+  key: string,
+  filePath: string,
+  contentType: string,
+): Promise<void> {
+  const { size } = await stat(filePath)
+  const startedAt = Date.now()
+  console.log('[s3] uploadFile:start', { bucket, key, contentType, bytes: size })
+  try {
+    const stream = createReadStream(filePath)
+    await s3Client.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: stream,
+        ContentType: contentType,
+        ContentLength: size,
+      }),
+    )
+    console.log('[s3] uploadFile:ok', { bucket, key, bytes: size, ms: Date.now() - startedAt })
+  } catch (err) {
+    console.error('[s3] uploadFile:fail', {
+      bucket,
+      key,
+      bytes: size,
+      ms: Date.now() - startedAt,
+      ...describeS3Error(err),
+    })
+    throw err
+  }
 }
 
 /** 내보내기 패키지 ZIP 업로드 */
