@@ -144,7 +144,7 @@ type SessionFilterParams = {
   uploadStatuses: string[]
   dateFrom?: string
   dateTo?: string
-  consentStatus?: string  // 'both_agreed' | 'user_only' | 'locked' | 'all' (운영 검수용 필터)
+  consentStatus?: string
   searchTitle?: string  // STAGE 6.8 — raw title 매칭 (응답엔 비노출, 검색만)
   userId?: string  // STAGE 7 — 트리 뷰 인라인 확장용 (특정 user_id 의 세션만)
 }
@@ -177,9 +177,7 @@ function applySessionFilters(query: any, f: SessionFilterParams) {
   if (f.transcriptStatus === 'done') query = query.eq('stt_status', 'done')
   else if (f.transcriptStatus === 'none') query = query.neq('stt_status', 'done')
   if (f.uploadStatuses.length) query = query.in('upload_status', f.uploadStatuses)
-  if (f.consentStatus && f.consentStatus !== 'all') {
-    query = query.eq('consent_status', f.consentStatus)
-  }
+  if (f.consentStatus) query = query.eq('consent_status', f.consentStatus)
   if (f.dateFrom) query = query.gte('date', f.dateFrom)
   if (f.dateTo) query = query.lte('date', f.dateTo)
   // STAGE 6.8 — raw title ilike 검색 (응답엔 title 자체 비노출, 매칭에만 사용)
