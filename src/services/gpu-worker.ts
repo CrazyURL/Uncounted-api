@@ -122,6 +122,50 @@ class Voice503Error extends Error {
   }
 }
 
+// pre-fetch 결과 — 다음 세션의 S3 다운로드 + voice_api submit 이 완료된 상태
+interface PrefetchResult {
+  session: { id: string; user_id: string; raw_audio_url: string; isRetry: boolean }
+  taskId: string
+}
+
+// ── pre-fetch: 다음 세션을 미리 claim + S3 다운로드 + voice_api submit ─
+// 절대 throw 하지 않음. 실패 시 DB claim 되돌리고 null 반환.
+async function prefetchNextSession(excludeSessionId: string): Promise<PrefetchResult | null> {
+  // pending 신규만 pre-fetch (failed 재시도는 타이밍 민감 — 30분 조건이 있어 skip)
+  const { data: pendingRow, error } = await supabaseAdmin
+    .from('sessions')
+    .select('id, user_id, raw_audio_url')
+    .eq('gpu_upload_status', 'pending')
+    .not('raw_audio_url', 'is', null)
+    .neq('id', excludeSessionId)
+    .order('raw_audio_uploaded_at', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+
+  if (error || !pendingRow) return null
+
+  const claimed = await tryClaim(pendingRow as RowSlim, false)
+  if (!claimed) return null
+
+  try {
+    const ext = (claimed.raw_audio_url.split('.').pop() ?? 'm4a').toLowerCase()
+    const audioBuffer = await downloadRawAudio(claimed.raw_audio_url)
+    const taskId = await submitToVoiceApi(audioBuffer, ext)
+    console.log(`[gpu-worker] prefetch ok session=${claimed.id} task_id=${taskId}`)
+    return { session: claimed, taskId }
+  } catch (err: any) {
+    const logTag = err instanceof Voice503Error
+      ? 'prefetch 503 — voice_api queue full'
+      : 'prefetch failed'
+    console.warn(`[gpu-worker] ${logTag} session=${claimed.id}: ${err.message} — reverting`)
+    await supabaseAdmin
+      .from('sessions')
+      .update({ gpu_upload_status: 'pending', gpu_started_at: null, gpu_last_error: null })
+      .eq('id', claimed.id)
+    return null
+  }
+}
+
 // ── stuck sweep — running 10분 초과 → failed 강제 전환 ────────────
 async function sweepStuckSessions(): Promise<void> {
   const cutoff = new Date(Date.now() - STUCK_THRESHOLD_MS).toISOString()
@@ -388,9 +432,11 @@ async function persistResults(
 }
 
 // ── 메인 처리 함수 ──────────────────────────────────────────────────
-export async function processOneSession(): Promise<{
+// prefetched: 이전 iteration 에서 미리 submit 해 둔 세션 (없으면 null)
+export async function processOneSession(prefetched: PrefetchResult | null = null): Promise<{
   processed: boolean
   backoff503: boolean
+  nextPrefetched: PrefetchResult | null
 }> {
   // stuck sweep — 5분마다 한 번씩만
   if (Date.now() - lastStuckSweepAt > STUCK_SWEEP_INTERVAL_MS) {
@@ -398,24 +444,48 @@ export async function processOneSession(): Promise<{
     lastStuckSweepAt = Date.now()
   }
 
-  const session = await pickNextSession()
-  if (!session) return { processed: false, backoff503: false }
+  // prefetched 세션이 있으면 그걸 사용, 없으면 새로 픽업
+  let session: { id: string; user_id: string; raw_audio_url: string; isRetry: boolean } | null
+  let taskId: string | null = null
+
+  if (prefetched) {
+    session = prefetched.session
+    taskId = prefetched.taskId
+    // stuck sweep 오탐 방지: pre-fetch 시 claim 시점이 아닌 실제 폴링 시작 시점으로 리셋
+    await supabaseAdmin
+      .from('sessions')
+      .update({ gpu_started_at: new Date().toISOString() })
+      .eq('id', session.id)
+    console.log(
+      `[gpu-worker] using prefetched session=${session.id} task_id=${taskId}`,
+    )
+  } else {
+    session = await pickNextSession()
+    if (!session) return { processed: false, backoff503: false, nextPrefetched: null }
+  }
 
   const startedAt = Date.now()
   console.log(
     `[gpu-worker] picked session=${session.id} url=${session.raw_audio_url}${session.isRetry ? ' (retry)' : ''}`,
   )
 
+  // pre-fetch 시작: 현재 세션의 GPU poll 대기 시간에 다음 세션 준비
+  // prefetched 세션을 방금 꺼냈으니 이제 그 다음 세션을 pre-fetch
+  const prefetchPromise = prefetchNextSession(session.id)
+
   try {
-    const ext = (session.raw_audio_url.split('.').pop() ?? 'm4a').toLowerCase()
-    const audioBuffer = await downloadRawAudio(session.raw_audio_url)
-    console.log(
-      `[gpu-worker] downloaded ${audioBuffer.byteLength} bytes from ${session.raw_audio_url}`,
-    )
+    if (!taskId) {
+      // prefetch 없이 직접 진입한 경우 — 직접 다운로드 + submit
+      const ext = (session.raw_audio_url.split('.').pop() ?? 'm4a').toLowerCase()
+      const audioBuffer = await downloadRawAudio(session.raw_audio_url)
+      console.log(
+        `[gpu-worker] downloaded ${audioBuffer.byteLength} bytes from ${session.raw_audio_url}`,
+      )
+      taskId = await submitToVoiceApi(audioBuffer, ext)
+      console.log(`[gpu-worker] voice_api task_id=${taskId}`)
+    }
 
-    const taskId = await submitToVoiceApi(audioBuffer, ext)
-    console.log(`[gpu-worker] voice_api task_id=${taskId}`)
-
+    // GPU poll (1-10+ 분) — 이 대기 중에 prefetchPromise 가 병렬 실행
     const result = await pollVoiceApiJob(taskId)
     if (result.status === 'failed') {
       throw new Error(`voice_api job failed: ${result.error ?? 'unknown'}`)
@@ -425,8 +495,13 @@ export async function processOneSession(): Promise<{
     console.log(
       `[gpu-worker] session=${session.id} done — utterances=${result.utterances?.length ?? 0}, ms=${Date.now() - startedAt}`,
     )
-    return { processed: true, backoff503: false }
+
+    const nextPrefetched = await prefetchPromise
+    return { processed: true, backoff503: false, nextPrefetched }
   } catch (err: any) {
+    // prefetch 결과는 실패해도 항상 회수 — 이미 submit 된 job 은 다음 iteration 에서 poll
+    const nextPrefetched = await prefetchPromise.catch(() => null)
+
     if (err instanceof Voice503Error) {
       // 503 — pending 으로 되돌리고 backoff. retry_count 안 올림.
       console.warn(`[gpu-worker] session=${session.id} 503 — revert to pending, backoff`)
@@ -438,7 +513,7 @@ export async function processOneSession(): Promise<{
           gpu_last_error: err.message,
         })
         .eq('id', session.id)
-      return { processed: false, backoff503: true }
+      return { processed: false, backoff503: true, nextPrefetched }
     }
 
     // 일반 실패: failed + retry_count++
@@ -471,7 +546,7 @@ export async function processOneSession(): Promise<{
         })
         .eq('id', session.id)
     }
-    return { processed: true, backoff503: false }
+    return { processed: true, backoff503: false, nextPrefetched }
   }
 }
 
@@ -479,28 +554,35 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-// ── 폴링 루프 (cancellable sleep + concurrency-aware) ────────────────
+// ── 폴링 루프 (cancellable sleep + concurrency-aware + pre-fetch) ────
 // 동작:
-//   1. processOneSession() — 한 건 픽업/처리 시도
-//   2. 처리됨 → 즉시 다음 시도 (대기 없음)
-//   3. 큐 비어있음 → POLL_INTERVAL_MS 또는 wakeup 중 빠른 쪽
-//   4. 503 → POLL_BACKOFF_503_MS 만큼 sleep (wakeup 무시 — voice_api 큐 만석 존중)
+//   1. processOneSession(prefetched) — 한 건 픽업/처리 시도
+//      - prefetched 있으면 → 이미 submit 된 job poll (S3/submit 시간 제거)
+//      - prefetched 없으면 → 신규 픽업 후 S3 다운로드 + submit + poll
+//   2. poll 대기 중 prefetchNextSession() 병렬 실행 → nextPrefetched 보관
+//   3. 처리됨 → 즉시 다음 iteration (nextPrefetched 전달)
+//   4. 큐 비어있음 → POLL_INTERVAL_MS 또는 wakeup 중 빠른 쪽
+//   5. 503 → POLL_BACKOFF_503_MS 만큼 sleep (wakeup 무시 — voice_api 큐 만석 존중)
 async function pollLoop(workerIndex: number): Promise<void> {
   const tag = `[gpu-worker#${workerIndex}]`
   console.log(`${tag} loop started`)
+  let prefetched: PrefetchResult | null = null
   while (!isShuttingDown) {
     try {
-      const { processed, backoff503 } = await processOneSession()
+      const { processed, backoff503, nextPrefetched } = await processOneSession(prefetched)
+      prefetched = nextPrefetched
       if (backoff503) {
         // 503 — voice_api 큐 만석. wakeup 무시하고 통째로 sleep.
+        prefetched = null  // 503 backoff 중에는 pre-fetch 결과를 버림 (오래된 job 이 될 수 있음)
         await sleep(POLL_BACKOFF_503_MS)
       } else if (!processed) {
         // 큐 비어있음 — 30초 대기, 단 wakeup 시그널 오면 즉시 다시 시도
         await Promise.race([sleep(POLL_INTERVAL_MS), getWakeup().promise])
       }
-      // processed=true → 즉시 다음 픽업 (다른 인스턴스가 아직 처리할 게 있을 수 있음)
+      // processed=true → 즉시 다음 픽업 (nextPrefetched 전달)
     } catch (err: any) {
       console.error(`${tag} pollLoop error:`, err.message)
+      prefetched = null
       await sleep(POLL_INTERVAL_MS)
     }
   }
