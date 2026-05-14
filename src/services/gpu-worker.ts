@@ -299,7 +299,7 @@ async function downloadUtteranceWav(taskId: string, filename: string): Promise<B
 
 // ── utterances INSERT + sessions UPDATE 'done' ─────────────────────
 async function persistResults(
-  session: { id: string; user_id: string },
+  session: { id: string; user_id: string; raw_audio_url: string },
   taskId: string,
   result: VoiceApiJobResult,
 ): Promise<void> {
@@ -345,6 +345,27 @@ async function persistResults(
     if (error) {
       throw new Error(`utterance INSERT failed (${utteranceId}): ${error.message}`)
     }
+  }
+
+  // 전처리된 오디오로 S3 raw_audio_url 덮어쓰기 — startSec/endSec 가 재생 위치와 일치하게 됨.
+  // voice API 가 silence-compress 후 WhisperX 를 돌리므로, 발화 타임스탬프는
+  // 압축된 오디오 기준이다. _preprocessed_audio.wav 를 원본 위치에 덮어써서 맞춘다.
+  try {
+    const preprocessedBuf = await downloadUtteranceWav(taskId, '_preprocessed_audio.wav')
+    await uploadObject(
+      S3_AUDIO_BUCKET,
+      session.raw_audio_url,
+      new Uint8Array(preprocessedBuf),
+      'audio/wav',
+    )
+    console.log(
+      `[gpu-worker] session=${session.id}: preprocessed audio (${preprocessedBuf.byteLength} bytes) overwrote ${session.raw_audio_url}`,
+    )
+  } catch (err: any) {
+    // 청크 모드(1h 이상 오디오)에서는 _preprocessed_audio.wav 가 생성되지 않음 — 무시.
+    console.warn(
+      `[gpu-worker] session=${session.id}: preprocessed audio overwrite skipped — ${err.message}`,
+    )
   }
 
   const now = new Date().toISOString()

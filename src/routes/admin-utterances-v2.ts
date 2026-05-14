@@ -15,6 +15,7 @@ import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware } from '../lib/middleware.js'
 import { formatDisplayTitle } from '../lib/displayTitle.js'
 import { HOURLY_RATE_KRW } from '../lib/pricing.js'
+import { getSignedUrl, S3_AUDIO_BUCKET } from '../lib/s3.js'
 
 const adminUtterancesV2 = new Hono()
 
@@ -145,6 +146,61 @@ adminUtterancesV2.get('/utterances-v2/stats', async (c) => {
       estimatedRevenueKrw: Math.round((totalDurationSec * HOURLY_RATE_KRW) / 3600),
     },
   })
+})
+
+// ── PATCH /utterances-v2/:id ────────────────────────────────────────────
+// 어드민 감정/대화행위 라벨 수정 (STAGE 14 검수 UI)
+
+adminUtterancesV2.patch('/utterances-v2/:id', async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req.json<{
+    emotion?: string
+    dialog_act?: string
+    label_source?: string
+  }>().catch(() => ({} as { emotion?: string; dialog_act?: string; label_source?: string }))
+
+  const update: Record<string, unknown> = { updated_at: new Date().toISOString() }
+  if (body.emotion !== undefined) update.emotion = body.emotion
+  if (body.dialog_act !== undefined) update.dialog_act = body.dialog_act
+  if (body.label_source !== undefined) update.label_source = body.label_source
+
+  const { data, error } = await supabaseAdmin
+    .from('utterances')
+    .update(update)
+    .eq('id', id)
+    .select('id, emotion, dialog_act, label_source, updated_at')
+    .single()
+
+  if (error) {
+    if (error.code === 'PGRST116') return c.json({ error: '발화를 찾을 수 없습니다.' }, 404)
+    return c.json({ error: error.message }, 500)
+  }
+
+  return c.json({ data })
+})
+
+// ── GET /utterances-v2/:id/audio ────────────────────────────────────────
+// 발화 WAV presigned URL 반환 (TTL 60초, 검수 재생용)
+
+adminUtterancesV2.get('/utterances-v2/:id/audio', async (c) => {
+  const id = c.req.param('id')
+
+  const { data, error } = await supabaseAdmin
+    .from('utterances')
+    .select('storage_path')
+    .eq('id', id)
+    .single()
+
+  if (error) {
+    if (error.code === 'PGRST116') return c.json({ error: '발화를 찾을 수 없습니다.' }, 404)
+    return c.json({ error: error.message }, 500)
+  }
+
+  const row = data as { storage_path: string | null }
+  if (!row.storage_path) return c.json({ error: '오디오 파일이 없습니다.' }, 404)
+
+  const url = await getSignedUrl(S3_AUDIO_BUCKET, row.storage_path, 60)
+  return c.json({ data: { url } })
 })
 
 export default adminUtterancesV2
