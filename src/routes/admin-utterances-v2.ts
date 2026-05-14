@@ -33,6 +33,7 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
   // 대량 데이터 시 추후 sessions 단위 page 로 분리.
   const limit = Math.min(5000, Math.max(1, parseInt(url.searchParams.get('limit') ?? '50', 10) || 50))
   const offset = (page - 1) * limit
+  const orderBy = url.searchParams.get('order_by') ?? 'session_id_desc'
 
   let query = supabaseAdmin
     .from('utterances')
@@ -40,9 +41,14 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
       'id, session_id, speaker_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at, sessions(session_seq, date, duration, review_status, consent_status)',
       { count: 'exact' },
     )
-    .order('session_id', { ascending: false })
-    .order('start_ms', { ascending: true })
-    .range(offset, offset + limit - 1)
+
+  if (orderBy === 'created_at_asc') {
+    query = query.order('session_id', { ascending: true }).order('start_ms', { ascending: true })
+  } else {
+    // default: created_at_desc — newest sessions first, utterances within session in order
+    query = query.order('session_id', { ascending: false }).order('start_ms', { ascending: true })
+  }
+  query = query.range(offset, offset + limit - 1)
 
   if (settled === 'yes') query = query.not('settled_at', 'is', null)
   else if (settled === 'no') query = query.is('settled_at', null)
