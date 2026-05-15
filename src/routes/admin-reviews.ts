@@ -51,6 +51,13 @@ function isAllowedTransition(from: string, to: string, isPipelineComplete: boole
   return false
 }
 
+function deriveGrade(score: number | null): 'A' | 'B' | 'C' | null {
+  if (score == null) return null
+  if (score >= 80) return 'A'
+  if (score >= 50) return 'B'
+  return 'C'
+}
+
 // ── GET /api/admin/reviews ──────────────────────────────────────────
 adminReviews.get('/reviews', async (c) => {
   const url = new URL(c.req.url)
@@ -63,6 +70,11 @@ adminReviews.get('/reviews', async (c) => {
   const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1)
   const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') ?? '50', 10) || 50))
   const offset = (page - 1) * limit
+  const sortBy = url.searchParams.get('sort_by')
+  const sortDir = url.searchParams.get('sort_dir') ?? 'desc'
+  const colMap: Record<string, string> = { date: 'date', duration: 'duration' }
+  const orderCol = sortBy && colMap[sortBy] ? colMap[sortBy] : 'consented_at'
+  const ascending = sortDir === 'asc'
 
   // pii_flag 필터: pii_intervals 있는 발화가 존재하는 세션 ID 선조회
   let piiSessionIds: string[] | null = null
@@ -111,7 +123,7 @@ adminReviews.get('/reviews', async (c) => {
       { count: 'exact' },
     )
     .eq('consent_status', 'both_agreed')
-    .order('consented_at', { ascending: false, nullsFirst: false })
+    .order(orderCol, { ascending, nullsFirst: false })
     .range(offset, offset + limit - 1)
 
   if (reviewStatus && VALID_REVIEW.has(reviewStatus)) {
@@ -227,7 +239,7 @@ adminReviews.get('/reviews', async (c) => {
         }
       }
 
-      const g = row.quality_grade as 'A' | 'B' | 'C' | null
+      const g = (row.quality_grade as 'A' | 'B' | 'C' | null) ?? deriveGrade(row.quality_score as number | null)
       if (g) {
         const prev = gradeBySession.get(sid) ?? null
         if (prev === null || (prev === 'A' && (g === 'B' || g === 'C')) || (prev === 'B' && g === 'C')) {
