@@ -188,39 +188,101 @@ adminReviews.get('/reviews', async (c) => {
   const rows = (data ?? []) as unknown as Array<Record<string, unknown>>
   const sessionIds = rows.map((r) => r.id as string)
 
-  // 발화 배치 조회 — pii_flag/pii_count/quality_grade_min 계산용
+  // 발화 배치 조회 — pii/quality/speakers 집계용
   const piiCountBySession = new Map<string, number>()
   const gradeBySession = new Map<string, 'A' | 'B' | 'C' | null>()
+  const qualityScoreSumBySession = new Map<string, number>()
+  const qualityScoreCountBySession = new Map<string, number>()
+  const snrDbSumBySession = new Map<string, number>()
+  const snrDbCountBySession = new Map<string, number>()
+  const speechRatioSumBySession = new Map<string, number>()
+  const speechRatioCountBySession = new Map<string, number>()
+  type PiiSample = { startSec: number; endSec: number }
+  const piiSamplesBySession = new Map<string, PiiSample[]>()
+  type SpeakerInfo = { speaker_label: string; speaker_role: string | null; speaker_gender: string | null; speaker_voice_age_range: string | null; speaker_relation: string | null }
+  const speakersBySession = new Map<string, SpeakerInfo[]>()
 
   if (sessionIds.length > 0) {
     const { data: uttRows } = await supabaseAdmin
       .from('utterances')
-      .select('session_id, quality_grade, pii_intervals')
+      .select('session_id, quality_grade, pii_intervals, quality_score, snr_db, speech_ratio')
       .in('session_id', sessionIds)
       .limit(50000)
 
     for (const utt of uttRows ?? []) {
-      const sid = (utt as Record<string, unknown>).session_id as string
-      const piiIntervals = (utt as Record<string, unknown>).pii_intervals as unknown[]
+      const row = utt as Record<string, unknown>
+      const sid = row.session_id as string
+
+      const piiIntervals = row.pii_intervals as unknown[]
       if (Array.isArray(piiIntervals) && piiIntervals.length > 0) {
         piiCountBySession.set(sid, (piiCountBySession.get(sid) ?? 0) + 1)
+        const samples = piiSamplesBySession.get(sid) ?? []
+        if (samples.length < 5) {
+          for (const iv of piiIntervals) {
+            if (samples.length >= 5) break
+            const ivRow = iv as Record<string, unknown>
+            samples.push({ startSec: ivRow.startSec as number, endSec: ivRow.endSec as number })
+          }
+          piiSamplesBySession.set(sid, samples)
+        }
       }
-      const g = (utt as Record<string, unknown>).quality_grade as 'A' | 'B' | 'C' | null
+
+      const g = row.quality_grade as 'A' | 'B' | 'C' | null
       if (g) {
         const prev = gradeBySession.get(sid) ?? null
         if (prev === null || (prev === 'A' && (g === 'B' || g === 'C')) || (prev === 'B' && g === 'C')) {
           gradeBySession.set(sid, g)
         }
       }
+
+      const qs = row.quality_score as number | null
+      if (qs != null) {
+        qualityScoreSumBySession.set(sid, (qualityScoreSumBySession.get(sid) ?? 0) + qs)
+        qualityScoreCountBySession.set(sid, (qualityScoreCountBySession.get(sid) ?? 0) + 1)
+      }
+      const snr = row.snr_db as number | null
+      if (snr != null) {
+        snrDbSumBySession.set(sid, (snrDbSumBySession.get(sid) ?? 0) + snr)
+        snrDbCountBySession.set(sid, (snrDbCountBySession.get(sid) ?? 0) + 1)
+      }
+      const sr = row.speech_ratio as number | null
+      if (sr != null) {
+        speechRatioSumBySession.set(sid, (speechRatioSumBySession.get(sid) ?? 0) + sr)
+        speechRatioCountBySession.set(sid, (speechRatioCountBySession.get(sid) ?? 0) + 1)
+      }
     }
+
     for (const sid of sessionIds) {
       if (!gradeBySession.has(sid)) gradeBySession.set(sid, null)
+    }
+
+    const { data: spRows } = await supabaseAdmin
+      .from('session_speakers')
+      .select('session_id, speaker_label, speaker_role, speaker_gender, speaker_voice_age_range, speaker_relation')
+      .in('session_id', sessionIds)
+    for (const sp of spRows ?? []) {
+      const spRow = sp as Record<string, unknown>
+      const sid = spRow.session_id as string
+      const arr = speakersBySession.get(sid) ?? []
+      arr.push({
+        speaker_label: spRow.speaker_label as string,
+        speaker_role: spRow.speaker_role as string | null,
+        speaker_gender: spRow.speaker_gender as string | null,
+        speaker_voice_age_range: spRow.speaker_voice_age_range as string | null,
+        speaker_relation: spRow.speaker_relation as string | null,
+      })
+      speakersBySession.set(sid, arr)
     }
   }
 
   const sessions = rows.map((row) => {
     const sid = row.id as string
     const piiCount = piiCountBySession.get(sid) ?? 0
+
+    const qsCount = qualityScoreCountBySession.get(sid) ?? 0
+    const snrCount = snrDbCountBySession.get(sid) ?? 0
+    const srCount = speechRatioCountBySession.get(sid) ?? 0
+
     return {
       id: sid,
       user_id: row.user_id as string,
@@ -247,6 +309,11 @@ adminReviews.get('/reviews', async (c) => {
       pii_flag: piiCount > 0,
       pii_count: piiCount,
       quality_grade_min: gradeBySession.get(sid) ?? null,
+      quality_score_avg: qsCount > 0 ? Math.round((qualityScoreSumBySession.get(sid)! / qsCount) * 10) / 10 : null,
+      snr_db_avg: snrCount > 0 ? Math.round((snrDbSumBySession.get(sid)! / snrCount) * 10) / 10 : null,
+      speech_ratio_avg: srCount > 0 ? Math.round((speechRatioSumBySession.get(sid)! / srCount) * 1000) / 1000 : null,
+      pii_interval_samples: piiSamplesBySession.get(sid) ?? [],
+      speakers: speakersBySession.get(sid) ?? [],
     }
   })
 
