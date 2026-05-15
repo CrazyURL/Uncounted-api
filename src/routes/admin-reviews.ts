@@ -55,49 +55,84 @@ function isAllowedTransition(from: string, to: string, isPipelineComplete: boole
 adminReviews.get('/reviews', async (c) => {
   const url = new URL(c.req.url)
   const reviewStatus = url.searchParams.get('review_status') ?? undefined
-  const consentStatus = url.searchParams.get('consent_status') ?? undefined
   const qualityLow = url.searchParams.get('quality_low') === '1'
   const pipelineFailed = url.searchParams.get('pipeline_failed') === '1'
-  const hold = url.searchParams.get('hold') === 'true'
+  const piiFlag = url.searchParams.get('pii_flag') === '1'
+  const qualityGradeMin = url.searchParams.get('quality_grade_min') ?? undefined
   const search = url.searchParams.get('q') ?? undefined
   const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1)
-  const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get('limit') ?? '50', 10) || 50))
+  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') ?? '50', 10) || 50))
   const offset = (page - 1) * limit
+
+  // pii_flag 필터: pii_intervals 있는 발화가 존재하는 세션 ID 선조회
+  let piiSessionIds: string[] | null = null
+  if (piiFlag) {
+    const { data: piiRows } = await supabaseAdmin
+      .from('utterances')
+      .select('session_id')
+      .filter('pii_intervals', 'neq', '[]')
+      .limit(5000)
+    piiSessionIds = [...new Set((piiRows ?? []).map((r) => (r as Record<string, unknown>).session_id as string))]
+    if (piiSessionIds.length === 0) {
+      return c.json({
+        data: {
+          sessions: [], total: 0, filteredDurationSec: 0,
+          pendingCount: 0, inReviewCount: 0, approvedCount: 0, rejectedCount: 0, needsRevisionCount: 0,
+        },
+      })
+    }
+  }
+
+  // quality_grade_min=C 필터: quality_grade='C' 발화가 존재하는 세션 ID 선조회
+  let qualitySessionIds: string[] | null = null
+  if (qualityGradeMin === 'C') {
+    const { data: qualRows } = await supabaseAdmin
+      .from('utterances')
+      .select('session_id')
+      .eq('quality_grade', 'C')
+      .limit(5000)
+    qualitySessionIds = [...new Set((qualRows ?? []).map((r) => (r as Record<string, unknown>).session_id as string))]
+    if (qualitySessionIds.length === 0) {
+      return c.json({
+        data: {
+          sessions: [], total: 0, filteredDurationSec: 0,
+          pendingCount: 0, inReviewCount: 0, approvedCount: 0, rejectedCount: 0, needsRevisionCount: 0,
+        },
+      })
+    }
+  }
 
   let query = supabaseAdmin
     .from('sessions')
     .select(
       'id, user_id, session_seq, date, duration, consent_status, consented_at, ' +
         'gpu_upload_status, gpu_uploaded_at, stt_status, stt_at, diarize_status, diarize_at, ' +
-        'gpu_pii_status, gpu_pii_at, quality_status, quality_at, review_status',
+        'gpu_pii_status, gpu_pii_at, quality_status, quality_at, review_status, utterance_count',
       { count: 'exact' },
     )
+    .eq('consent_status', 'both_agreed')
     .order('consented_at', { ascending: false, nullsFirst: false })
     .range(offset, offset + limit - 1)
 
   if (reviewStatus && VALID_REVIEW.has(reviewStatus)) {
     query = query.eq('review_status', reviewStatus)
   }
-  if (consentStatus) {
-    query = query.eq('consent_status', consentStatus)
-  }
   if (qualityLow) {
-    // 저품질 우선 — quality_status = 'failed' 만 우선 표시 (시드 단계 단순화)
     query = query.eq('quality_status', 'failed')
   }
   if (pipelineFailed) {
-    // 처리 흐름 5단계 중 어느 하나라도 failed — 이상 신호 탭 진입 시 활용
     query = query.or(
       'gpu_upload_status.eq.failed,stt_status.eq.failed,' +
         'diarize_status.eq.failed,gpu_pii_status.eq.failed,quality_status.eq.failed',
     )
   }
-  if (hold) {
-    // 보류 — 양측 동의 미완료 (user_only, none, peer_withdrew 등)
-    query = query.neq('consent_status', 'both_agreed')
+  if (piiSessionIds !== null) {
+    query = query.in('id', piiSessionIds)
+  }
+  if (qualitySessionIds !== null) {
+    query = query.in('id', qualitySessionIds)
   }
   if (search) {
-    // ILIKE 검색 — title 또는 id prefix
     query = query.or(`title.ilike.%${search}%,id.ilike.${search}%`)
   }
 
@@ -106,26 +141,23 @@ adminReviews.get('/reviews', async (c) => {
     return c.json({ error: error.message }, 500)
   }
 
-  // 상태별 카운트 (전체 — 필터 무관 — 5개 batch query)
+  // 상태별 카운트 (both_agreed 기준 — 5개 batch query)
   const counts = await Promise.all(
     ['pending', 'in_review', 'approved', 'rejected', 'needs_revision'].map((s) =>
       supabaseAdmin
         .from('sessions')
         .select('id', { count: 'exact', head: true })
-        .eq('review_status', s),
+        .eq('review_status', s)
+        .eq('consent_status', 'both_agreed'),
     ),
   )
 
   // 현재 필터에 맞는 sessions 의 duration 전체 합산 (페이지네이션 무관)
-  // — UX: "919건 (총 N시간)" 의 N 은 페이지가 아닌 필터 결과 전체 기준이어야 함
   let filteredDurationSec = 0
   {
-    let durQuery = supabaseAdmin.from('sessions').select('duration')
+    let durQuery = supabaseAdmin.from('sessions').select('duration').eq('consent_status', 'both_agreed')
     if (reviewStatus && VALID_REVIEW.has(reviewStatus)) {
       durQuery = durQuery.eq('review_status', reviewStatus)
-    }
-    if (consentStatus) {
-      durQuery = durQuery.eq('consent_status', consentStatus)
     }
     if (qualityLow) {
       durQuery = durQuery.eq('quality_status', 'failed')
@@ -135,6 +167,12 @@ adminReviews.get('/reviews', async (c) => {
         'gpu_upload_status.eq.failed,stt_status.eq.failed,' +
           'diarize_status.eq.failed,gpu_pii_status.eq.failed,quality_status.eq.failed',
       )
+    }
+    if (piiSessionIds !== null) {
+      durQuery = durQuery.in('id', piiSessionIds)
+    }
+    if (qualitySessionIds !== null) {
+      durQuery = durQuery.in('id', qualitySessionIds)
     }
     if (search) {
       durQuery = durQuery.or(`title.ilike.%${search}%,id.ilike.${search}%`)
@@ -146,36 +184,71 @@ adminReviews.get('/reviews', async (c) => {
     )
   }
 
-  // 마이그레이션 052의 신규 컬럼은 supabase 타입 생성기에 아직 반영되지 않을 수 있어
-  // 안전하게 Record 로 좁혀 사용한다.
   // DB → API 키 매핑: gpu_upload_status → upload_status, gpu_pii_status → pii_status
-  // (프론트엔드는 BM v9 컬럼명 의식 X — 백엔드가 별칭 처리)
   const rows = (data ?? []) as unknown as Array<Record<string, unknown>>
-  const sessions = rows.map((row) => ({
-    id: row.id as string,
-    user_id: row.user_id as string,
-    // STAGE 6 — raw title 비노출. 합성 display_title 만.
-    title: formatDisplayTitle(
-      (row.session_seq as number | null) ?? null,
-      (row.date as string | null) ?? null,
-      (row.duration as number | null) ?? null,
-    ),
-    date: row.date as string,
-    duration_seconds: (row.duration as number) ?? 0,
-    consent_status: row.consent_status as string,
-    consented_at: (row.consented_at as string) ?? null,
-    upload_status: (row.gpu_upload_status as string) ?? 'pending',
-    uploaded_at: (row.gpu_uploaded_at as string) ?? null,
-    stt_status: (row.stt_status as string) ?? 'pending',
-    stt_at: (row.stt_at as string) ?? null,
-    diarize_status: (row.diarize_status as string) ?? 'pending',
-    diarize_at: (row.diarize_at as string) ?? null,
-    pii_status: (row.gpu_pii_status as string) ?? 'pending',
-    pii_at: (row.gpu_pii_at as string) ?? null,
-    quality_status: (row.quality_status as string) ?? 'pending',
-    quality_at: (row.quality_at as string) ?? null,
-    review_status: (row.review_status as string) ?? 'pending',
-  }))
+  const sessionIds = rows.map((r) => r.id as string)
+
+  // 발화 배치 조회 — pii_flag/pii_count/quality_grade_min 계산용
+  const piiCountBySession = new Map<string, number>()
+  const gradeBySession = new Map<string, 'A' | 'B' | 'C' | null>()
+
+  if (sessionIds.length > 0) {
+    const { data: uttRows } = await supabaseAdmin
+      .from('utterances')
+      .select('session_id, quality_grade, pii_intervals')
+      .in('session_id', sessionIds)
+      .limit(50000)
+
+    for (const utt of uttRows ?? []) {
+      const sid = (utt as Record<string, unknown>).session_id as string
+      const piiIntervals = (utt as Record<string, unknown>).pii_intervals as unknown[]
+      if (Array.isArray(piiIntervals) && piiIntervals.length > 0) {
+        piiCountBySession.set(sid, (piiCountBySession.get(sid) ?? 0) + 1)
+      }
+      const g = (utt as Record<string, unknown>).quality_grade as 'A' | 'B' | 'C' | null
+      if (g) {
+        const prev = gradeBySession.get(sid) ?? null
+        if (prev === null || (prev === 'A' && (g === 'B' || g === 'C')) || (prev === 'B' && g === 'C')) {
+          gradeBySession.set(sid, g)
+        }
+      }
+    }
+    for (const sid of sessionIds) {
+      if (!gradeBySession.has(sid)) gradeBySession.set(sid, null)
+    }
+  }
+
+  const sessions = rows.map((row) => {
+    const sid = row.id as string
+    const piiCount = piiCountBySession.get(sid) ?? 0
+    return {
+      id: sid,
+      user_id: row.user_id as string,
+      title: formatDisplayTitle(
+        (row.session_seq as number | null) ?? null,
+        (row.date as string | null) ?? null,
+        (row.duration as number | null) ?? null,
+      ),
+      date: row.date as string,
+      duration_seconds: (row.duration as number) ?? 0,
+      consent_status: row.consent_status as string,
+      consented_at: (row.consented_at as string) ?? null,
+      upload_status: (row.gpu_upload_status as string) ?? 'pending',
+      uploaded_at: (row.gpu_uploaded_at as string) ?? null,
+      stt_status: (row.stt_status as string) ?? 'pending',
+      stt_at: (row.stt_at as string) ?? null,
+      diarize_status: (row.diarize_status as string) ?? 'pending',
+      diarize_at: (row.diarize_at as string) ?? null,
+      pii_status: (row.gpu_pii_status as string) ?? 'pending',
+      pii_at: (row.gpu_pii_at as string) ?? null,
+      quality_status: (row.quality_status as string) ?? 'pending',
+      quality_at: (row.quality_at as string) ?? null,
+      review_status: (row.review_status as string) ?? 'pending',
+      pii_flag: piiCount > 0,
+      pii_count: piiCount,
+      quality_grade_min: gradeBySession.get(sid) ?? null,
+    }
+  })
 
   return c.json({
     data: {
