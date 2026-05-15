@@ -58,6 +58,7 @@ adminReviews.get('/reviews', async (c) => {
   const consentStatus = url.searchParams.get('consent_status') ?? undefined
   const qualityLow = url.searchParams.get('quality_low') === '1'
   const pipelineFailed = url.searchParams.get('pipeline_failed') === '1'
+  const hold = url.searchParams.get('hold') === 'true'
   const search = url.searchParams.get('q') ?? undefined
   const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1)
   const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get('limit') ?? '50', 10) || 50))
@@ -90,6 +91,10 @@ adminReviews.get('/reviews', async (c) => {
       'gpu_upload_status.eq.failed,stt_status.eq.failed,' +
         'diarize_status.eq.failed,gpu_pii_status.eq.failed,quality_status.eq.failed',
     )
+  }
+  if (hold) {
+    // 보류 — 양측 동의 미완료 (user_only, none, peer_withdrew 등)
+    query = query.neq('consent_status', 'both_agreed')
   }
   if (search) {
     // ILIKE 검색 — title 또는 id prefix
