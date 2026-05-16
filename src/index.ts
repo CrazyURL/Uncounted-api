@@ -34,6 +34,9 @@ import adminBalances from './routes/admin-balances.js'
 import adminUtterancesV2 from './routes/admin-utterances-v2.js'
 import adminGpuWorker from './routes/admin-gpu-worker.js'
 import adminDownloads from './routes/admin-downloads.js'
+import adminTraining from './routes/admin-training.js'
+import calls from './routes/calls.js'
+import contracts from './routes/contracts.js'
 
 // package.json에서 버전 정보 읽기
 const __filename = fileURLToPath(import.meta.url)
@@ -114,6 +117,7 @@ app.route('/api/admin', adminBalances)
 app.route('/api/admin', adminUtterancesV2)
 app.route('/api/admin', adminGpuWorker)
 app.route('/api/admin', adminDownloads)
+app.route('/api/admin', adminTraining)
 app.route('/api/user', userRewards)
 app.route('/api/logging', logging)
 app.route('/api/consent', consent)
@@ -122,6 +126,8 @@ app.route('/api/transcript-chunks', transcriptChunks)
 app.route('/api/session-chunks', sessionChunks)
 app.route('/api/user', user)
 app.route('/api/upload', upload)
+app.route('/api/calls', calls)
+app.route('/api/contracts', contracts)
 
 // ── 404 핸들러 ─────────────────────────────────────────────────────────
 

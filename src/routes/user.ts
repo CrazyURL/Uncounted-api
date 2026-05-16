@@ -1,9 +1,11 @@
 // ── User API Routes ─────────────────────────────────────────────────────
 // 사용자 프로필 관련 엔드포인트
 
+import { createHmac } from 'node:crypto'
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, getBody } from '../lib/middleware.js'
+import { normalizePhone } from '../lib/callFingerprint.js'
 
 const user = new Hono()
 
@@ -318,6 +320,122 @@ user.delete('/voice-profile', async (c) => {
   }
 
   return c.json({ data: { ok: true } })
+})
+
+// ── POST /api/user/register-phone (049 v5) ──────────────────────────────
+// 본인 phone + 이전 phones를 user_phone_history에 박음 + sold call의 pending_payout
+// 자동 이전 (탈퇴/번호 변경 후 재가입 시 권리 회복).
+//
+// Body: { current_phone, previous_phones?: string[] }
+//   - 최대 3개 (current 1 + previous up to 2). 트리거가 4개째 INSERT 차단.
+
+interface RegisterPhoneBody {
+  current_phone: string
+  previous_phones?: string[]
+}
+
+function hashPhone(phone: string): string {
+  const secret = process.env.PHONE_HASH_SECRET
+  if (!secret) throw new Error('PHONE_HASH_SECRET not configured')
+  return createHmac('sha256', secret).update(normalizePhone(phone)).digest('hex')
+}
+
+user.post('/register-phone', async (c) => {
+  const userId = c.get('userId') as string
+  const body = getBody<RegisterPhoneBody>(c)
+
+  if (!body.current_phone) {
+    return c.json({ error: 'current_phone is required' }, 400)
+  }
+
+  const currentHash = hashPhone(body.current_phone)
+  const previousHashes = (body.previous_phones ?? []).map(hashPhone)
+
+  const totalCount = 1 + previousHashes.length
+  if (totalCount > 3) {
+    return c.json({ error: '전화번호는 최대 3개까지 등록 가능합니다 (현재 + 이전 최대 2개)' }, 400)
+  }
+
+  // 1. user_phone_history 박음 (current_phone은 is_current=TRUE)
+  // 기존 is_current=TRUE 다른 row가 있으면 false로 강등 (UNIQUE INDEX 충돌 방지)
+  await supabaseAdmin
+    .from('user_phone_history')
+    .update({ is_current: false })
+    .eq('user_id', userId)
+    .eq('is_current', true)
+
+  const phoneRows = [
+    { user_id: userId, phone_hash: currentHash, is_current: true },
+    ...previousHashes.map((h) => ({ user_id: userId, phone_hash: h, is_current: false })),
+  ]
+
+  const { error: phoneInsertErr } = await supabaseAdmin
+    .from('user_phone_history')
+    .upsert(phoneRows, { onConflict: 'user_id,phone_hash' })
+
+  if (phoneInsertErr) {
+    console.error('[user/register-phone] phone history insert:', phoneInsertErr)
+    return c.json({ error: phoneInsertErr.message }, 400)
+  }
+
+  // 2. participants에서 phone_hash 매칭 → user_id 박음 (lazy linking)
+  const allHashes = [currentHash, ...previousHashes]
+  const { data: linkedParticipants } = await supabaseAdmin
+    .from('participants')
+    .update({ user_id: userId })
+    .in('phone_hash', allHashes)
+    .is('user_id', null)
+    .select('contract_id, phone_hash')
+
+  // 3. transaction_splits에서 phone_hash 매칭 → user_id 박음 + share_amount 합산
+  const { data: linkedSplits } = await supabaseAdmin
+    .from('transaction_splits')
+    .update({ participant_user_id: userId })
+    .in('participant_phone_hash', allHashes)
+    .is('participant_user_id', null)
+    .select('share_amount')
+
+  const pendingDelta = (linkedSplits ?? []).reduce(
+    (sum, s) => sum + Number(s.share_amount ?? 0),
+    0,
+  )
+
+  // 4. balances 박음/업데이트
+  if (pendingDelta > 0) {
+    const { data: existingBalance } = await supabaseAdmin
+      .from('balances')
+      .select('user_id, pending, total_earned')
+      .eq('user_id', userId)
+      .maybeSingle()
+
+    if (existingBalance) {
+      await supabaseAdmin
+        .from('balances')
+        .update({
+          pending: Number(existingBalance.pending ?? 0) + pendingDelta,
+          total_earned: Number(existingBalance.total_earned ?? 0) + pendingDelta,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('user_id', userId)
+    } else {
+      await supabaseAdmin.from('balances').insert({
+        user_id: userId,
+        pending: pendingDelta,
+        available: 0,
+        total_earned: pendingDelta,
+        total_withdrawn: 0,
+      })
+    }
+  }
+
+  return c.json({
+    data: {
+      registered_phones: phoneRows.length,
+      linked_participants: linkedParticipants?.length ?? 0,
+      linked_splits: linkedSplits?.length ?? 0,
+      pending_payout_delta: pendingDelta,
+    },
+  })
 })
 
 export default user
