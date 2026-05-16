@@ -31,7 +31,7 @@
 
 import { GetObjectCommand } from '@aws-sdk/client-s3'
 import { supabaseAdmin } from '../lib/supabase.js'
-import { s3Client, S3_AUDIO_BUCKET, uploadObject } from '../lib/s3.js'
+import { s3Client, S3_AUDIO_BUCKET, uploadObject, objectExists } from '../lib/s3.js'
 import { getAudioStatsFromBuffer } from '../lib/audio/ffmpegProcessor.js'
 import { computeQualityScore, computeQualityGrade } from '../lib/export/qualityMetricsService.js'
 
@@ -190,26 +190,52 @@ async function prefetchNextSession(excludeSessionId: string): Promise<PrefetchRe
   }
 }
 
-// ── stuck sweep — running 10분 초과 → failed 강제 전환 ────────────
+// ── stuck sweep — running 10분 초과 → S3 확인 후 pending/failed 전환 ────────────
 async function sweepStuckSessions(): Promise<void> {
   const cutoff = new Date(Date.now() - STUCK_THRESHOLD_MS).toISOString()
   const { data, error } = await supabaseAdmin
     .from('sessions')
-    .update({
-      gpu_upload_status: 'failed',
-      gpu_last_error: 'stuck — running 10분 초과 (워커 사망 또는 hang). 자동 재시도 큐에 진입.',
-    })
+    .select('id, raw_audio_url')
     .eq('gpu_upload_status', 'running')
     .lt('gpu_started_at', cutoff)
-    .select('id')
 
   if (error) {
     console.error('[gpu-worker] sweepStuck error:', error.message)
     return
   }
-  if (data && data.length > 0) {
-    console.warn(`[gpu-worker] sweepStuck: ${data.length} stuck session(s) reset to failed`)
+  if (!data || data.length === 0) return
+
+  let pendingCount = 0
+  let failedCount = 0
+  for (const row of data) {
+    // raw_audio_url 이 있고 S3 에 파일이 존재하면 업로드는 이미 완료 → pending 재시도
+    // 파일이 없으면 업로드 자체가 실패한 것 → failed
+    let hasFile = false
+    if (row.raw_audio_url) {
+      try {
+        hasFile = await objectExists(S3_AUDIO_BUCKET, row.raw_audio_url)
+      } catch {
+        // S3 확인 실패 시 안전하게 pending 처리 (실제 파일 여부 불명)
+        hasFile = true
+      }
+    }
+
+    const newStatus = hasFile ? 'pending' : 'failed'
+    const errMsg = hasFile
+      ? 'stuck — running 10분 초과 (워커 사망 또는 hang). 파일 존재 확인, 자동 재시도.'
+      : 'stuck — running 10분 초과 (워커 사망 또는 hang). 파일 미존재, 업로드 재시도 필요.'
+    await supabaseAdmin
+      .from('sessions')
+      .update({ gpu_upload_status: newStatus, gpu_last_error: errMsg })
+      .eq('id', row.id)
+
+    if (hasFile) pendingCount++
+    else failedCount++
   }
+
+  console.warn(
+    `[gpu-worker] sweepStuck: ${data.length} stuck session(s) — pending(파일있음)=${pendingCount}, failed(파일없음)=${failedCount}`,
+  )
 
   // Feature 1: both_agreed + raw_audio_url IS NULL 영구 stall 경보
   try {
@@ -767,11 +793,15 @@ export async function processOneSession(prefetched: PrefetchResult | null = null
   // prefetched 세션을 방금 꺼냈으니 이제 그 다음 세션을 pre-fetch
   const prefetchPromise = prefetchNextSession(session.id)
 
+  // S3 업로드(다운로드) 완료 여부 추적 — 에러 시 실제 파일 존재 여부로 상태 결정
+  let audioDownloaded = prefetched !== null  // prefetch 경로는 이미 다운로드 완료
+
   try {
     if (!taskId) {
       // prefetch 없이 직접 진입한 경우 — 직접 다운로드 + submit
       const ext = (session.raw_audio_url.split('.').pop() ?? 'm4a').toLowerCase()
       const audioBuffer = await downloadRawAudio(session.raw_audio_url)
+      audioDownloaded = true
       console.log(
         `[gpu-worker] downloaded ${audioBuffer.byteLength} bytes from ${session.raw_audio_url}`,
       )
@@ -843,13 +873,28 @@ export async function processOneSession(prefetched: PrefetchResult | null = null
       return { processed: false, backoff503: true, nextPrefetched }
     }
 
-    // 일반 실패: failed + retry_count++
+    // 일반 실패: retry_count++ 처리
     // err.cause 도 캡쳐 (undici 의 'fetch failed' 같은 generic 메시지에서 진짜 원인 추출)
     const causeMsg = err?.cause
       ? ` cause=${err.cause?.code ?? ''} ${err.cause?.message ?? String(err.cause)}`
       : ''
     const fullErrMsg = `${err.message ?? String(err)}${causeMsg}`
     console.error(`[gpu-worker] session=${session.id} FAIL: ${fullErrMsg}`)
+
+    // 오디오 다운로드가 이미 완료된 경우 → S3 에 파일이 있음 → pending 재시도 (업로드 실패 아님)
+    // 다운로드 전 실패 → 파일 미존재 가능 → S3 재확인 후 상태 결정
+    let nextUploadStatus: 'pending' | 'failed' = 'failed'
+    if (audioDownloaded) {
+      nextUploadStatus = 'pending'
+    } else {
+      // 다운로드 시도 전 실패 — S3 에서 직접 확인
+      try {
+        const exists = await objectExists(S3_AUDIO_BUCKET, session.raw_audio_url)
+        if (exists) nextUploadStatus = 'pending'
+      } catch {
+        // S3 확인 실패 시 failed 유지 (보수적)
+      }
+    }
 
     const { error: updateErr } = await supabaseAdmin.rpc('increment_gpu_retry', {
       p_session_id: session.id,
@@ -866,7 +911,7 @@ export async function processOneSession(prefetched: PrefetchResult | null = null
       await supabaseAdmin
         .from('sessions')
         .update({
-          gpu_upload_status: 'failed',
+          gpu_upload_status: nextUploadStatus,
           gpu_retry_count: nextCount,
           gpu_last_error: fullErrMsg.slice(0, 1000),
           updated_at: new Date().toISOString(),

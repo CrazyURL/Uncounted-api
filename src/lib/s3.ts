@@ -8,6 +8,7 @@ import {
   DeleteObjectsCommand,
   ListObjectsV2Command,
   GetObjectCommand,
+  HeadObjectCommand,
 } from '@aws-sdk/client-s3'
 import { getSignedUrl as awsGetSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { NodeHttpHandler } from '@smithy/node-http-handler'
@@ -125,6 +126,20 @@ export async function uploadObject(
       ms: Date.now() - startedAt,
       ...describeS3Error(err),
     })
+    throw err
+  }
+}
+
+/** S3 오브젝트 존재 여부 확인 (HEAD — 다운로드 없음) */
+export async function objectExists(bucket: string, key: string): Promise<boolean> {
+  try {
+    await s3Client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
+    return true
+  } catch (err: unknown) {
+    const e = err as { name?: string; $metadata?: { httpStatusCode?: number } }
+    if (e?.name === 'NotFound' || e?.$metadata?.httpStatusCode === 404) {
+      return false
+    }
     throw err
   }
 }
