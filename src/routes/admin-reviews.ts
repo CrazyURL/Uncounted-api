@@ -156,6 +156,42 @@ adminReviews.get('/reviews', async (c) => {
     )
   } else if (pipelineState === 'label_skipped') {
     query = query.eq('auto_label_status', 'skipped')
+  } else if (pipelineState === 'waiting') {
+    // 일부 단계 완료, 실행 중 없음, 미완료 단계 존재 (파이프라인 정체 세션)
+    const stageNotActive = (col: string) =>
+      `${col}.is.null,and(${col}.neq.running,${col}.neq.failed)`
+    query = query
+      .or(stageNotActive('gpu_upload_status'))
+      .or(stageNotActive('stt_status'))
+      .or(stageNotActive('diarize_status'))
+      .or(stageNotActive('gpu_pii_status'))
+      .or(stageNotActive('auto_label_status'))
+      .or(stageNotActive('quality_status'))
+    // 적어도 하나의 단계는 완료(done/skipped)
+    query = query.or(
+      'gpu_upload_status.in.(done,skipped),stt_status.in.(done,skipped),' +
+        'diarize_status.in.(done,skipped),gpu_pii_status.in.(done,skipped),' +
+        'auto_label_status.in.(done,skipped),quality_status.in.(done,skipped)',
+    )
+    // 적어도 하나의 단계는 미완료(pending/null)
+    query = query.or(
+      'gpu_upload_status.is.null,gpu_upload_status.eq.pending,' +
+        'stt_status.is.null,stt_status.eq.pending,' +
+        'diarize_status.is.null,diarize_status.eq.pending,' +
+        'gpu_pii_status.is.null,gpu_pii_status.eq.pending,' +
+        'auto_label_status.is.null,auto_label_status.eq.pending,' +
+        'quality_status.is.null,quality_status.eq.pending',
+    )
+  } else if (pipelineState === 'stuck') {
+    // 단계가 running 중이나 이전 단계 완료 후 30분 초과 (처리 병목)
+    const threshold = new Date(Date.now() - 30 * 60 * 1000).toISOString()
+    query = query.or(
+      `and(stt_status.eq.running,gpu_uploaded_at.lt.${threshold}),` +
+        `and(diarize_status.eq.running,stt_at.lt.${threshold}),` +
+        `and(gpu_pii_status.eq.running,diarize_at.lt.${threshold}),` +
+        `and(auto_label_status.eq.running,gpu_pii_at.lt.${threshold}),` +
+        `and(quality_status.eq.running,label_at.lt.${threshold})`,
+    )
   }
   if (piiSessionIds !== null) {
     query = query.in('id', piiSessionIds)
