@@ -1,5 +1,9 @@
 import ffmpeg from 'fluent-ffmpeg'
 import ffmpegStatic from 'ffmpeg-static'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { writeFile, unlink } from 'fs/promises'
+import { randomUUID } from 'crypto'
 
 ffmpeg.setFfmpegPath(ffmpegStatic as unknown as string)
 
@@ -179,6 +183,20 @@ export async function extractSegment(
       .on('error', (err: Error) => reject(new Error(`extractSegment failed: ${err.message}`)))
       .run()
   })
+}
+
+/**
+ * Analyze audio stats from an in-memory buffer (writes to a temp file internally).
+ * Equivalent to getAudioStats but avoids requiring a file path.
+ */
+export async function getAudioStatsFromBuffer(buffer: Buffer): Promise<AudioStats> {
+  const tmpFile = join(tmpdir(), `qc_${randomUUID()}.wav`)
+  try {
+    await writeFile(tmpFile, buffer)
+    return await getAudioStats(tmpFile)
+  } finally {
+    await unlink(tmpFile).catch(() => undefined)
+  }
 }
 
 /** Internal: run ffmpeg with a filter and capture stderr output */
