@@ -88,6 +88,35 @@ adminBalances.get('/balances', async (c) => {
     byUser.set(userId, cur)
   }
 
+  // 납품/정산 집계
+  const { data: deliveryRows } = await supabaseAdmin.from('deliveries').select('session_id')
+  const deliveredSessionSet = new Set(
+    (deliveryRows ?? []).map((r: { session_id: string }) => r.session_id),
+  )
+
+  const deliveredSessionCount = deliveredSessionSet.size
+  const undeliveredSessionCount = sessionIds.length - deliveredSessionSet.size
+
+  const deliveredUserSet = new Set<string>()
+  const undeliveredUserSet = new Set<string>()
+  for (const sid of sessionIds) {
+    const userId = sessionToUser.get(sid)
+    if (!userId) continue
+    if (deliveredSessionSet.has(sid)) {
+      deliveredUserSet.add(userId)
+    } else {
+      undeliveredUserSet.add(userId)
+    }
+  }
+
+  const [settledUttRes, unsettledUttRes] = await Promise.all([
+    supabaseAdmin
+      .from('utterances')
+      .select('id', { count: 'exact', head: true })
+      .not('settled_at', 'is', null),
+    supabaseAdmin.from('utterances').select('id', { count: 'exact', head: true }).is('settled_at', null),
+  ])
+
   // 사용자 정보 조회 (auth.users)
   const userIds = Array.from(byUser.keys())
   if (userIds.length === 0) return c.json({ data: { users: [], totalUsers: 0 } })
@@ -141,6 +170,14 @@ adminBalances.get('/balances', async (c) => {
         hourlyRateKrw: HOURLY_RATE_KRW,
         userShareRatio: USER_SHARE_RATIO,
         yearlyCapKrw: YEARLY_CAP_KRW,
+      },
+      settlementStats: {
+        settledUtteranceCount: settledUttRes.count ?? 0,
+        unsettledUtteranceCount: unsettledUttRes.count ?? 0,
+        deliveredSessionCount,
+        undeliveredSessionCount,
+        deliveredUserCount: deliveredUserSet.size,
+        undeliveredUserCount: undeliveredUserSet.size,
       },
     },
   })

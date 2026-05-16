@@ -200,7 +200,7 @@ adminReviews.get('/reviews', async (c) => {
     query = query.in('id', qualitySessionIds)
   }
   if (search) {
-    query = query.or(`title.ilike.%${search}%,id.ilike.${search}%`)
+    query = query.or(`title.ilike.%${search}%,id.ilike.${search}%,user_id.eq.${search}`)
   }
 
   const { data, error, count } = await query
@@ -242,7 +242,7 @@ adminReviews.get('/reviews', async (c) => {
       durQuery = durQuery.in('id', qualitySessionIds)
     }
     if (search) {
-      durQuery = durQuery.or(`title.ilike.%${search}%,id.ilike.${search}%`)
+      durQuery = durQuery.or(`title.ilike.%${search}%,id.ilike.${search}%,user_id.eq.${search}`)
     }
     const { data: durRows } = await durQuery
     filteredDurationSec = (durRows ?? []).reduce(
@@ -658,7 +658,7 @@ adminReviews.get('/sessions', async (c) => {
   }
   if (search) {
     // STAGE 6.8 — raw title 매칭 (응답엔 미노출)
-    query = query.or(`title.ilike.%${search}%,id.ilike.${search}%`)
+    query = query.or(`title.ilike.%${search}%,id.ilike.${search}%,user_id.eq.${search}`)
   }
 
   const { data, error } = await query

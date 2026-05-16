@@ -60,7 +60,7 @@ async function pipelineDistribution(column: string): Promise<PipelineCount> {
 }
 
 adminDashboard.get('/dashboard-stats', async (c) => {
-  // 1. 양측 동의 카운트 + 24h 추이
+  // 1. 양측 동의 카운트 + 24h 추이 + 고유 사용자 수
   const [{ count: bothAgreedCount }, { count: bothAgreed24h }] = await Promise.all([
     supabaseAdmin
       .from('sessions')
@@ -72,6 +72,13 @@ adminDashboard.get('/dashboard-stats', async (c) => {
       .eq('consent_status', 'both_agreed')
       .gte('consented_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()),
   ])
+
+  const { data: userRows } = await supabaseAdmin
+    .from('sessions')
+    .select('user_id')
+    .eq('consent_status', 'both_agreed')
+    .not('user_id', 'is', null)
+  const userCount = new Set((userRows ?? []).map((r: { user_id: string }) => r.user_id)).size
 
   // 양측 동의 통화 시간 합산
   const { data: durRows } = await supabaseAdmin
@@ -162,6 +169,7 @@ adminDashboard.get('/dashboard-stats', async (c) => {
         bothAgreedCount: bothAgreedCount ?? 0,
         bothAgreed24h: bothAgreed24h ?? 0,
         totalDurationSec,
+        userCount,
       },
       pipeline: {
         upload,

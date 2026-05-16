@@ -114,6 +114,26 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
 })
 
 adminUtterancesV2.get('/utterances-v2/stats', async (c) => {
+  // deliveries 테이블에서 납품된 session_id 목록 조회
+  const { data: deliveryRows } = await supabaseAdmin
+    .from('deliveries')
+    .select('session_id')
+  const deliveredSessionIds = [...new Set((deliveryRows ?? []).map((r: { session_id: string }) => r.session_id))]
+
+  // 납품된 세션의 발화 수 집계 (청크 100개씩)
+  let deliveredCount = 0
+  if (deliveredSessionIds.length > 0) {
+    const CHUNK = 100
+    for (let i = 0; i < deliveredSessionIds.length; i += CHUNK) {
+      const chunk = deliveredSessionIds.slice(i, i + CHUNK)
+      const { count } = await supabaseAdmin
+        .from('utterances')
+        .select('id', { count: 'exact', head: true })
+        .in('session_id', chunk)
+      deliveredCount += count ?? 0
+    }
+  }
+
   const [totalRes, settledRes, unsettledRes] = await Promise.all([
     supabaseAdmin.from('utterances').select('id', { count: 'exact', head: true }),
     supabaseAdmin
@@ -158,6 +178,7 @@ adminUtterancesV2.get('/utterances-v2/stats', async (c) => {
       total: totalRes.count ?? 0,
       settledCount: settledRes.count ?? 0,
       unsettledCount: unsettledRes.count ?? 0,
+      deliveredCount,
       totalDurationSec,
       estimatedRevenueKrw: Math.round((totalDurationSec * HOURLY_RATE_KRW) / 3600),
     },
