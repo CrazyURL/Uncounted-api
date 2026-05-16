@@ -19,6 +19,9 @@ const adminReviews = new Hono()
 adminReviews.use('/*', authMiddleware)
 adminReviews.use('/*', adminMiddleware)
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+function isUuid(s: string): boolean { return UUID_RE.test(s) }
+
 // 검수 상태 5단계 상태머신
 const VALID_REVIEW = new Set([
   'pending',
@@ -200,7 +203,7 @@ adminReviews.get('/reviews', async (c) => {
     query = query.in('id', qualitySessionIds)
   }
   if (search) {
-    query = query.or(`title.ilike.%${search}%,id.ilike.${search}%,user_id.eq.${search}`)
+    query = query.or(`title.ilike.%${search}%,id.ilike.${search}%${isUuid(search) ? `,user_id.eq.${search}` : ''}`)
   }
 
   const { data, error, count } = await query
@@ -658,7 +661,7 @@ adminReviews.get('/sessions', async (c) => {
   }
   if (search) {
     // STAGE 6.8 — raw title 매칭 (응답엔 미노출)
-    query = query.or(`title.ilike.%${search}%,id.ilike.${search}%,user_id.eq.${search}`)
+    query = query.or(`title.ilike.%${search}%,id.ilike.${search}%${isUuid(search) ? `,user_id.eq.${search}` : ''}`)
   }
 
   const { data, error } = await query
