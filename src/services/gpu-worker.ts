@@ -102,6 +102,25 @@ interface VoiceApiUtterance {
   words?: unknown
 }
 
+interface VoiceApiSpeaker {
+  speaker_label: string
+  speaker_role?: string | null
+  speaker_role_source?: string | null
+  speaker_gender?: string | null
+  speaker_voice_age_range?: string | null
+  speaker_speech_age_range?: string | null
+  speaker_speech_age_model_version?: string | null
+  speaker_relation?: string | null
+}
+
+interface VoiceApiTopicSegment {
+  segment_index: number
+  topic?: string | null
+  start_ms?: number | null
+  end_ms?: number | null
+  utterance_indices: number[]
+}
+
 interface VoiceApiJobResult {
   task_id: string
   status: 'pending' | 'processing' | 'completed' | 'failed'
@@ -112,6 +131,8 @@ interface VoiceApiJobResult {
   pii_summary?: unknown
   diarization_enabled?: boolean
   utterances?: VoiceApiUtterance[]
+  speakers?: VoiceApiSpeaker[]
+  topic_segments?: VoiceApiTopicSegment[]
   speaker_audio?: unknown
   error?: string
 }
@@ -372,6 +393,37 @@ async function persistResults(
     return
   }
 
+  // ── STAGE 15: session_speakers ─────────────────────────────────────
+  const speakerLabelToId = new Map<string, string>()
+  const speakersData = result.speakers ?? []
+  for (const spk of speakersData) {
+    const { data: spkData, error: spkErr } = await supabaseAdmin
+      .from('session_speakers')
+      .upsert(
+        {
+          session_id: session.id,
+          speaker_label: spk.speaker_label,
+          speaker_role: spk.speaker_role ?? null,
+          speaker_role_source: spk.speaker_role_source ?? null,
+          speaker_gender: spk.speaker_gender ?? null,
+          speaker_voice_age_range: spk.speaker_voice_age_range ?? null,
+          speaker_speech_age_range: spk.speaker_speech_age_range ?? null,
+          speaker_speech_age_model_version: spk.speaker_speech_age_model_version ?? null,
+          speaker_relation: spk.speaker_relation ?? null,
+        },
+        { onConflict: 'session_id,speaker_label' },
+      )
+      .select('id')
+      .single()
+    if (spkErr) {
+      console.warn(
+        `[gpu-worker] session_speakers upsert failed (${spk.speaker_label}): ${spkErr.message}`,
+      )
+    } else if (spkData) {
+      speakerLabelToId.set(spk.speaker_label, spkData.id)
+    }
+  }
+
   for (let i = 0; i < utterances.length; i++) {
     const u = utterances[i]
     const seq = i + 1
@@ -402,6 +454,7 @@ async function persistResults(
         sequence_in_chunk: seq,
         sequence_order: seq,
         speaker_id: u.speaker_id,
+        session_speaker_id: u.speaker_id ? (speakerLabelToId.get(u.speaker_id) ?? null) : null,
         is_user: false,
         start_sec: u.start_sec,
         end_sec: u.end_sec,
@@ -421,6 +474,51 @@ async function persistResults(
     )
     if (error) {
       throw new Error(`utterance INSERT failed (${utteranceId}): ${error.message}`)
+    }
+  }
+
+  // ── STAGE 16: session_segments ─────────────────────────────────────
+  const topicSegmentsData = result.topic_segments ?? []
+  const segmentIndexToId = new Map<number, string>()
+  for (const seg of topicSegmentsData) {
+    const { data: segData, error: segErr } = await supabaseAdmin
+      .from('session_segments')
+      .upsert(
+        {
+          session_id: session.id,
+          segment_index: seg.segment_index,
+          topic: seg.topic ?? null,
+          start_ms: seg.start_ms ?? null,
+          end_ms: seg.end_ms ?? null,
+          utterance_count: seg.utterance_indices.length,
+        },
+        { onConflict: 'session_id,segment_index' },
+      )
+      .select('id')
+      .single()
+    if (segErr) {
+      console.warn(
+        `[gpu-worker] session_segments upsert failed (${seg.segment_index}): ${segErr.message}`,
+      )
+    } else if (segData) {
+      segmentIndexToId.set(seg.segment_index, segData.id)
+    }
+  }
+  for (const seg of topicSegmentsData) {
+    const segId = segmentIndexToId.get(seg.segment_index)
+    if (!segId) continue
+    for (const uttIdx of seg.utterance_indices) {
+      const uttSeq = uttIdx + 1
+      const uttSegId = `utt_${session.id}_${String(uttSeq).padStart(3, '0')}`
+      const { error: updErr } = await supabaseAdmin
+        .from('utterances')
+        .update({ segment_id: segId })
+        .eq('id', uttSegId)
+      if (updErr) {
+        console.warn(
+          `[gpu-worker] utterances.segment_id update failed (${uttSegId}): ${updErr.message}`,
+        )
+      }
     }
   }
 
