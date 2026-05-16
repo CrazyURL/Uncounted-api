@@ -48,6 +48,36 @@ sessions.get('/', async (c) => {
 })
 
 /**
+ * GET /sessions/pending-upload
+ * both_agreed 상태이면서 raw_audio_url이 없는 세션 목록 반환
+ * 앱 폴링용 — 포그라운드 복귀 시 업로드 대상 확인
+ */
+sessions.get('/pending-upload', async (c) => {
+  const userId = c.get('userId') as string
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('sessions')
+      .select('id, session_seq, date, duration, peer_id')
+      .eq('user_id', userId)
+      .eq('consent_status', 'both_agreed')
+      .is('raw_audio_url', null)
+      .order('date', { ascending: true })
+      .limit(50)
+
+    if (error) return c.json({ error: error.message }, 500)
+
+    return c.json({
+      sessions: data ?? [],
+      count: data?.length ?? 0,
+    })
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unknown error'
+    return c.json({ error: msg }, 500)
+  }
+})
+
+/**
  * GET /sessions/:id
  * 세션 상세 조회
  */
