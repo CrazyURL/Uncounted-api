@@ -24,7 +24,7 @@ export interface SessionQualityResult {
  * Compute a quality grade from raw metrics.
  * A: score >= 80, B: score >= 50, C: below 50
  */
-function computeQualityGrade(score: number): string {
+export function computeQualityGrade(score: number): string {
   if (score >= 80) return 'A'
   if (score >= 50) return 'B'
   return 'C'
@@ -34,7 +34,7 @@ function computeQualityGrade(score: number): string {
  * Compute a quality score (0-100) from audio stats.
  * Factors: SNR contribution (higher is better), silence ratio penalty, clipping penalty.
  */
-function computeQualityScore(stats: {
+export function computeQualityScore(stats: {
   rmsDb: number
   peakDb: number
   silenceRatio: number
