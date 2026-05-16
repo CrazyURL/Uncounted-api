@@ -32,6 +32,8 @@
 import { GetObjectCommand } from '@aws-sdk/client-s3'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { s3Client, S3_AUDIO_BUCKET, uploadObject } from '../lib/s3.js'
+import { getAudioStatsFromBuffer } from '../lib/audio/ffmpegProcessor.js'
+import { computeQualityScore, computeQualityGrade } from '../lib/export/qualityMetricsService.js'
 
 const POLL_INTERVAL_MS = 30_000  // safety net 폴링 30초 (immediate trigger 우선, 이건 fallback)
 const POLL_BACKOFF_503_MS = 60_000  // voice_api 503 시 60초 추가 대기
@@ -349,7 +351,24 @@ async function persistResults(
 ): Promise<void> {
   const utterances = result.utterances ?? []
   if (utterances.length === 0) {
-    console.warn(`[gpu-worker] session ${session.id}: 0 utterances returned`)
+    console.warn(`[gpu-worker] session ${session.id}: 0 utterances returned — marking quality_status failed`)
+    const now = new Date().toISOString()
+    await supabaseAdmin
+      .from('sessions')
+      .update({
+        gpu_upload_status: 'done',
+        stt_status: 'done',
+        stt_at: now,
+        diarize_status: 'done',
+        diarize_at: now,
+        gpu_pii_status: 'done',
+        gpu_pii_at: now,
+        quality_status: 'failed',
+        utterance_count: 0,
+        gpu_last_error: 'voice_api_0_utterances',
+      })
+      .eq('id', session.id)
+    return
   }
 
   for (let i = 0; i < utterances.length; i++) {
@@ -361,6 +380,17 @@ async function persistResults(
 
     const wavBuffer = await downloadUtteranceWav(taskId, u.audio_filename)
     await uploadObject(S3_AUDIO_BUCKET, storagePath, new Uint8Array(wavBuffer), 'audio/wav')
+
+    let utteranceQualityScore: number | null = null
+    let utteranceQualityGrade: string | null = null
+    try {
+      const stats = await getAudioStatsFromBuffer(Buffer.from(wavBuffer))
+      const { qualityScore } = computeQualityScore(stats)
+      utteranceQualityScore = qualityScore
+      utteranceQualityGrade = computeQualityGrade(qualityScore)
+    } catch {
+      // 품질 계산 실패 시 null 유지 — utterance는 정상 저장
+    }
 
     const { error } = await supabaseAdmin.from('utterances').upsert(
       {
@@ -382,6 +412,8 @@ async function persistResults(
         transcript_words: u.words ?? null,
         segmented_by: 'gpu_v10',
         client_version: 'gpu-worker-2.0',
+        quality_score: utteranceQualityScore,
+        quality_grade: utteranceQualityGrade,
         updated_at: new Date().toISOString(),
       },
       { onConflict: 'session_id,sequence_order' },
@@ -412,6 +444,14 @@ async function persistResults(
     )
   }
 
+  const { data: qualityRows } = await supabaseAdmin
+    .from('utterances')
+    .select('quality_score')
+    .eq('session_id', session.id)
+    .not('quality_score', 'is', null)
+    .limit(1)
+  const qualityComputed = (qualityRows?.length ?? 0) > 0
+
   const now = new Date().toISOString()
   await supabaseAdmin
     .from('sessions')
@@ -423,7 +463,7 @@ async function persistResults(
       diarize_at: now,
       gpu_pii_status: 'done',
       gpu_pii_at: now,
-      quality_status: 'done',
+      quality_status: qualityComputed ? 'done' : 'skipped',
       quality_at: now,
       utterance_count: utterances.length,
       gpu_last_error: null, // 성공 시 에러 메시지 클리어
