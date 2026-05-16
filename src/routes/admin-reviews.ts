@@ -28,15 +28,17 @@ const VALID_REVIEW = new Set([
   'needs_revision',
 ])
 
-// 처리 흐름이 모두 done 인지 — pending → in_review 전환 가능 여부 체크용
+// 처리 흐름이 모두 done/skipped 인지 — pending → in_review 전환 가능 여부 체크용
 // DB: gpu_upload_status / gpu_pii_status (BM v9 컬럼 충돌 회피)
 function pipelineComplete(row: Record<string, unknown>): boolean {
+  const terminal = (v: unknown) => v === 'done' || v === 'skipped'
   return (
-    row.gpu_upload_status === 'done' &&
-    row.stt_status === 'done' &&
-    row.diarize_status === 'done' &&
-    row.gpu_pii_status === 'done' &&
-    row.quality_status === 'done'
+    terminal(row.gpu_upload_status) &&
+    terminal(row.stt_status) &&
+    terminal(row.diarize_status) &&
+    terminal(row.gpu_pii_status) &&
+    terminal(row.auto_label_status) &&
+    terminal(row.quality_status)
   )
 }
 
@@ -70,6 +72,7 @@ adminReviews.get('/reviews', async (c) => {
   const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1)
   const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') ?? '50', 10) || 50))
   const offset = (page - 1) * limit
+  const pipelineState = url.searchParams.get('pipeline_state') ?? undefined
   const sortBy = url.searchParams.get('sort_by')
   const sortDir = url.searchParams.get('sort_dir') ?? 'desc'
   const colMap: Record<string, string> = { date: 'date', duration: 'duration' }
@@ -101,7 +104,7 @@ adminReviews.get('/reviews', async (c) => {
     const { data: qualRows } = await supabaseAdmin
       .from('utterances')
       .select('session_id')
-      .eq('quality_grade', 'C')
+      .or('quality_grade.eq.C,and(quality_grade.is.null,quality_score.lt.50)')
       .limit(5000)
     qualitySessionIds = [...new Set((qualRows ?? []).map((r) => (r as Record<string, unknown>).session_id as string))]
     if (qualitySessionIds.length === 0) {
@@ -117,9 +120,9 @@ adminReviews.get('/reviews', async (c) => {
   let query = supabaseAdmin
     .from('sessions')
     .select(
-      'id, user_id, session_seq, date, duration, consent_status, consented_at, ' +
+      'id, user_id, pid, session_seq, date, duration, consent_status, consented_at, ' +
         'gpu_upload_status, gpu_uploaded_at, stt_status, stt_at, diarize_status, diarize_at, ' +
-        'gpu_pii_status, gpu_pii_at, quality_status, quality_at, review_status, utterance_count',
+        'gpu_pii_status, gpu_pii_at, auto_label_status, label_at, quality_status, quality_at, review_status, utterance_count',
       { count: 'exact' },
     )
     .eq('consent_status', 'both_agreed')
@@ -135,8 +138,24 @@ adminReviews.get('/reviews', async (c) => {
   if (pipelineFailed) {
     query = query.or(
       'gpu_upload_status.eq.failed,stt_status.eq.failed,' +
-        'diarize_status.eq.failed,gpu_pii_status.eq.failed,quality_status.eq.failed',
+        'diarize_status.eq.failed,gpu_pii_status.eq.failed,auto_label_status.eq.failed,quality_status.eq.failed',
     )
+  }
+  if (pipelineState === 'idle') {
+    query = query
+      .eq('gpu_upload_status', 'pending')
+      .eq('stt_status', 'pending')
+      .eq('diarize_status', 'pending')
+      .eq('gpu_pii_status', 'pending')
+      .eq('auto_label_status', 'pending')
+      .eq('quality_status', 'pending')
+  } else if (pipelineState === 'running') {
+    query = query.or(
+      'gpu_upload_status.eq.running,stt_status.eq.running,diarize_status.eq.running,' +
+        'gpu_pii_status.eq.running,auto_label_status.eq.running,quality_status.eq.running',
+    )
+  } else if (pipelineState === 'label_skipped') {
+    query = query.eq('auto_label_status', 'skipped')
   }
   if (piiSessionIds !== null) {
     query = query.in('id', piiSessionIds)
@@ -209,15 +228,28 @@ adminReviews.get('/reviews', async (c) => {
   const snrDbCountBySession = new Map<string, number>()
   const speechRatioSumBySession = new Map<string, number>()
   const speechRatioCountBySession = new Map<string, number>()
-  type PiiSample = { startSec: number; endSec: number }
+  type PiiSample = { startSec: number; endSec: number; maskType: string | null; piiType: string | null }
   const piiSamplesBySession = new Map<string, PiiSample[]>()
-  type SpeakerInfo = { speaker_label: string; speaker_role: string | null; speaker_gender: string | null; speaker_voice_age_range: string | null; speaker_relation: string | null }
+  type SpeakerInfo = {
+    speaker_label: string
+    speaker_role: string | null
+    speaker_gender: string | null
+    speaker_voice_age_range: string | null
+    speaker_speech_age_range: string | null
+    speaker_relation: string | null
+    speaker_accent_group: string | null
+    speaker_region_group: string | null
+    utterance_count: number
+    total_duration_sec: number
+  }
   const speakersBySession = new Map<string, SpeakerInfo[]>()
+  const utteranceCountBySpeaker = new Map<string, number>()
+  const durationSecBySpeaker = new Map<string, number>()
 
   if (sessionIds.length > 0) {
     const { data: uttRows } = await supabaseAdmin
       .from('utterances')
-      .select('session_id, quality_grade, pii_intervals, quality_score, snr_db, speech_ratio')
+      .select('session_id, quality_grade, pii_intervals, quality_score, snr_db, speech_ratio, speaker_label, duration_sec')
       .in('session_id', sessionIds)
       .limit(50000)
 
@@ -233,7 +265,12 @@ adminReviews.get('/reviews', async (c) => {
           for (const iv of piiIntervals) {
             if (samples.length >= 5) break
             const ivRow = iv as Record<string, unknown>
-            samples.push({ startSec: ivRow.startSec as number, endSec: ivRow.endSec as number })
+            samples.push({
+              startSec: ivRow.startSec as number,
+              endSec: ivRow.endSec as number,
+              maskType: (ivRow.maskType as string | null) ?? null,
+              piiType: (ivRow.piiType as string | null) ?? null,
+            })
           }
           piiSamplesBySession.set(sid, samples)
         }
@@ -262,26 +299,65 @@ adminReviews.get('/reviews', async (c) => {
         speechRatioSumBySession.set(sid, (speechRatioSumBySession.get(sid) ?? 0) + sr)
         speechRatioCountBySession.set(sid, (speechRatioCountBySession.get(sid) ?? 0) + 1)
       }
+
+      const spLabel = row.speaker_label as string | null
+      if (spLabel) {
+        const key = `${sid}-${spLabel}`
+        utteranceCountBySpeaker.set(key, (utteranceCountBySpeaker.get(key) ?? 0) + 1)
+        const dur = row.duration_sec as number | null
+        durationSecBySpeaker.set(key, (durationSecBySpeaker.get(key) ?? 0) + (dur ?? 0))
+      }
     }
 
     for (const sid of sessionIds) {
       if (!gradeBySession.has(sid)) gradeBySession.set(sid, null)
     }
 
+    const sessionPidMap = new Map<string, string>()
+    for (const r of rows) {
+      const pid = r.pid as string | null
+      if (pid) sessionPidMap.set(r.id as string, pid)
+    }
+    const uniquePids = [...new Set(sessionPidMap.values())]
+    const profileByPid = new Map<string, { accent_group: string | null; region_group: string | null }>()
+    if (uniquePids.length > 0) {
+      const { data: profileRows } = await supabaseAdmin
+        .from('users_profile')
+        .select('pid, accent_group, region_group')
+        .in('pid', uniquePids)
+      for (const p of profileRows ?? []) {
+        const pr = p as Record<string, unknown>
+        profileByPid.set(pr.pid as string, {
+          accent_group: pr.accent_group as string | null,
+          region_group: pr.region_group as string | null,
+        })
+      }
+    }
+
     const { data: spRows } = await supabaseAdmin
       .from('session_speakers')
-      .select('session_id, speaker_label, speaker_role, speaker_gender, speaker_voice_age_range, speaker_relation')
+      .select('session_id, speaker_label, speaker_role, speaker_gender, speaker_voice_age_range, speaker_speech_age_range, speaker_relation')
       .in('session_id', sessionIds)
     for (const sp of spRows ?? []) {
       const spRow = sp as Record<string, unknown>
       const sid = spRow.session_id as string
       const arr = speakersBySession.get(sid) ?? []
+      const spLabelVal = spRow.speaker_label as string
+      const spRoleVal = spRow.speaker_role as string | null
+      const speakerKey = `${sid}-${spLabelVal}`
+      const sessionPid = sessionPidMap.get(sid)
+      const profile = spRoleVal === 'self' && sessionPid ? profileByPid.get(sessionPid) : undefined
       arr.push({
-        speaker_label: spRow.speaker_label as string,
-        speaker_role: spRow.speaker_role as string | null,
+        speaker_label: spLabelVal,
+        speaker_role: spRoleVal,
         speaker_gender: spRow.speaker_gender as string | null,
         speaker_voice_age_range: spRow.speaker_voice_age_range as string | null,
+        speaker_speech_age_range: spRow.speaker_speech_age_range as string | null,
         speaker_relation: spRow.speaker_relation as string | null,
+        speaker_accent_group: profile?.accent_group ?? null,
+        speaker_region_group: profile?.region_group ?? null,
+        utterance_count: utteranceCountBySpeaker.get(speakerKey) ?? 0,
+        total_duration_sec: Math.round((durationSecBySpeaker.get(speakerKey) ?? 0) * 10) / 10,
       })
       speakersBySession.set(sid, arr)
     }
@@ -315,6 +391,8 @@ adminReviews.get('/reviews', async (c) => {
       diarize_at: (row.diarize_at as string) ?? null,
       pii_status: (row.gpu_pii_status as string) ?? 'pending',
       pii_at: (row.gpu_pii_at as string) ?? null,
+      auto_label_status: (row.auto_label_status as string) ?? 'pending',
+      label_at: (row.label_at as string) ?? null,
       quality_status: (row.quality_status as string) ?? 'pending',
       quality_at: (row.quality_at as string) ?? null,
       review_status: (row.review_status as string) ?? 'pending',
