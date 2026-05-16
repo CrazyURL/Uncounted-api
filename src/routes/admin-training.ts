@@ -74,7 +74,7 @@ adminTraining.get('/training/stats', async (c) => {
 // ── GET /training/export ────────────────────────────────────────────────
 
 adminTraining.get('/training/export', async (c) => {
-  // 최대 50000건 (안전 가드)
+  // 최대 1000건 (OOM 방지 — 대량 익스포트는 cursor 페이지네이션으로 구현 필요)
   const { data, error } = await supabaseAdmin
     .from('utterances')
     .select('id, transcript_text, emotion, dialog_act, label_source, emotion_confidence')
@@ -82,7 +82,7 @@ adminTraining.get('/training/export', async (c) => {
     .not('emotion', 'is', null)
     .not('dialog_act', 'is', null)
     .not('transcript_text', 'is', null)
-    .limit(50000)
+    .limit(1000)
 
   if (error) return c.json({ error: error.message }, 500)
 
