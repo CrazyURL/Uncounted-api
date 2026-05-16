@@ -217,13 +217,23 @@ consent.post('/agree/:token', async (c) => {
       .in('id', sessionIds)
       .eq('user_id', invitation.user_id)
       .eq('consent_status', 'user_only')
-    if (promoteErr) {
-      console.error('[consent.agree.promote-sessions] error:', promoteErr)
-      // invitation은 이미 'agreed' 처리됨 — sessions 갱신 실패는 별도 모니터링
-      // 사용자 측 polling에서 재시도 가능 (idempotent)
-    } else {
-      console.log(`[consent.agree.promote-sessions] ${count}/${sessionIds.length} promoted`)
+
+    if (promoteErr || count === 0) {
+      // 보상 트랜잭션: invitation을 'agreed' → 'sent'로 되돌려 토큰 재사용 가능하게 유지
+      await supabaseAdmin
+        .from('consent_invitations')
+        .update({ status: 'sent', responded_at: null, ip_address: null, user_agent: null })
+        .eq('id', invitation.id)
+
+      if (promoteErr) {
+        console.error('[consent.agree.promote-sessions] error:', promoteErr)
+        return c.json({ error: 'Failed to record consent' }, 500)
+      }
+      console.error(`[consent.agree.promote-sessions] 0/${sessionIds.length} promoted — sessions not uploaded yet`)
+      return c.json({ error: 'Sessions not ready. Ask the sender to retry the link.' }, 422)
     }
+
+    console.log(`[consent.agree.promote-sessions] ${count}/${sessionIds.length} promoted`)
   }
 
   return c.json({ data: updated })
