@@ -104,6 +104,7 @@ interface VoiceApiUtterance {
 
 interface VoiceApiSpeaker {
   speaker_label: string
+  embedding?: number[] | null
   speaker_role?: string | null
   speaker_role_source?: string | null
   speaker_gender?: string | null
@@ -147,7 +148,7 @@ class Voice503Error extends Error {
 
 // pre-fetch 결과 — 다음 세션의 S3 다운로드 + voice_api submit 이 완료된 상태
 interface PrefetchResult {
-  session: { id: string; user_id: string; raw_audio_url: string; isRetry: boolean }
+  session: { id: string; user_id: string; raw_audio_url: string; isRetry: boolean; consent_status?: string; gpu_last_error?: string | null }
   taskId: string
 }
 
@@ -209,6 +210,90 @@ async function sweepStuckSessions(): Promise<void> {
   if (data && data.length > 0) {
     console.warn(`[gpu-worker] sweepStuck: ${data.length} stuck session(s) reset to failed`)
   }
+
+  // Feature 1: both_agreed + raw_audio_url IS NULL 영구 stall 경보
+  try {
+    const { count: nullCount, error: nullErr } = await supabaseAdmin
+      .from('sessions')
+      .select('id', { count: 'exact', head: true })
+      .eq('consent_status', 'both_agreed')
+      .is('raw_audio_url', null)
+      .neq('gpu_upload_status', 'done')
+      .neq('gpu_upload_status', 'skipped')
+    if (!nullErr && (nullCount ?? 0) > 5) {
+      console.warn(
+        `[gpu-worker] sweepStuck: ${nullCount} sessions both_agreed + raw_audio_url IS NULL (영구 stall 의심) — 수동 조치 필요`,
+      )
+    }
+  } catch (e: any) {
+    console.error('[gpu-worker] sweepStuck null_audio check error:', e.message)
+  }
+}
+
+// ── Feature 2: segment_id=NULL 발화 역할당 sweep ─────────────────────
+async function sweepSegmentBackfill(): Promise<void> {
+  try {
+    const { data: orphans, error: orphanErr } = await supabaseAdmin
+      .from('utterances')
+      .select('id, session_id, start_ms')
+      .is('segment_id', null)
+      .limit(200)
+    if (orphanErr) {
+      console.error('[gpu-worker] sweepSegmentBackfill orphan query error:', orphanErr.message)
+      return
+    }
+    if (!orphans || orphans.length === 0) return
+
+    const sessionMap = new Map<string, typeof orphans>()
+    for (const utt of orphans) {
+      const arr = sessionMap.get(utt.session_id) ?? []
+      arr.push(utt)
+      sessionMap.set(utt.session_id, arr)
+    }
+
+    let patched = 0
+    for (const [sessionId, utts] of sessionMap) {
+      const { data: segments, error: segErr } = await supabaseAdmin
+        .from('session_segments')
+        .select('id, start_ms, end_ms')
+        .eq('session_id', sessionId)
+        .order('start_ms', { ascending: true })
+      if (segErr || !segments || segments.length === 0) continue
+
+      for (const utt of utts) {
+        const uttMs = utt.start_ms ?? 0
+        let matchedSegId: string | null = null
+        for (const seg of segments) {
+          if (seg.start_ms <= uttMs && uttMs <= seg.end_ms) {
+            matchedSegId = seg.id
+            break
+          }
+        }
+        if (!matchedSegId) {
+          const nearest = segments.reduce((a, b) =>
+            Math.abs(a.start_ms - uttMs) <= Math.abs(b.start_ms - uttMs) ? a : b,
+          )
+          matchedSegId = nearest.id
+        }
+        const { error: updErr } = await supabaseAdmin
+          .from('utterances')
+          .update({ segment_id: matchedSegId })
+          .eq('id', utt.id)
+        if (updErr) {
+          console.warn(`[gpu-worker] sweepSegmentBackfill update failed for ${utt.id}:`, updErr.message)
+        } else {
+          patched++
+        }
+      }
+    }
+    if (patched > 0) {
+      console.log(
+        `[gpu-worker] sweepSegmentBackfill: ${patched} orphan utterances patched in ${sessionMap.size} sessions`,
+      )
+    }
+  } catch (e: any) {
+    console.error('[gpu-worker] sweepSegmentBackfill error:', e.message)
+  }
 }
 
 // ── pickup: 신규 pending OR failed 재시도 ────────────────────────────
@@ -217,11 +302,13 @@ async function pickNextSession(): Promise<{
   user_id: string
   raw_audio_url: string
   isRetry: boolean
+  consent_status?: string
+  gpu_last_error?: string | null
 } | null> {
   // 우선순위 1: 신규 pending
   const { data: pendingRow, error: pendingErr } = await supabaseAdmin
     .from('sessions')
-    .select('id, user_id, raw_audio_url')
+    .select('id, user_id, raw_audio_url, consent_status, gpu_last_error')
     .eq('gpu_upload_status', 'pending')
     .not('raw_audio_url', 'is', null)
     .order('raw_audio_uploaded_at', { ascending: true })
@@ -240,7 +327,7 @@ async function pickNextSession(): Promise<{
   const retryCutoff = new Date(Date.now() - RETRY_DELAY_MIN * 60_000).toISOString()
   const { data: failedRow, error: failedErr } = await supabaseAdmin
     .from('sessions')
-    .select('id, user_id, raw_audio_url, gpu_retry_count')
+    .select('id, user_id, raw_audio_url, gpu_retry_count, consent_status, gpu_last_error')
     .eq('gpu_upload_status', 'failed')
     .lt('gpu_retry_count', MAX_RETRY_COUNT)
     .lt('updated_at', retryCutoff)
@@ -264,6 +351,8 @@ interface RowSlim {
   id: string
   user_id: string
   raw_audio_url: string
+  consent_status?: string
+  gpu_last_error?: string | null
 }
 
 // race-safe claim — conditional UPDATE 가 0 row 면 다른 인스턴스가 이미 픽
@@ -275,6 +364,8 @@ async function tryClaim(
   user_id: string
   raw_audio_url: string
   isRetry: boolean
+  consent_status?: string
+  gpu_last_error?: string | null
 } | null> {
   const fromStatus = isRetry ? 'failed' : 'pending'
   const { count, error } = await supabaseAdmin
@@ -362,6 +453,68 @@ async function downloadUtteranceWav(taskId: string, filename: string): Promise<B
   }
   const ab = await res.arrayBuffer()
   return Buffer.from(ab)
+}
+
+// ── STAGE 15: 화자 역할 판별 헬퍼 ──────────────────────────────────
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0, normA = 0, normB = 0
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i]
+    normA += a[i] * a[i]
+    normB += b[i] * b[i]
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB)
+  return denom === 0 ? 0 : dot / denom
+}
+
+async function enrichSpeakersWithRole(
+  speakers: VoiceApiSpeaker[],
+  userId: string,
+): Promise<VoiceApiSpeaker[]> {
+  if (speakers.length === 0) return speakers
+
+  const strip = (spk: VoiceApiSpeaker): VoiceApiSpeaker => {
+    const { embedding: _emb, ...rest } = spk
+    return rest
+  }
+
+  if (speakers.length === 1) {
+    return [{ ...strip(speakers[0]), speaker_role: 'self', speaker_role_source: 'single_speaker' }]
+  }
+
+  const { data: profile } = await supabaseAdmin
+    .from('voice_profiles')
+    .select('reference_embedding, enrollment_status')
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  const refEmbedding = profile?.reference_embedding as number[] | null | undefined
+  if (!refEmbedding || profile?.enrollment_status !== 'enrolled') {
+    return speakers.map(spk => ({
+      ...strip(spk),
+      speaker_role: 'other',
+      speaker_role_source: 'default',
+    }))
+  }
+
+  let bestIdx = -1
+  let bestSim = -Infinity
+  for (let i = 0; i < speakers.length; i++) {
+    const emb = speakers[i].embedding
+    if (!emb) continue
+    const sim = cosineSimilarity(refEmbedding, emb)
+    if (sim > bestSim) {
+      bestSim = sim
+      bestIdx = i
+    }
+  }
+
+  return speakers.map((spk, i) => ({
+    ...strip(spk),
+    speaker_role: i === bestIdx ? 'self' : 'other',
+    speaker_role_source: 'embedding_match',
+  }))
 }
 
 // ── utterances INSERT + sessions UPDATE 'done' ─────────────────────
@@ -578,14 +731,15 @@ export async function processOneSession(prefetched: PrefetchResult | null = null
   backoff503: boolean
   nextPrefetched: PrefetchResult | null
 }> {
-  // stuck sweep — 5분마다 한 번씩만
+  // stuck sweep + segment backfill — 5분마다 한 번씩만
   if (Date.now() - lastStuckSweepAt > STUCK_SWEEP_INTERVAL_MS) {
     await sweepStuckSessions()
+    await sweepSegmentBackfill()
     lastStuckSweepAt = Date.now()
   }
 
   // prefetched 세션이 있으면 그걸 사용, 없으면 새로 픽업
-  let session: { id: string; user_id: string; raw_audio_url: string; isRetry: boolean } | null
+  let session: { id: string; user_id: string; raw_audio_url: string; isRetry: boolean; consent_status?: string; gpu_last_error?: string | null } | null
   let taskId: string | null = null
 
   if (prefetched) {
@@ -631,10 +785,43 @@ export async function processOneSession(prefetched: PrefetchResult | null = null
       throw new Error(`voice_api job failed: ${result.error ?? 'unknown'}`)
     }
 
+    if (result.speakers && result.speakers.length > 0) {
+      result.speakers = await enrichSpeakersWithRole(result.speakers, session.user_id)
+    }
+
     await persistResults(session, taskId, result)
     console.log(
       `[gpu-worker] session=${session.id} done — utterances=${result.utterances?.length ?? 0}, ms=${Date.now() - startedAt}`,
     )
+
+    // Feature 3: both_agreed + 화자 1명 + 발화 6개 이상 → pyannote 실패 의심, 재처리
+    const uttCount = result.utterances?.length ?? 0
+    if (
+      session.consent_status === 'both_agreed' &&
+      uttCount >= 6 &&
+      !(session.gpu_last_error ?? '').startsWith('SPEAKER_REQUEUE:')
+    ) {
+      const { count: spCount, error: spErr } = await supabaseAdmin
+        .from('session_speakers')
+        .select('id', { count: 'exact', head: true })
+        .eq('session_id', session.id)
+      if (!spErr && spCount === 1) {
+        console.warn(
+          `[gpu-worker] session=${session.id} both_agreed+1speaker+${uttCount}utts — pyannote 실패 의심, 재처리 큐 진입`,
+        )
+        await supabaseAdmin
+          .from('sessions')
+          .update({
+            gpu_upload_status: 'pending',
+            gpu_started_at: null,
+            gpu_retry_count: 0,
+            gpu_last_error: `SPEAKER_REQUEUE: both_agreed+1speaker+${uttCount}utts`,
+          })
+          .eq('id', session.id)
+        const nextPrefetched = await prefetchPromise
+        return { processed: true, backoff503: false, nextPrefetched }
+      }
+    }
 
     const nextPrefetched = await prefetchPromise
     return { processed: true, backoff503: false, nextPrefetched }

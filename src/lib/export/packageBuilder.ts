@@ -197,6 +197,23 @@ export interface BuildPackageResult {
   utteranceCount: number
 }
 
+interface SegmentUtteranceRef {
+  utterance_id: string
+  speaker_role: string | null
+}
+
+interface SegmentExportLine {
+  session_id: string
+  segments: Array<{
+    segment_id: string
+    segment_index: number
+    topic: string | null
+    start_ms: number | null
+    end_ms: number | null
+    utterances: SegmentUtteranceRef[]
+  }>
+}
+
 /**
  * consent_meta.jsonl — v2.0 차별화 핵심 (Day 5, 2026-05-01).
  *
@@ -617,6 +634,45 @@ async function _buildPackageInner(
     }
   }
 
+  // STAGE 16 (2026-05-17): session_segments fetch → segments.jsonl 구성
+  const segmentsMap = new Map<string, SegmentExportLine>()
+  if (sessionIds.length > 0) {
+    const { data: segRows } = await supabaseAdmin
+      .from('session_segments')
+      .select('id, session_id, segment_index, topic, start_ms, end_ms')
+      .in('session_id', sessionIds)
+      .order('session_id')
+      .order('segment_index')
+    const speakerRoleByUtteranceId = new Map<string, string | null>()
+    for (const u of utterances) {
+      speakerRoleByUtteranceId.set(
+        u.utterance_id as string,
+        (u.speaker_role as string | null) ?? null,
+      )
+    }
+    for (const seg of (segRows ?? []) as Record<string, unknown>[]) {
+      const sid = seg.session_id as string
+      if (!segmentsMap.has(sid)) {
+        segmentsMap.set(sid, { session_id: sid, segments: [] })
+      }
+      const entry = segmentsMap.get(sid)!
+      const segUtterances = (utterances as Record<string, unknown>[])
+        .filter((u) => u.segment_id === seg.id)
+        .map((u) => ({
+          utterance_id: u.utterance_id as string,
+          speaker_role: speakerRoleByUtteranceId.get(u.utterance_id as string) ?? null,
+        }))
+      entry.segments.push({
+        segment_id: seg.id as string,
+        segment_index: seg.segment_index as number,
+        topic: (seg.topic as string | null) ?? null,
+        start_ms: (seg.start_ms as number | null) ?? null,
+        end_ms: (seg.end_ms as number | null) ?? null,
+        utterances: segUtterances,
+      })
+    }
+  }
+
   const manifest: PackageManifest = {
     sku: skuId,
     version: '1.0',
@@ -726,6 +782,7 @@ async function _buildPackageInner(
     schemaMeta,        // v2.0
     piiMeta,           // v2.0
     consentMetaLines,  // v2.0 Day 5
+    segmentsMap,       // STAGE 16
   )
 
   await setStage('작업 상태 업데이트')
@@ -785,6 +842,8 @@ async function streamZipToS3(
   piiMeta: PiiMeta,
   /** v2.0 (Day 5, 2026-05-01) — consent_meta.jsonl (차별화 핵심) */
   consentMetaLines: ConsentMetaLine[],
+  /** STAGE 16 (2026-05-17) — segments.jsonl */
+  segmentsMap: Map<string, SegmentExportLine>,
 ): Promise<{ sizeBytes: number }> {
   // 작은 JSON 파일 압축용. WAV는 entry-level store: true로 우회.
   const archive = archiver('zip', { zlib: { level: 6 } })
@@ -862,6 +921,12 @@ async function streamZipToS3(
   if (consentMetaLines.length > 0) {
     const consentJsonl = consentMetaLines.map((c) => JSON.stringify(c)).join('\n')
     archive.append(consentJsonl, { name: `${dirName}/metadata/consent_meta.jsonl` })
+  }
+
+  // STAGE 16 (2026-05-17): segments.jsonl — 세그먼트 구조 + 화자 역할
+  if (segmentsMap.size > 0) {
+    const segmentsJsonl = [...segmentsMap.values()].map((s) => JSON.stringify(s)).join('\n')
+    archive.append(segmentsJsonl, { name: `${dirName}/metadata/segments.jsonl` })
   }
 
   if (metadataEvents.length > 0) {

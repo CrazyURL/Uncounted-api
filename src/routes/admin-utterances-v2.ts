@@ -38,7 +38,7 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
   let query = supabaseAdmin
     .from('utterances')
     .select(
-      'id, session_id, speaker_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at, sessions(session_seq, date, duration, review_status, consent_status)',
+      'id, session_id, speaker_id, session_speaker_id, segment_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at, sessions(session_seq, date, duration, review_status, consent_status), session_speakers!session_speaker_id(speaker_role, speaker_gender, speaker_voice_age_range), session_segments!segment_id(topic)',
       { count: 'exact' },
     )
 
@@ -70,6 +70,10 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
     const sess = row.sessions as
       | { session_seq?: number | null; date?: string | null; duration?: number | null; review_status?: string | null; consent_status?: string | null }
       | null
+    const spk = row.session_speakers as
+      | { speaker_role?: string | null; speaker_gender?: string | null; speaker_voice_age_range?: string | null }
+      | null
+    const seg = row.session_segments as { topic?: string | null } | null
     // STAGE 6 — raw title 응답 금지. 합성 display_title 만 반환.
     const displayTitle = formatDisplayTitle(sess?.session_seq ?? null, sess?.date ?? null, sess?.duration ?? null)
     return {
@@ -80,6 +84,12 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
       session_review_status: (sess?.review_status as string) ?? 'pending',
       session_consent_status: (sess?.consent_status as string) ?? null,
       speaker_id: (row.speaker_id as string) ?? null,
+      session_speaker_id: (row.session_speaker_id as string) ?? null,
+      speaker_role: spk?.speaker_role ?? null,
+      speaker_gender: spk?.speaker_gender ?? null,
+      speaker_voice_age_range: spk?.speaker_voice_age_range ?? null,
+      segment_id: (row.segment_id as string) ?? null,
+      segment_topic: seg?.topic ?? null,
       start_ms: startMs,
       end_ms: endMs,
       duration_seconds: durSec,
