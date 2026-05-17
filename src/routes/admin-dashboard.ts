@@ -149,8 +149,8 @@ adminDashboard.get('/dashboard-stats', async (c) => {
     // deliveries 테이블이 아직 없을 수 있음 (마이그레이션 054 미적용) — 0 으로 안전 처리
   }
 
-  // 5. 이상 신호 — GPU 단계 실패 + 운영자 거절
-  const [{ count: pipelineFailedCount }, { count: rejectedCount }] = await Promise.all([
+  // 5. 이상 신호 — GPU 단계 실패 + 운영자 거절 + PII 의심 세션
+  const [{ count: pipelineFailedCount }, { count: rejectedCount }, piiRowsResult] = await Promise.all([
     supabaseAdmin
       .from('sessions')
       .select('id', { count: 'exact', head: true })
@@ -161,7 +161,14 @@ adminDashboard.get('/dashboard-stats', async (c) => {
       .select('id', { count: 'exact', head: true })
       .eq('consent_status', 'both_agreed')
       .eq('review_status', 'rejected'),
+    supabaseAdmin
+      .from('utterances')
+      .select('session_id')
+      .not('pii_intervals', 'is', null),
   ])
+  const piiSessionCount = new Set(
+    ((piiRowsResult.data ?? []) as Array<{ session_id: string }>).map((r) => r.session_id),
+  ).size
 
   return c.json({
     data: {
@@ -187,6 +194,7 @@ adminDashboard.get('/dashboard-stats', async (c) => {
       alerts: {
         pipelineFailedCount: pipelineFailedCount ?? 0,
         rejectedCount: rejectedCount ?? 0,
+        piiSessionCount,
       },
     },
   })
