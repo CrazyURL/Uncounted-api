@@ -164,7 +164,7 @@ adminDashboard.get('/dashboard-stats', async (c) => {
     supabaseAdmin
       .from('utterances')
       .select('session_id')
-      .not('pii_intervals', 'is', null),
+      .filter('pii_intervals', 'neq', '[]'),
   ])
   const piiSessionCount = new Set(
     ((piiRowsResult.data ?? []) as Array<{ session_id: string }>).map((r) => r.session_id),
