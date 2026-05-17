@@ -7,6 +7,7 @@ import { authMiddleware, getBody } from '../lib/middleware.js'
 import { decryptData } from '../lib/crypto.js'
 import {
   uploadObject,
+  objectExists,
   deleteObjects,
   listObjects,
   getSignedUrl,
@@ -470,6 +471,31 @@ storage.post('/raw-audio', async (c) => {
     }
 
     const storagePath = `raw-audio/${userId}/${sessionId}.${normalizedExt}`
+
+    // S3에 이미 파일이 존재하면 업로드 스킵 — 세션 삭제 후 재업로드 시 중복 방지.
+    // DB raw_audio_url 이 null 이어도 스토리지에 있으면 그대로 쓴다.
+    const alreadyInStorage = await objectExists(S3_AUDIO_BUCKET, storagePath)
+    if (alreadyInStorage) {
+      const { error: skipDbError } = await supabaseAdmin
+        .from('sessions')
+        .update({
+          raw_audio_url: storagePath,
+          raw_audio_uploaded_at: new Date().toISOString(),
+        })
+        .eq('id', sessionId)
+        .eq('user_id', userId)
+
+      if (skipDbError) {
+        return c.json({ error: skipDbError.message }, 500)
+      }
+
+      void import('../services/gpu-worker.js')
+        .then((m) => m.triggerWorker(`raw-audio already in storage, skipped upload sessionId=${sessionId}`))
+        .catch(() => {})
+
+      return c.json({ storagePath, skipped: true })
+    }
+
     const contentType =
       normalizedExt === 'm4a' || normalizedExt === 'mp4'
         ? 'audio/mp4'
