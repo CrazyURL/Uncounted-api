@@ -116,7 +116,25 @@ adminBalances.get('/balances', async (c) => {
 
   // 사용자 정보 조회 (auth.users)
   const userIds = Array.from(byUser.keys())
-  if (userIds.length === 0) return c.json({ data: { users: [], totalUsers: 0 } })
+  if (userIds.length === 0) return c.json({
+    data: {
+      users: [],
+      totalUsers: 0,
+      constants: {
+        hourlyRateKrw: HOURLY_RATE_KRW,
+        userShareRatio: USER_SHARE_RATIO,
+        yearlyCapKrw: YEARLY_CAP_KRW,
+      },
+      settlementStats: {
+        settledUtteranceCount: 0,
+        unsettledUtteranceCount: 0,
+        deliveredSessionCount: 0,
+        undeliveredSessionCount: 0,
+        deliveredUserCount: 0,
+        undeliveredUserCount: 0,
+      },
+    },
+  })
 
   const userInfoMap = new Map<string, { email?: string }>()
   // batch — auth.admin.listUsers 는 페이지네이션 필요. 시드 단계 N=10~30이므로 단건 조회 허용
