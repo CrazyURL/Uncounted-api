@@ -38,7 +38,24 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
   let query = supabaseAdmin
     .from('utterances')
     .select(
-      'id, session_id, speaker_id, session_speaker_id, segment_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at, sessions(session_seq, date, duration, review_status, consent_status), session_speakers!session_speaker_id(speaker_role, speaker_gender, speaker_voice_age_range), session_segments!segment_id(topic)',
+      [
+        'id, session_id, speaker_id, session_speaker_id, segment_id',
+        'start_ms, end_ms, padded_start_sec, padded_end_sec',
+        'transcript_text, transcript_words',
+        'duration_seconds, storage_path',
+        'unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at',
+        // auto-label (P0: DB에 있으나 기존 SELECT에서 누락됐던 컬럼)
+        'emotion, emotion_confidence, dialog_act, dialog_act_confidence',
+        'label_source, auto_label_model_version',
+        // quality
+        'snr_db, speech_ratio, clipping_ratio, quality_score, quality_grade',
+        // PII (응답 전 original 필드 필터링 필수 — 아래 safeUtterances 참고)
+        'pii_intervals',
+        // joins
+        'sessions(session_seq, date, duration, review_status, consent_status)',
+        'session_speakers!session_speaker_id(speaker_role, speaker_gender, speaker_voice_age_range, speaker_speech_age_range)',
+        'session_segments!segment_id(topic)',
+      ].join(', '),
       { count: 'exact' },
     )
 
@@ -71,11 +88,18 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
       | { session_seq?: number | null; date?: string | null; duration?: number | null; review_status?: string | null; consent_status?: string | null }
       | null
     const spk = row.session_speakers as
-      | { speaker_role?: string | null; speaker_gender?: string | null; speaker_voice_age_range?: string | null }
+      | { speaker_role?: string | null; speaker_gender?: string | null; speaker_voice_age_range?: string | null; speaker_speech_age_range?: string | null }
       | null
     const seg = row.session_segments as { topic?: string | null } | null
     // STAGE 6 — raw title 응답 금지. 합성 display_title 만 반환.
     const displayTitle = formatDisplayTitle(sess?.session_seq ?? null, sess?.date ?? null, sess?.duration ?? null)
+
+    // PII 안전 필터: original 필드 절대 미노출 (raw PII 텍스트 포함)
+    const rawPii = row.pii_intervals as Array<Record<string, unknown>> | null
+    const safePiiIntervals = Array.isArray(rawPii)
+      ? rawPii.map(({ startSec, endSec, maskType, piiType }) => ({ startSec, endSec, maskType, piiType }))
+      : null
+
     return {
       id: row.id as string,
       session_id: row.session_id as string,
@@ -88,12 +112,29 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
       speaker_role: spk?.speaker_role ?? null,
       speaker_gender: spk?.speaker_gender ?? null,
       speaker_voice_age_range: spk?.speaker_voice_age_range ?? null,
+      speaker_speech_age_range: spk?.speaker_speech_age_range ?? null,
       segment_id: (row.segment_id as string) ?? null,
       segment_topic: seg?.topic ?? null,
       start_ms: startMs,
       end_ms: endMs,
+      padded_start_sec: (row.padded_start_sec as number) ?? null,
+      padded_end_sec: (row.padded_end_sec as number) ?? null,
       duration_seconds: durSec,
       text: ((row.transcript_text as string) ?? '').slice(0, 200),
+      words: (row.transcript_words as unknown[]) ?? null,
+      storage_path: (row.storage_path as string) ?? null,
+      emotion: (row.emotion as string) ?? null,
+      emotion_confidence: (row.emotion_confidence as number) ?? null,
+      dialog_act: (row.dialog_act as string) ?? null,
+      dialog_act_confidence: (row.dialog_act_confidence as number) ?? null,
+      label_source: (row.label_source as string) ?? null,
+      auto_label_model_version: (row.auto_label_model_version as string) ?? null,
+      snr_db: (row.snr_db as number) ?? null,
+      speech_ratio: (row.speech_ratio as number) ?? null,
+      clipping_ratio: (row.clipping_ratio as number) ?? null,
+      quality_score: (row.quality_score as number) ?? null,
+      quality_grade: (row.quality_grade as string) ?? null,
+      pii_intervals: safePiiIntervals,
       unit_price_krw: storedPrice ?? computedPrice,
       settled_at: (row.settled_at as string) ?? null,
       review_status: ((row.review_status as string) ?? 'pending') as 'pending' | 'excluded',

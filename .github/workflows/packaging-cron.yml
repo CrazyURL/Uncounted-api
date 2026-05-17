@@ -1,0 +1,45 @@
+name: 납품 패키지 크론
+
+on:
+  schedule:
+    - cron: '0 * * * *' # 매시 정각 (UTC)
+  workflow_dispatch: # 수동 실행 가능
+
+jobs:
+  packaging-dev:
+    name: Packaging (dev)
+    runs-on: ubuntu-latest
+    env:
+      API_BASE_URL: ${{ secrets.DEV_API_BASE_URL }}
+      INTERNAL_SECRET: ${{ secrets.DEV_INTERNAL_SECRET }}
+    steps:
+      - name: 패키징 배치 실행
+        if: env.API_BASE_URL != ''
+        run: |
+          curl -sf -X POST "$API_BASE_URL/api/internal/packaging-batch" \
+            -H "x-internal-secret: $INTERNAL_SECRET"
+
+      - name: 만료 export 정리
+        if: env.API_BASE_URL != ''
+        run: |
+          curl -sf -X POST "$API_BASE_URL/api/internal/cleanup-expired-exports" \
+            -H "x-internal-secret: $INTERNAL_SECRET"
+
+  packaging-prod:
+    name: Packaging (prod)
+    runs-on: ubuntu-latest
+    env:
+      API_BASE_URL: ${{ secrets.PROD_API_BASE_URL }}
+      INTERNAL_SECRET: ${{ secrets.PROD_INTERNAL_SECRET }}
+    steps:
+      - name: 패키징 배치 실행
+        if: env.API_BASE_URL != ''
+        run: |
+          curl -sf -X POST "$API_BASE_URL/api/internal/packaging-batch" \
+            -H "x-internal-secret: $INTERNAL_SECRET"
+
+      - name: 만료 export 정리
+        if: env.API_BASE_URL != ''
+        run: |
+          curl -sf -X POST "$API_BASE_URL/api/internal/cleanup-expired-exports" \
+            -H "x-internal-secret: $INTERNAL_SECRET"
