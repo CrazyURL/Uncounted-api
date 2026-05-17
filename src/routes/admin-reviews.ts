@@ -13,6 +13,7 @@ import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
 import { formatDisplayTitle } from '../lib/displayTitle.js'
 import { checkSessionAutoApproval } from '../lib/piiRisk.js'
+import { buildRunningOrClause } from './admin-reviews-helpers.js'
 
 const adminReviews = new Hono()
 
@@ -154,10 +155,8 @@ adminReviews.get('/reviews', async (c) => {
       .eq('auto_label_status', 'pending')
       .or('quality_status.is.null,quality_status.eq.pending')
   } else if (pipelineState === 'running') {
-    query = query.or(
-      'gpu_upload_status.eq.running,stt_status.eq.running,diarize_status.eq.running,' +
-        'gpu_pii_status.eq.running,auto_label_status.eq.running,quality_status.eq.running',
-    )
+    const threshold = new Date(Date.now() - 30 * 60 * 1000).toISOString()
+    query = query.or(buildRunningOrClause(threshold))
   } else if (pipelineState === 'label_skipped') {
     query = query.eq('auto_label_status', 'skipped')
   } else if (pipelineState === 'waiting') {
