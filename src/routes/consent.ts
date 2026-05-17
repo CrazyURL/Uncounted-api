@@ -202,8 +202,8 @@ consent.post('/agree/:token', async (c) => {
 
   // ── sessions 일괄 promote (Bug C/D fix) ──────────────────────────
   // peer가 동의한 시점 = 양측 합의 완료. invitation에 묶인 모든 sessions를
-  // user_only → both_agreed로 승격. session_ids가 비어있으면 단건 session_id로 fallback.
-  // user_only인 sessions만 갱신해서 이전에 철회된 locked 상태는 건드리지 않는다.
+  // locked/user_only → both_agreed로 승격.
+  // 발신자 PIPA 동의 완료 상태면 'locked' 세션도 포함 (동의는 업로드 여부와 무관).
   const sessionIds = Array.isArray((invitation as any).session_ids) && (invitation as any).session_ids.length > 0
     ? (invitation as any).session_ids as string[]
     : invitation.session_id
@@ -211,29 +211,33 @@ consent.post('/agree/:token', async (c) => {
       : []
 
   if (sessionIds.length > 0) {
+    const { data: senderProfile } = await supabaseAdmin
+      .from('users_profile')
+      .select('collect_consent, third_party_consent, consent_withdrawn')
+      .eq('user_id', invitation.user_id)
+      .maybeSingle()
+
+    const senderFullyConsented =
+      senderProfile?.collect_consent === true &&
+      senderProfile?.third_party_consent === true &&
+      senderProfile?.consent_withdrawn !== true
+
+    const statusesToPromote = senderFullyConsented
+      ? ['locked', 'user_only']
+      : ['user_only']
+
     const { error: promoteErr, count } = await supabaseAdmin
       .from('sessions')
       .update({ consent_status: 'both_agreed', consented_at: now }, { count: 'exact' })
       .in('id', sessionIds)
       .eq('user_id', invitation.user_id)
-      .eq('consent_status', 'user_only')
+      .in('consent_status', statusesToPromote)
 
-    if (promoteErr || count === 0) {
-      // 보상 트랜잭션: invitation을 'agreed' → 'sent'로 되돌려 토큰 재사용 가능하게 유지
-      await supabaseAdmin
-        .from('consent_invitations')
-        .update({ status: 'sent', responded_at: null, ip_address: null, user_agent: null })
-        .eq('id', invitation.id)
-
-      if (promoteErr) {
-        console.error('[consent.agree.promote-sessions] error:', promoteErr)
-        return c.json({ error: 'Failed to record consent' }, 500)
-      }
-      console.error(`[consent.agree.promote-sessions] 0/${sessionIds.length} promoted — sessions not uploaded yet`)
-      return c.json({ error: 'Sessions not ready. Ask the sender to retry the link.' }, 422)
+    if (promoteErr) {
+      console.error('[consent.agree.promote-sessions] error:', promoteErr)
+    } else {
+      console.log(`[consent.agree.promote-sessions] ${count}/${sessionIds.length} promoted`)
     }
-
-    console.log(`[consent.agree.promote-sessions] ${count}/${sessionIds.length} promoted`)
   }
 
   return c.json({ data: updated })

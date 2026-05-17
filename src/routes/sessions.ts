@@ -157,19 +157,22 @@ sessions.post('/batch', async (c) => {
       delete row.consented_at
     }
 
-    // 신규 row만 — 풀 동의 사용자의 첫 sync는 'user_only'로 promote 시작.
-    // 기존 row는 server-authoritative 동의 endpoint가 관리하므로 건드리지 않는다.
+    // 신규 row는 'user_only'로 승격, 기존 'locked' row도 PIPA 완료 시 'user_only'로 승격.
+    let existingLockedIds: string[] = []
     if (isFullyConsented) {
       const ids = rows.map((r) => r.id).filter(Boolean)
       const { data: existing } = await supabaseAdmin
         .from('sessions')
-        .select('id')
+        .select('id, consent_status')
         .in('id', ids)
         .eq('user_id', userId)
-      const existingIds = new Set(existing?.map((e) => e.id) ?? [])
+      const existingMap = new Map((existing ?? []).map((e: any) => [e.id, e.consent_status]))
+      existingLockedIds = (existing ?? [])
+        .filter((e: any) => e.consent_status === 'locked')
+        .map((e: any) => e.id)
       const today = new Date().toISOString().slice(0, 10)
       for (const row of rows) {
-        if (!existingIds.has(row.id)) {
+        if (!existingMap.has(row.id)) {
           row.consent_status = 'user_only'
           row.is_public = true
           row.visibility_status = 'PUBLIC_CONSENTED'
@@ -188,6 +191,22 @@ sessions.post('/batch', async (c) => {
       return c.json({ error: error.message }, 500)
     }
 
+    // 기존 'locked' 세션을 'user_only'로 승격 (PIPA 동의 완료 후 재동기화 시)
+    if (existingLockedIds.length > 0) {
+      const today = new Date().toISOString().slice(0, 10)
+      await supabaseAdmin
+        .from('sessions')
+        .update({
+          consent_status: 'user_only',
+          is_public: true,
+          visibility_status: 'PUBLIC_CONSENTED',
+          visibility_source: 'GLOBAL_DEFAULT',
+          visibility_changed_at: today,
+        })
+        .in('id', existingLockedIds)
+        .eq('user_id', userId)
+        .eq('consent_status', 'locked')
+    }
 
     return c.json({
       data: data?.map(sessionFromRow) ?? [],
