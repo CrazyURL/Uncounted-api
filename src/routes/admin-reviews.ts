@@ -129,7 +129,6 @@ adminReviews.get('/reviews', async (c) => {
         'gpu_pii_status, gpu_pii_at, auto_label_status, label_at, quality_status, quality_at, review_status, utterance_count',
       { count: 'exact' },
     )
-    .eq('consent_status', 'both_agreed')
     .order(orderCol, { ascending, nullsFirst: false })
     .range(offset, offset + limit - 1)
 
@@ -211,21 +210,20 @@ adminReviews.get('/reviews', async (c) => {
     return c.json({ error: error.message }, 500)
   }
 
-  // 상태별 카운트 (both_agreed 기준 — 5개 batch query)
+  // 상태별 카운트 (5개 batch query)
   const counts = await Promise.all(
     ['pending', 'in_review', 'approved', 'rejected', 'needs_revision'].map((s) =>
       supabaseAdmin
         .from('sessions')
         .select('id', { count: 'exact', head: true })
-        .eq('review_status', s)
-        .eq('consent_status', 'both_agreed'),
+        .eq('review_status', s),
     ),
   )
 
   // 현재 필터에 맞는 sessions 의 duration 전체 합산 (페이지네이션 무관)
   let filteredDurationSec = 0
   {
-    let durQuery = supabaseAdmin.from('sessions').select('duration').eq('consent_status', 'both_agreed')
+    let durQuery = supabaseAdmin.from('sessions').select('duration')
     if (reviewStatus && VALID_REVIEW.has(reviewStatus)) {
       durQuery = durQuery.eq('review_status', reviewStatus)
     }
