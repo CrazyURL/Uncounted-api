@@ -145,13 +145,14 @@ adminReviews.get('/reviews', async (c) => {
     )
   }
   if (pipelineState === 'idle') {
+    // nullable 컬럼(DEFAULT 'pending' 이지만 NOT NULL 없음)은 is.null 포함 — auto_label_status만 NOT NULL(migration 070)
     query = query
-      .eq('gpu_upload_status', 'pending')
-      .eq('stt_status', 'pending')
-      .eq('diarize_status', 'pending')
-      .eq('gpu_pii_status', 'pending')
+      .or('gpu_upload_status.is.null,gpu_upload_status.eq.pending')
+      .or('stt_status.is.null,stt_status.eq.pending')
+      .or('diarize_status.is.null,diarize_status.eq.pending')
+      .or('gpu_pii_status.is.null,gpu_pii_status.eq.pending')
       .eq('auto_label_status', 'pending')
-      .eq('quality_status', 'pending')
+      .or('quality_status.is.null,quality_status.eq.pending')
   } else if (pipelineState === 'running') {
     query = query.or(
       'gpu_upload_status.eq.running,stt_status.eq.running,diarize_status.eq.running,' +
@@ -288,7 +289,7 @@ adminReviews.get('/reviews', async (c) => {
   if (sessionIds.length > 0) {
     const { data: uttRows } = await supabaseAdmin
       .from('utterances')
-      .select('session_id, quality_grade, pii_intervals, quality_score, snr_db, speech_ratio, speaker_label, duration_sec')
+      .select('session_id, quality_grade, pii_intervals, quality_score, snr_db, speech_ratio, speaker_id, duration_sec')
       .in('session_id', sessionIds)
       .limit(50000)
 
@@ -339,7 +340,7 @@ adminReviews.get('/reviews', async (c) => {
         speechRatioCountBySession.set(sid, (speechRatioCountBySession.get(sid) ?? 0) + 1)
       }
 
-      const spLabel = row.speaker_label as string | null
+      const spLabel = row.speaker_id as string | null
       if (spLabel) {
         const key = `${sid}-${spLabel}`
         utteranceCountBySpeaker.set(key, (utteranceCountBySpeaker.get(key) ?? 0) + 1)
@@ -358,17 +359,19 @@ adminReviews.get('/reviews', async (c) => {
       if (pid) sessionPidMap.set(r.id as string, pid)
     }
     const uniquePids = [...new Set(sessionPidMap.values())]
-    const profileByPid = new Map<string, { accent_group: string | null; region_group: string | null }>()
+    const profileByPid = new Map<string, { accent_group: string | null; region_group: string | null; gender: string | null; age_band: string | null }>()
     if (uniquePids.length > 0) {
       const { data: profileRows } = await supabaseAdmin
         .from('users_profile')
-        .select('pid, accent_group, region_group')
+        .select('pid, accent_group, region_group, gender, age_band')
         .in('pid', uniquePids)
       for (const p of profileRows ?? []) {
         const pr = p as Record<string, unknown>
         profileByPid.set(pr.pid as string, {
           accent_group: pr.accent_group as string | null,
           region_group: pr.region_group as string | null,
+          gender: pr.gender as string | null,
+          age_band: pr.age_band as string | null,
         })
       }
     }
@@ -386,11 +389,13 @@ adminReviews.get('/reviews', async (c) => {
       const speakerKey = `${sid}-${spLabelVal}`
       const sessionPid = sessionPidMap.get(sid)
       const profile = spRoleVal === 'self' && sessionPid ? profileByPid.get(sessionPid) : undefined
+      const audioGender = spRow.speaker_gender as string | null
+      const audioVoiceAge = spRow.speaker_voice_age_range as string | null
       arr.push({
         speaker_label: spLabelVal,
         speaker_role: spRoleVal,
-        speaker_gender: spRow.speaker_gender as string | null,
-        speaker_voice_age_range: spRow.speaker_voice_age_range as string | null,
+        speaker_gender: audioGender ?? (spRoleVal === 'self' ? (profile?.gender ?? null) : null),
+        speaker_voice_age_range: audioVoiceAge ?? (spRoleVal === 'self' ? (profile?.age_band ?? null) : null),
         speaker_speech_age_range: spRow.speaker_speech_age_range as string | null,
         speaker_relation: spRow.speaker_relation as string | null,
         speaker_accent_group: profile?.accent_group ?? null,
