@@ -98,16 +98,13 @@ adminBalances.get('/balances', async (c) => {
   const undeliveredSessionCount = sessionIds.length - deliveredSessionSet.size
 
   const deliveredUserSet = new Set<string>()
-  const undeliveredUserSet = new Set<string>()
   for (const sid of sessionIds) {
     const userId = sessionToUser.get(sid)
     if (!userId) continue
-    if (deliveredSessionSet.has(sid)) {
-      deliveredUserSet.add(userId)
-    } else {
-      undeliveredUserSet.add(userId)
-    }
+    if (deliveredSessionSet.has(sid)) deliveredUserSet.add(userId)
   }
+  // 납품 완료 세션이 하나도 없는 사용자만 미납품 사용자로 산정
+  const undeliveredUserCount = byUser.size - deliveredUserSet.size
 
   const [settledUttRes, unsettledUttRes] = await Promise.all([
     supabaseAdmin
@@ -177,7 +174,7 @@ adminBalances.get('/balances', async (c) => {
         deliveredSessionCount,
         undeliveredSessionCount,
         deliveredUserCount: deliveredUserSet.size,
-        undeliveredUserCount: undeliveredUserSet.size,
+        undeliveredUserCount,
       },
     },
   })
