@@ -34,6 +34,9 @@ import { supabaseAdmin } from '../lib/supabase.js'
 import { s3Client, S3_AUDIO_BUCKET, uploadObject, objectExists } from '../lib/s3.js'
 import { getAudioStatsFromBuffer } from '../lib/audio/ffmpegProcessor.js'
 import { computeQualityScore, computeQualityGrade } from '../lib/export/qualityMetricsService.js'
+import { extractNumericPatterns } from '../lib/extractors/numeric-patterns.js'
+import { extractUtteranceForm } from '../lib/extractors/utterance-form.js'
+import { extractAudioMetadata } from '../lib/extractors/audio-metadata.js'
 
 const POLL_INTERVAL_MS = 30_000  // safety net 폴링 30초 (immediate trigger 우선, 이건 fallback)
 const POLL_BACKOFF_503_MS = 60_000  // voice_api 503 시 60초 추가 대기
@@ -552,6 +555,31 @@ async function persistResults(
   const utterances = result.utterances ?? []
   if (utterances.length === 0) {
     console.warn(`[gpu-worker] session ${session.id}: 0 utterances returned — marking quality_status failed`)
+    // 0-utterance 분기에서도 audio_metadata 는 set (074 정합성 유지).
+    // utterance 가 없으므로 asset_type 조회만 시도하고 audio_metadata 합성.
+    let assetType: string | null = null
+    try {
+      const { data: assetRow, error: assetErr } = await supabaseAdmin
+        .from('sessions')
+        .select('asset_type')
+        .eq('id', session.id)
+        .maybeSingle()
+      if (assetErr) {
+        console.warn(`[gpu-worker] asset_type lookup failed (${session.id}, 0-utt): ${assetErr.message} — fallback null`)
+      } else {
+        assetType = assetRow?.asset_type ?? null
+      }
+    } catch (err: any) {
+      console.warn(`[gpu-worker] asset_type lookup threw (${session.id}, 0-utt): ${err.message} — fallback null`)
+    }
+    const audioMetadata = extractAudioMetadata({
+      channels: 1,
+      sample_rate_hz: 16000,
+      bit_depth: 16,
+      asset_type: assetType,
+      snr_db: null,
+    })
+
     const now = new Date().toISOString()
     await supabaseAdmin
       .from('sessions')
@@ -566,6 +594,7 @@ async function persistResults(
         auto_label_status: 'skipped',
         quality_status: 'failed',
         utterance_count: 0,
+        audio_metadata: audioMetadata,
         gpu_last_error: 'voice_api_0_utterances',
       })
       .eq('id', session.id)
@@ -624,6 +653,16 @@ async function persistResults(
       // 품질 계산 실패 시 null 유지 — utterance는 정상 저장
     }
 
+    // 안전선 #3: u.transcript_text 는 Voice API 가 PII 마스킹한 결과로 가정한다.
+    // extractNumericPatterns / extractUtteranceForm 은 masked token 만 반환해야 한다.
+    // TODO(B2): Voice API 응답 실 샘플로 마스킹 보장 별도 검증 필요. 미보장 시
+    //           본 호출 직전에 strip 단계 추가하고 원문 PII 가 DB 에 새지 않도록 한다.
+    const numericPatterns = extractNumericPatterns(u.transcript_text)
+    const utteranceForm = extractUtteranceForm(u.transcript_text, {
+      sequence_order: seq,
+      total_utterances: utterances.length,
+    })
+
     const { error } = await supabaseAdmin.from('utterances').upsert(
       {
         id: utteranceId,
@@ -647,6 +686,8 @@ async function persistResults(
         client_version: 'gpu-worker-2.0',
         quality_score: utteranceQualityScore,
         quality_grade: utteranceQualityGrade,
+        numeric_patterns: numericPatterns,
+        utterance_form: utteranceForm,
         updated_at: new Date().toISOString(),
       },
       { onConflict: 'session_id,sequence_order' },
@@ -730,6 +771,32 @@ async function persistResults(
     .limit(1)
   const qualityComputed = (qualityRows?.length ?? 0) > 0
 
+  // sessions.audio_metadata (074) — asset_type 조회 실패해도 persist 중단 X.
+  // 전처리 파이프라인이 16kHz/mono/pcm_s16le 로 정규화하는 것은 코드 보장(processAudio).
+  // snr_db 는 본 창 입력 없음 → null 유지 (창 B2 에서 audio_metrics 연동).
+  let assetType: string | null = null
+  try {
+    const { data: assetRow, error: assetErr } = await supabaseAdmin
+      .from('sessions')
+      .select('asset_type')
+      .eq('id', session.id)
+      .maybeSingle()
+    if (assetErr) {
+      console.warn(`[gpu-worker] asset_type lookup failed (${session.id}): ${assetErr.message} — fallback null`)
+    } else {
+      assetType = assetRow?.asset_type ?? null
+    }
+  } catch (err: any) {
+    console.warn(`[gpu-worker] asset_type lookup threw (${session.id}): ${err.message} — fallback null`)
+  }
+  const audioMetadata = extractAudioMetadata({
+    channels: 1,
+    sample_rate_hz: 16000,
+    bit_depth: 16,
+    asset_type: assetType,
+    snr_db: null,
+  })
+
   const now = new Date().toISOString()
   await supabaseAdmin
     .from('sessions')
@@ -745,6 +812,7 @@ async function persistResults(
       quality_status: qualityComputed ? 'done' : 'skipped',
       quality_at: now,
       utterance_count: utterances.length,
+      audio_metadata: audioMetadata,
       gpu_last_error: null, // 성공 시 에러 메시지 클리어
     })
     .eq('id', session.id)
