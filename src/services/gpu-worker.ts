@@ -34,6 +34,7 @@ import { supabaseAdmin } from '../lib/supabase.js'
 import { s3Client, S3_AUDIO_BUCKET, uploadObject, objectExists } from '../lib/s3.js'
 import { getAudioStatsFromBuffer } from '../lib/audio/ffmpegProcessor.js'
 import { computeQualityScore, computeQualityGrade } from '../lib/export/qualityMetricsService.js'
+import type { WordTimestamp } from '../types/audio.js'
 
 const POLL_INTERVAL_MS = 30_000  // safety net 폴링 30초 (immediate trigger 우선, 이건 fallback)
 const POLL_BACKOFF_503_MS = 60_000  // voice_api 503 시 60초 추가 대기
@@ -96,10 +97,27 @@ interface VoiceApiUtterance {
   start_sec: number
   end_sec: number
   duration_sec: number
+  padded_start_sec?: number
+  padded_end_sec?: number
   speaker_id: string
   transcript_text: string
   audio_filename: string
-  words?: unknown
+  words?: WordTimestamp[]
+  // auto labels (KcELECTRA, from auto_label_service.py)
+  emotion?: string | null
+  emotion_confidence?: number | null
+  dialog_act?: string | null
+  dialog_act_confidence?: number | null
+  label_source?: string | null
+  auto_label_model_version?: string | null
+  // pii (original은 절대 사용하지 않음)
+  pii_intervals?: Array<{
+    startSec: number
+    endSec: number
+    maskType: string
+    piiType: string
+    original?: string // 수신만, 절대 저장하거나 노출하지 않음
+  }> | null
 }
 
 interface VoiceApiSpeaker {
@@ -543,6 +561,129 @@ async function enrichSpeakersWithRole(
   }))
 }
 
+// ── Tier A: 통계 기반 라벨 계산 ────────────────────────────────────
+function calculateTierA(
+  utt: VoiceApiUtterance,
+  prevUtt: VoiceApiUtterance | null,
+  qualityScore: number | null,
+  emotionConfidence: number | null,
+  dialogActConfidence: number | null,
+): {
+  speech_rate_wpm: number | null
+  silence_before_sec: number | null
+  filler_word_count: number
+  confidence_tier: string
+  audio_quality_class: string
+} {
+  const words = Array.isArray(utt.words) ? utt.words : []
+  const wordCount = words.length
+
+  const speech_rate_wpm = utt.duration_sec > 0
+    ? Math.round((wordCount / utt.duration_sec) * 60 * 100) / 100
+    : null
+
+  const silence_before_sec = prevUtt != null
+    ? Math.max(0, Math.round((utt.start_sec - prevUtt.end_sec) * 100) / 100)
+    : null
+
+  const FILLER_WORDS = ['음', '어', '아', '그', '뭐', '이제', '그래서', '그러니까', '막', '좀']
+  const text = utt.transcript_text
+  const filler_word_count = FILLER_WORDS.reduce(
+    (sum, f) => sum + (text.split(f).length - 1),
+    0,
+  )
+
+  const maxConf = Math.max(emotionConfidence ?? 0, dialogActConfidence ?? 0)
+  const confidence_tier =
+    maxConf >= 0.85 ? 'auto_confirmed'
+    : maxConf >= 0.60 ? 'auto_review'
+    : 'needs_review'
+
+  const qs = qualityScore ?? 0
+  const audio_quality_class =
+    qs >= 85 ? 'excellent'
+    : qs >= 70 ? 'good'
+    : qs >= 50 ? 'fair'
+    : 'poor'
+
+  return { speech_rate_wpm, silence_before_sec, filler_word_count, confidence_tier, audio_quality_class }
+}
+
+// ── Tier B: 언어적 특성 라벨 계산 ──────────────────────────────────
+function calculateTierB(
+  utt: VoiceApiUtterance,
+  prevUtt: VoiceApiUtterance | null,
+): {
+  honorific_level: string
+  politeness_score: number
+  question_type: string
+  interruption_flag: boolean
+  language_mix_flag: string
+} {
+  const text = utt.transcript_text
+
+  const HONORIFIC_ENDINGS = ['습니다', '세요', '시지요', '시오', '입니다', '으세요']
+  const CASUAL_ENDINGS = ['야', '어', '아', '지', '네', '구나', '거든']
+  const hasHonorific = HONORIFIC_ENDINGS.some(e => text.includes(e))
+  const hasCasual = CASUAL_ENDINGS.some(e => text.includes(e))
+
+  let honorific_level: string
+  if (hasHonorific && hasCasual) honorific_level = 'mixed'
+  else if (hasHonorific) honorific_level = 'honorific'
+  else if (hasCasual) honorific_level = 'casual'
+  else honorific_level = 'unknown'
+
+  const honorificCount = ['습니다', '세요', '시지요'].reduce(
+    (s, e) => s + (text.split(e).length - 1), 0,
+  )
+  const politeCount = ['감사', '죄송', '미안', '부탁'].reduce(
+    (s, e) => s + (text.split(e).length - 1), 0,
+  )
+  const negativeCount = ['싫어', '안돼', '못해', '거절'].reduce(
+    (s, e) => s + (text.split(e).length - 1), 0,
+  )
+  const politeness_score = Math.max(
+    1,
+    Math.min(5, 3 + Math.min(2, honorificCount) + Math.min(1, politeCount) - Math.min(2, negativeCount)),
+  )
+
+  const WH_WORDS = ['뭐', '어디', '언제', '왜', '누구', '어떻게']
+  let question_type: string
+  if (!text.includes('?') && !text.endsWith('나요') && !text.endsWith('가요')) {
+    question_type = 'na'
+  } else if (WH_WORDS.some(w => text.includes(w))) {
+    question_type = 'wh'
+  } else if (text.includes('또는') || text.includes('아니면')) {
+    question_type = 'choice'
+  } else if (['맞죠', '그렇죠', '맞아요'].some(p => text.includes(p))) {
+    question_type = 'confirmation'
+  } else if (text.endsWith('나요?') || text.endsWith('가요?') || text.endsWith('나요') || text.endsWith('가요')) {
+    question_type = 'yes_no'
+  } else {
+    question_type = 'unknown'
+  }
+
+  const interruption_flag =
+    prevUtt != null &&
+    prevUtt.speaker_id !== utt.speaker_id &&
+    utt.start_sec < prevUtt.end_sec
+
+  const totalWords = text.split(/\s+/).filter(w => w.length > 0).length
+  const englishWords = (text.match(/[a-zA-Z]+/g) ?? []).length
+  let language_mix_flag: string
+  if (totalWords === 0) {
+    language_mix_flag = 'korean'
+  } else {
+    const ratio = englishWords / totalWords
+    if (ratio === 0) language_mix_flag = 'korean'
+    else if (ratio > 0.5) language_mix_flag = 'english'
+    else if (ratio > 0.05) language_mix_flag = 'mixed'
+    else language_mix_flag = 'korean'
+  }
+
+  return { honorific_level, politeness_score, question_type, interruption_flag, language_mix_flag }
+}
+
 // ── utterances INSERT + sessions UPDATE 'done' ─────────────────────
 async function persistResults(
   session: { id: string; user_id: string; raw_audio_url: string },
@@ -605,6 +746,7 @@ async function persistResults(
 
   for (let i = 0; i < utterances.length; i++) {
     const u = utterances[i]
+    const prevU = i > 0 ? utterances[i - 1] : null
     const seq = i + 1
     const seqPadded = String(seq).padStart(3, '0')
     const utteranceId = `utt_${session.id}_${seqPadded}`
@@ -615,14 +757,30 @@ async function persistResults(
 
     let utteranceQualityScore: number | null = null
     let utteranceQualityGrade: string | null = null
+    let utteranceSnrDb: number | null = null
+    let utteranceSpeechRatio: number | null = null
+    let utteranceClippingRatio: number | null = null
     try {
       const stats = await getAudioStatsFromBuffer(Buffer.from(wavBuffer))
-      const { qualityScore } = computeQualityScore(stats)
-      utteranceQualityScore = qualityScore
-      utteranceQualityGrade = computeQualityGrade(qualityScore)
+      const { qualityScore, snrDb, speechRatio, clippingRatio } = computeQualityScore(stats)
+      utteranceQualityScore = Number.isFinite(qualityScore) ? qualityScore : null
+      utteranceQualityGrade = Number.isFinite(qualityScore) ? computeQualityGrade(qualityScore) : null
+      utteranceSnrDb = Number.isFinite(snrDb) ? Math.round(snrDb * 100) / 100 : null
+      utteranceSpeechRatio = Number.isFinite(speechRatio) ? Math.round(speechRatio * 10000) / 10000 : null
+      utteranceClippingRatio = Number.isFinite(clippingRatio) ? Math.round(clippingRatio * 10000) / 10000 : null
     } catch {
       // 품질 계산 실패 시 null 유지 — utterance는 정상 저장
     }
+
+    const emotionConf = u.emotion_confidence ?? null
+    const dialogActConf = u.dialog_act_confidence ?? null
+    const tierA = calculateTierA(u, prevU, utteranceQualityScore, emotionConf, dialogActConf)
+    const tierB = calculateTierB(u, prevU)
+
+    // pii_intervals: original 필드는 절대 저장하지 않음 (개인정보 보호)
+    const safePiiIntervals = u.pii_intervals?.map(({ startSec, endSec, maskType, piiType }) => ({
+      startSec, endSec, maskType, piiType,
+    })) ?? null
 
     const { error } = await supabaseAdmin.from('utterances').upsert(
       {
@@ -637,6 +795,8 @@ async function persistResults(
         is_user: false,
         start_sec: u.start_sec,
         end_sec: u.end_sec,
+        padded_start_sec: u.padded_start_sec ?? null,
+        padded_end_sec: u.padded_end_sec ?? null,
         duration_sec: u.duration_sec,
         storage_path: storagePath,
         file_size_bytes: wavBuffer.byteLength,
@@ -645,8 +805,33 @@ async function persistResults(
         transcript_words: u.words ?? null,
         segmented_by: 'gpu_v10',
         client_version: 'gpu-worker-2.0',
+        // 품질 메트릭 (Fix 1)
         quality_score: utteranceQualityScore,
         quality_grade: utteranceQualityGrade,
+        snr_db: utteranceSnrDb,
+        speech_ratio: utteranceSpeechRatio,
+        clipping_ratio: utteranceClippingRatio,
+        // 자동 라벨 (Fix 2)
+        emotion: u.emotion ?? null,
+        emotion_confidence: emotionConf,
+        dialog_act: u.dialog_act ?? null,
+        dialog_act_confidence: dialogActConf,
+        label_source: u.label_source ?? 'auto',
+        auto_label_model_version: u.auto_label_model_version ?? null,
+        // PII (original 제외)
+        pii_intervals: safePiiIntervals,
+        // Tier A (Fix 3)
+        speech_rate_wpm: tierA.speech_rate_wpm,
+        silence_before_sec: tierA.silence_before_sec,
+        filler_word_count: tierA.filler_word_count,
+        confidence_tier: tierA.confidence_tier,
+        audio_quality_class: tierA.audio_quality_class,
+        // Tier B (Fix 4)
+        honorific_level: tierB.honorific_level,
+        politeness_score: tierB.politeness_score,
+        question_type: tierB.question_type,
+        interruption_flag: tierB.interruption_flag,
+        language_mix_flag: tierB.language_mix_flag,
         updated_at: new Date().toISOString(),
       },
       { onConflict: 'session_id,sequence_order' },
@@ -745,6 +930,7 @@ async function persistResults(
       quality_status: qualityComputed ? 'done' : 'skipped',
       quality_at: now,
       utterance_count: utterances.length,
+      has_diarization: true,
       gpu_last_error: null, // 성공 시 에러 메시지 클리어
     })
     .eq('id', session.id)
