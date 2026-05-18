@@ -445,6 +445,7 @@ adminReviews.get('/reviews', async (c) => {
       speech_ratio_avg: srCount > 0 ? Math.round((speechRatioSumBySession.get(sid)! / srCount) * 1000) / 1000 : null,
       pii_interval_samples: piiSamplesBySession.get(sid) ?? [],
       speakers: speakersBySession.get(sid) ?? [],
+      owner_speaker: (speakersBySession.get(sid) ?? []).find((s) => s.speaker_role === 'self')?.speaker_label ?? null,
     }
   })
 
