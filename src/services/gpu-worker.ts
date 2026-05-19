@@ -33,6 +33,7 @@ import { GetObjectCommand } from '@aws-sdk/client-s3'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { s3Client, S3_AUDIO_BUCKET, uploadObject, objectExists } from '../lib/s3.js'
 import { getAudioStatsFromBuffer } from '../lib/audio/ffmpegProcessor.js'
+import { computeUtteranceAudioMetrics } from '../lib/audio/audioStatsExtended.js'
 import { computeQualityScore, computeQualityGrade } from '../lib/export/qualityMetricsService.js'
 import { extractNumericPatterns } from '../lib/extractors/numeric-patterns.js'
 import { extractUtteranceForm } from '../lib/extractors/utterance-form.js'
@@ -103,6 +104,10 @@ interface VoiceApiUtterance {
   transcript_text: string
   audio_filename: string
   words?: unknown
+  emotion?: string | null
+  emotion_confidence?: number | null
+  dialog_act?: string | null
+  dialog_act_confidence?: number | null
 }
 
 interface VoiceApiSpeaker {
@@ -653,6 +658,10 @@ async function persistResults(
       // 품질 계산 실패 시 null 유지 — utterance는 정상 저장
     }
 
+    // best-effort utterance-level audio metrics (snr_db / speech_ratio / clipping_ratio).
+    // 실패 시 null fallback, throw 금지. quality_tier 산정에는 사용 X.
+    const audioMetrics = await computeUtteranceAudioMetrics(Buffer.from(wavBuffer))
+
     // 안전선 #3: u.transcript_text 는 Voice API 가 PII 마스킹한 결과로 가정한다.
     // extractNumericPatterns / extractUtteranceForm 은 masked token 만 반환해야 한다.
     // TODO(B2): Voice API 응답 실 샘플로 마스킹 보장 별도 검증 필요. 미보장 시
@@ -686,6 +695,13 @@ async function persistResults(
         client_version: 'gpu-worker-2.0',
         quality_score: utteranceQualityScore,
         quality_grade: utteranceQualityGrade,
+        snr_db: audioMetrics.snr_db,
+        speech_ratio: audioMetrics.speech_ratio,
+        clipping_ratio: audioMetrics.clipping_ratio,
+        emotion: u.emotion ?? null,
+        emotion_confidence: u.emotion_confidence ?? null,
+        dialog_act: u.dialog_act ?? null,
+        dialog_act_confidence: u.dialog_act_confidence ?? null,
         numeric_patterns: numericPatterns,
         utterance_form: utteranceForm,
         updated_at: new Date().toISOString(),
