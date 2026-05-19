@@ -291,11 +291,16 @@ consent.patch('/invitations/:id/status', authMiddleware, async (c) => {
   if (status === 'sent') update.sent_at = new Date().toISOString()
   if (shareMethod) update.share_method = shareMethod
 
+  // 종결 상태(agreed/declined/expired)는 sent/opened 로 강등 거부.
+  // 받는 분이 동의(agreed) 한 뒤 보낸 분이 "발송완료" 를 누르면 이 endpoint 가 호출되는데
+  // 가드 없이 update 하면 status='sent' + sent_at 으로 덮어써 동의 상태가 무력화됨.
+  // atomic 가드 — UPDATE WHERE 절에 active 상태만 매칭. 0 rows 면 fallback SELECT 로 현재 row 멱등 반환.
   const { data, error } = await supabaseAdmin
     .from('consent_invitations')
     .update(update)
     .eq('id', id)
     .eq('user_id', userId)
+    .in('status', ['pending', 'sent', 'opened'])
     .select('*')
     .maybeSingle()
 
@@ -303,7 +308,17 @@ consent.patch('/invitations/:id/status', authMiddleware, async (c) => {
     console.error('[consent.status.update] error:', error)
     return c.json({ error: 'Internal Server Error' }, 500)
   }
-  if (!data) return c.json({ error: 'Invitation not found' }, 404)
+  if (!data) {
+    // 0 rows — terminal 상태이거나 id/user_id 매칭 안 됨. 현재 row 를 조회해 멱등 반환.
+    const { data: current } = await supabaseAdmin
+      .from('consent_invitations')
+      .select('*')
+      .eq('id', id)
+      .eq('user_id', userId)
+      .maybeSingle()
+    if (!current) return c.json({ error: 'Invitation not found' }, 404)
+    return c.json({ data: current })
+  }
   return c.json({ data })
 })
 
