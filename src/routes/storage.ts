@@ -408,28 +408,12 @@ storage.post('/audio/utterance', async (c) => {
  *
  * 응답: { storagePath, sizeBytes }
  *
- * 제약: 150MB 임시 상한 (Content-Length pre-check) — Option B signed URL 배포 후 해제 예정
+ * 제약: 500MB 한도 (voice_api 와 동일)
  */
-const MAX_RAW_AUDIO_BYTES = 150 * 1024 * 1024 // 150MB 임시 상한 — Option B (signed URL) 배포 후 제거
-
 storage.post('/raw-audio', async (c) => {
   const userId = c.get('userId') as string
 
   try {
-    const reqContentType = c.req.header('content-type') ?? ''
-    if (!reqContentType.includes('multipart/form-data')) {
-      return c.json({ error: 'Invalid content type' }, 415)
-    }
-
-    const contentLengthRaw = c.req.header('content-length')
-    if (!contentLengthRaw) {
-      return c.json({ error: 'Content-Length header required' }, 411)
-    }
-    const contentLength = Number(contentLengthRaw)
-    if (isNaN(contentLength) || contentLength > MAX_RAW_AUDIO_BYTES) {
-      return c.json({ error: 'Payload too large' }, 413)
-    }
-
     const form = await c.req.formData()
     const audioFile = form.get('audioFile') as File | null
     const metaRaw = form.get('meta') as string | null
@@ -458,8 +442,10 @@ storage.post('/raw-audio', async (c) => {
       )
     }
 
-    if (audioFile.size > MAX_RAW_AUDIO_BYTES) {
-      return c.json({ error: 'Raw audio file too large: max 150MB' }, 413)
+    // 파일 크기 한도 500MB (voice_api MAX_UPLOAD_SIZE 와 동일)
+    const MAX_RAW_SIZE = 500 * 1024 * 1024
+    if (audioFile.size > MAX_RAW_SIZE) {
+      return c.json({ error: 'Raw audio file too large: max 500MB' }, 413)
     }
     if (audioFile.size === 0) {
       return c.json({ error: 'Empty audio file' }, 400)
