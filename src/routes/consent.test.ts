@@ -13,6 +13,8 @@ let mockChainsByIdx: Array<{
   result?: { data: unknown; error: unknown; count?: number | null }
 }> = []
 let capturedUpdates: Array<{ tableIdx: number; payload: unknown }> = []
+// PATCH 등 body 가 필요한 endpoint 테스트용 — 각 테스트에서 셋업
+let mockBody: Record<string, unknown> = {}
 
 vi.mock('../lib/supabase.js', () => ({
   supabaseAdmin: {
@@ -39,8 +41,11 @@ vi.mock('../lib/supabase.js', () => ({
 }))
 
 vi.mock('../lib/middleware.js', () => ({
-  authMiddleware: vi.fn((_c: unknown, next: () => Promise<void>) => next()),
-  getBody: vi.fn(() => ({})),
+  authMiddleware: vi.fn((c: { set: (k: string, v: string) => void }, next: () => Promise<void>) => {
+    c.set('userId', 'user-abc')
+    return next()
+  }),
+  getBody: vi.fn(() => mockBody),
 }))
 
 // ── App setup ─────────────────────────────────────────────────────────────
@@ -58,6 +63,7 @@ beforeEach(() => {
   fromCallIdx = 0
   mockChainsByIdx = []
   capturedUpdates = []
+  mockBody = {}
 })
 
 describe('POST /api/consent/agree/:token', () => {
@@ -286,5 +292,152 @@ describe('POST /api/consent/agree/:token', () => {
     })
 
     expect(res.status).toBe(404)
+  })
+})
+
+// ── PATCH /api/consent/invitations/:id/status — terminal state guard ──────
+// 2026-05-19: 보낸 분이 받는 분의 동의(agreed) 후 폰 앱에서 "발송완료" 클릭 시
+//   PATCH 가 현재 상태 검사 없이 status='sent' + sent_at 으로 덮어쓰는 버그 발견.
+// fix: terminal 상태(agreed/declined/expired) invitation 은 sent/opened 로 강등 거부.
+//   atomic 가드 — UPDATE WHERE .in('status', ['pending','sent','opened']) +
+//   0 rows 시 fallback SELECT 로 현재 row 멱등 반환.
+describe('PATCH /api/consent/invitations/:id/status — terminal state guard', () => {
+  it('회귀: agreed invitation 은 sent 로 강등 거부 (responded_at·status 보존)', async () => {
+    // [0] UPDATE — .in() 가드로 0 rows (terminal 상태라 매칭 안 됨)
+    mockChainsByIdx[0] = { result: { data: null, error: null } }
+    // [1] SELECT fallback — 현재 invitation row (status='agreed' 유지)
+    mockChainsByIdx[1] = {
+      result: {
+        data: {
+          id: 'inv-agreed',
+          user_id: 'user-abc',
+          session_id: 'sess-A',
+          status: 'agreed',
+          responded_at: '2026-05-19T08:10:48.852Z',
+          sent_at: null,
+        },
+        error: null,
+      },
+    }
+    mockBody = { status: 'sent', shareMethod: 'web_share' }
+
+    const app = createApp()
+    const res = await app.request('/api/consent/invitations/inv-agreed/status', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(mockBody),
+    })
+
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.data.status).toBe('agreed') // 강등 거부
+    expect(body.data.responded_at).toBe('2026-05-19T08:10:48.852Z') // 보존
+  })
+
+  it('회귀: declined invitation 은 sent 로 강등 거부', async () => {
+    mockChainsByIdx[0] = { result: { data: null, error: null } }
+    mockChainsByIdx[1] = {
+      result: {
+        data: {
+          id: 'inv-declined',
+          user_id: 'user-abc',
+          status: 'declined',
+          responded_at: '2026-05-19T07:00:00.000Z',
+          sent_at: null,
+        },
+        error: null,
+      },
+    }
+    mockBody = { status: 'sent' }
+
+    const app = createApp()
+    const res = await app.request('/api/consent/invitations/inv-declined/status', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(mockBody),
+    })
+
+    expect(res.status).toBe(200)
+    expect((await res.json()).data.status).toBe('declined')
+  })
+
+  it('회귀: expired invitation 은 sent 로 강등 거부', async () => {
+    mockChainsByIdx[0] = { result: { data: null, error: null } }
+    mockChainsByIdx[1] = {
+      result: {
+        data: {
+          id: 'inv-expired',
+          user_id: 'user-abc',
+          status: 'expired',
+          sent_at: '2026-05-01T00:00:00.000Z',
+        },
+        error: null,
+      },
+    }
+    mockBody = { status: 'sent' }
+
+    const app = createApp()
+    const res = await app.request('/api/consent/invitations/inv-expired/status', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(mockBody),
+    })
+
+    expect(res.status).toBe(200)
+    expect((await res.json()).data.status).toBe('expired')
+  })
+
+  it('pending → sent 정상 (sent_at 채워짐)', async () => {
+    mockChainsByIdx[0] = {
+      result: {
+        data: {
+          id: 'inv-pending',
+          user_id: 'user-abc',
+          status: 'sent',
+          sent_at: '2026-05-19T10:00:00.000Z',
+          share_method: 'web_share',
+        },
+        error: null,
+      },
+    }
+    mockBody = { status: 'sent', shareMethod: 'web_share' }
+
+    const app = createApp()
+    const res = await app.request('/api/consent/invitations/inv-pending/status', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(mockBody),
+    })
+
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.data.status).toBe('sent')
+    expect(body.data.sent_at).toBeTruthy()
+  })
+
+  it('id/user_id 매칭 안 됨 → 404 (UPDATE 0 rows + SELECT fallback 도 0 rows)', async () => {
+    mockChainsByIdx[0] = { result: { data: null, error: null } }
+    mockChainsByIdx[1] = { result: { data: null, error: null } }
+    mockBody = { status: 'sent' }
+
+    const app = createApp()
+    const res = await app.request('/api/consent/invitations/inv-nope/status', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(mockBody),
+    })
+
+    expect(res.status).toBe(404)
+  })
+
+  it('잘못된 status (sent/opened 외) → 400', async () => {
+    mockBody = { status: 'agreed' }
+    const app = createApp()
+    const res = await app.request('/api/consent/invitations/inv-x/status', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(mockBody),
+    })
+    expect(res.status).toBe(400)
   })
 })
