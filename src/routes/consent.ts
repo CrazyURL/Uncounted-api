@@ -200,10 +200,11 @@ consent.post('/agree/:token', async (c) => {
     return c.json({ error: 'Failed to record agreement' }, 500)
   }
 
-  // ── sessions 일괄 promote (Bug C/D fix) ──────────────────────────
-  // peer가 동의한 시점 = 양측 합의 완료. invitation에 묶인 모든 sessions를
-  // user_only → both_agreed로 승격. session_ids가 비어있으면 단건 session_id로 fallback.
-  // user_only인 sessions만 갱신해서 이전에 철회된 locked 상태는 건드리지 않는다.
+  // ── sessions 일괄 promote (best-effort) ──────────────────────────
+  // 양측 동의 시점 = 받는 분이 동의를 누른 순간.
+  // 사업 로직상 보낸 분의 sessions row가 아직 서버에 없거나 user_only 상태가 아닐 수 있음(정상).
+  // → invitation.status='agreed'가 source of truth. promote는 가능한 것만 처리하고,
+  //   업로드가 뒤늦게 도착하는 경로는 업로드 측에서 invitation.status='agreed'를 보고 both_agreed로 기록한다.
   const sessionIds = Array.isArray((invitation as any).session_ids) && (invitation as any).session_ids.length > 0
     ? (invitation as any).session_ids as string[]
     : invitation.session_id
@@ -218,22 +219,12 @@ consent.post('/agree/:token', async (c) => {
       .eq('user_id', invitation.user_id)
       .eq('consent_status', 'user_only')
 
-    if (promoteErr || count === 0) {
-      // 보상 트랜잭션: invitation을 'agreed' → 'sent'로 되돌려 토큰 재사용 가능하게 유지
-      await supabaseAdmin
-        .from('consent_invitations')
-        .update({ status: 'sent', responded_at: null, ip_address: null, user_agent: null })
-        .eq('id', invitation.id)
-
-      if (promoteErr) {
-        console.error('[consent.agree.promote-sessions] error:', promoteErr)
-        return c.json({ error: 'Failed to record consent' }, 500)
-      }
-      console.error(`[consent.agree.promote-sessions] 0/${sessionIds.length} promoted — sessions not uploaded yet`)
-      return c.json({ error: 'Sessions not ready. Ask the sender to retry the link.' }, 422)
+    if (promoteErr) {
+      // DB 에러는 로그만 — 동의 의사는 invitation에 이미 기록됨. 사용자 차단 금지.
+      console.error('[consent.agree.promote-sessions] error:', promoteErr)
+    } else {
+      console.log(`[consent.agree.promote-sessions] ${count ?? 0}/${sessionIds.length} promoted (0건은 업로드 전이라 정상)`)
     }
-
-    console.log(`[consent.agree.promote-sessions] ${count}/${sessionIds.length} promoted`)
   }
 
   return c.json({ data: updated })
