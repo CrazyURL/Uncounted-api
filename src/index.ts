@@ -16,6 +16,7 @@ import sessions from './routes/sessions.js'
 import storage from './routes/storage.js'
 import admin from './routes/admin.js'
 import adminExports from './routes/admin-exports.js'
+import adminExport from './routes/admin-export.js'
 import adminLedger from './routes/admin-ledger.js'
 import adminUtterances from './routes/admin-utterances.js'
 import logging from './routes/logging.js'
@@ -107,6 +108,7 @@ app.route('/api/sessions', sessions)
 app.route('/api/storage', storage)
 app.route('/api/admin', admin)
 app.route('/api/admin', adminExports)
+app.route('/api/admin', adminExport)
 app.route('/api/admin', adminLedger)
 app.route('/api/admin', adminUtterances)
 app.route('/api/admin', adminRewards)
