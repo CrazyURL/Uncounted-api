@@ -3,6 +3,9 @@ import {
   buildRunningOrClause,
   distinctSessionIds,
   countCandidatesBySession,
+  PIPELINE_STATUS_COLUMNS,
+  pipelineComplete,
+  REVIEW_TRANSITION_SELECT,
 } from './admin-reviews-helpers'
 
 const THRESHOLD = '2026-05-17T11:30:00.000Z' // 기준 시각 (now - 30min)
@@ -77,5 +80,74 @@ describe('countCandidatesBySession — 세션별 PII 후보 수', () => {
   it('빈 입력은 빈 맵', () => {
     expect(countCandidatesBySession([]).size).toBe(0)
     expect(countCandidatesBySession(null).size).toBe(0)
+  })
+})
+
+// 회귀: POST /reviews/:id 핸들러의 SELECT 가 auto_label_status 를 빼먹어
+// pipelineComplete 가 항상 false → 모든 pending→in_review 가 409 로 거부되던 버그.
+// SELECT 문자열과 pipelineComplete 가 읽는 컬럼이 어긋나지 않도록 단일 상수에서 파생시키고,
+// 그 불변식을 테스트로 고정한다.
+describe('PIPELINE_STATUS_COLUMNS — 파이프라인 단계 컬럼 단일 출처', () => {
+  it('6개 단계 컬럼을 모두 포함한다', () => {
+    expect([...PIPELINE_STATUS_COLUMNS].sort()).toEqual(
+      [
+        'auto_label_status',
+        'diarize_status',
+        'gpu_pii_status',
+        'gpu_upload_status',
+        'quality_status',
+        'stt_status',
+      ].sort(),
+    )
+  })
+
+  it('auto_label_status 를 반드시 포함한다 (버그 핵심 컬럼)', () => {
+    expect(PIPELINE_STATUS_COLUMNS).toContain('auto_label_status')
+  })
+})
+
+describe('REVIEW_TRANSITION_SELECT — 전환 핸들러 SELECT 컬럼', () => {
+  it('id, review_status 를 포함한다', () => {
+    expect(REVIEW_TRANSITION_SELECT).toContain('id')
+    expect(REVIEW_TRANSITION_SELECT).toContain('review_status')
+  })
+
+  // 드리프트 가드: pipelineComplete 가 읽는 모든 컬럼이 SELECT 에 있어야 한다.
+  for (const col of PIPELINE_STATUS_COLUMNS) {
+    it(`pipelineComplete 가 읽는 컬럼 ${col} 을 SELECT 에 포함한다`, () => {
+      expect(REVIEW_TRANSITION_SELECT).toContain(col)
+    })
+  }
+
+  it('auto_label_status 가 SELECT 에 들어있다 (회귀 방지)', () => {
+    expect(REVIEW_TRANSITION_SELECT).toContain('auto_label_status')
+  })
+})
+
+describe('pipelineComplete — 6단계 모두 terminal 일 때만 true', () => {
+  const allDone = {
+    gpu_upload_status: 'done',
+    stt_status: 'done',
+    diarize_status: 'done',
+    gpu_pii_status: 'done',
+    auto_label_status: 'done',
+    quality_status: 'done',
+  }
+
+  it('6단계 모두 done 이면 true', () => {
+    expect(pipelineComplete(allDone)).toBe(true)
+  })
+
+  it('skipped 도 terminal 로 인정', () => {
+    expect(pipelineComplete({ ...allDone, quality_status: 'skipped' })).toBe(true)
+  })
+
+  it('auto_label_status 가 빠진 row(undefined) 는 false — 버그 재현', () => {
+    const { auto_label_status, ...withoutAutoLabel } = allDone
+    expect(pipelineComplete(withoutAutoLabel)).toBe(false)
+  })
+
+  it('한 단계라도 running 이면 false', () => {
+    expect(pipelineComplete({ ...allDone, stt_status: 'running' })).toBe(false)
   })
 })
