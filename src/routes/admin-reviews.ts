@@ -17,6 +17,8 @@ import {
   buildRunningOrClause,
   distinctSessionIds,
   countCandidatesBySession,
+  pipelineComplete,
+  REVIEW_TRANSITION_SELECT,
 } from './admin-reviews-helpers.js'
 
 const adminReviews = new Hono()
@@ -36,19 +38,8 @@ const VALID_REVIEW = new Set([
   'needs_revision',
 ])
 
-// 처리 흐름이 모두 done/skipped 인지 — pending → in_review 전환 가능 여부 체크용
-// DB: gpu_upload_status / gpu_pii_status (BM v9 컬럼 충돌 회피)
-function pipelineComplete(row: Record<string, unknown>): boolean {
-  const terminal = (v: unknown) => v === 'done' || v === 'skipped'
-  return (
-    terminal(row.gpu_upload_status) &&
-    terminal(row.stt_status) &&
-    terminal(row.diarize_status) &&
-    terminal(row.gpu_pii_status) &&
-    terminal(row.auto_label_status) &&
-    terminal(row.quality_status)
-  )
-}
+// pipelineComplete / PIPELINE_STATUS_COLUMNS / REVIEW_TRANSITION_SELECT 는
+// admin-reviews-helpers.ts 에서 단일 출처로 관리(SELECT↔검사 컬럼 드리프트 방지).
 
 function isAllowedTransition(from: string, to: string, isPipelineComplete: boolean): boolean {
   // pending → in_review (파이프라인 완료 시만)
@@ -493,18 +484,18 @@ adminReviews.post('/reviews/:sessionId{[0-9a-f-]+}', async (c) => {
     return c.json({ error: 'invalid review status' }, 400)
   }
 
-  const { data: existing, error: fetchErr } = await supabaseAdmin
+  const { data: existingRaw, error: fetchErr } = await supabaseAdmin
     .from('sessions')
-    .select(
-      'id, review_status, gpu_upload_status, stt_status, diarize_status, gpu_pii_status, quality_status',
-    )
+    .select(REVIEW_TRANSITION_SELECT)
     .eq('id', sessionId)
     .single()
 
-  if (fetchErr || !existing) {
+  if (fetchErr || !existingRaw) {
     return c.json({ error: 'session not found' }, 404)
   }
 
+  // 동적 select 문자열은 supabase-js 가 컬럼 타입을 추론하지 못하므로 명시 캐스트.
+  const existing = existingRaw as unknown as Record<string, unknown>
   const from = (existing.review_status as string) ?? 'pending'
   const complete = pipelineComplete(existing)
 
@@ -555,7 +546,7 @@ adminReviews.post('/reviews/bulk-auto-approve', async (c) => {
   // 대상 세션 선정 — in_review + 파이프라인 완료
   let sessionQuery = supabaseAdmin
     .from('sessions')
-    .select('id, review_status, gpu_upload_status, stt_status, diarize_status, gpu_pii_status, quality_status')
+    .select(REVIEW_TRANSITION_SELECT)
     .eq('review_status', 'in_review')
 
   if (body?.sessionIds && body.sessionIds.length > 0) {
@@ -565,7 +556,9 @@ adminReviews.post('/reviews/bulk-auto-approve', async (c) => {
   const { data: sessionRows, error: sessErr } = await sessionQuery
   if (sessErr) return c.json({ error: sessErr.message }, 500)
 
-  const candidateSessions = (sessionRows ?? []).filter((s) => pipelineComplete(s as Record<string, unknown>))
+  // 동적 select 문자열은 supabase-js 가 컬럼 타입을 추론하지 못하므로 명시 캐스트.
+  const sessionRecords = (sessionRows ?? []) as unknown as Record<string, unknown>[]
+  const candidateSessions = sessionRecords.filter((s) => pipelineComplete(s))
   const candidateIds = candidateSessions.map((s) => s.id as string)
 
   if (candidateIds.length === 0) {
