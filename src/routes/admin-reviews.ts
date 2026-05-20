@@ -13,7 +13,11 @@ import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
 import { formatDisplayTitle } from '../lib/displayTitle.js'
 import { checkSessionAutoApproval } from '../lib/piiRisk.js'
-import { buildRunningOrClause } from './admin-reviews-helpers.js'
+import {
+  buildRunningOrClause,
+  distinctSessionIds,
+  countCandidatesBySession,
+} from './admin-reviews-helpers.js'
 
 const adminReviews = new Hono()
 
@@ -83,15 +87,18 @@ adminReviews.get('/reviews', async (c) => {
   const orderCol = sortBy && colMap[sortBy] ? colMap[sortBy] : 'consented_at'
   const ascending = sortDir === 'asc'
 
-  // pii_flag 필터: pii_intervals 있는 발화가 존재하는 세션 ID 선조회
+  // pii_flag 필터(PII-1A): "AI 판단 애매" 후보(needs_human_decision + pending)가 있는 세션.
+  // pii_intervals 는 PII-3/4 가 채우는 최종 구간이라 현재 전부 빈값 → 항상 0건이던 문제를 후보 기반으로 교체.
+  // auto_confirmed / auto_rejected 는 관리자 검수 대상이 아니므로 필터에 포함하지 않는다.
   let piiSessionIds: string[] | null = null
   if (piiFlag) {
     const { data: piiRows } = await supabaseAdmin
-      .from('utterances')
+      .from('pii_candidates')
       .select('session_id')
-      .filter('pii_intervals', 'neq', '[]')
-      .limit(5000)
-    piiSessionIds = [...new Set((piiRows ?? []).map((r) => (r as Record<string, unknown>).session_id as string))]
+      .eq('confidence_tier', 'needs_human_decision')
+      .eq('status', 'pending')
+      .limit(20000)
+    piiSessionIds = distinctSessionIds(piiRows as Array<{ session_id: string }> | null)
     if (piiSessionIds.length === 0) {
       return c.json({
         data: {
@@ -257,7 +264,8 @@ adminReviews.get('/reviews', async (c) => {
   const sessionIds = rows.map((r) => r.id as string)
 
   // 발화 배치 조회 — pii/quality/speakers 집계용
-  const piiCountBySession = new Map<string, number>()
+  // PII-1A: pii_flag/pii_count 는 needs_human_decision 후보 기준(아래에서 채움).
+  let piiNeedsReviewBySession = new Map<string, number>()
   const gradeBySession = new Map<string, 'A' | 'B' | 'C' | null>()
   const qualityScoreSumBySession = new Map<string, number>()
   const qualityScoreCountBySession = new Map<string, number>()
@@ -284,6 +292,18 @@ adminReviews.get('/reviews', async (c) => {
   const durationSecBySpeaker = new Map<string, number>()
 
   if (sessionIds.length > 0) {
+    // PII-1A: 표시 중인 세션들의 needs_human_decision + pending 후보 수 집계 → pii_flag/pii_count.
+    const { data: piiCandRows } = await supabaseAdmin
+      .from('pii_candidates')
+      .select('session_id')
+      .eq('confidence_tier', 'needs_human_decision')
+      .eq('status', 'pending')
+      .in('session_id', sessionIds)
+      .limit(20000)
+    piiNeedsReviewBySession = countCandidatesBySession(
+      piiCandRows as Array<{ session_id: string }> | null,
+    )
+
     const { data: uttRows } = await supabaseAdmin
       .from('utterances')
       .select('session_id, quality_grade, pii_intervals, quality_score, snr_db, speech_ratio, speaker_id, duration_sec')
@@ -296,7 +316,6 @@ adminReviews.get('/reviews', async (c) => {
 
       const piiIntervals = row.pii_intervals as unknown[]
       if (Array.isArray(piiIntervals) && piiIntervals.length > 0) {
-        piiCountBySession.set(sid, (piiCountBySession.get(sid) ?? 0) + 1)
         const samples = piiSamplesBySession.get(sid) ?? []
         if (samples.length < 5) {
           for (const iv of piiIntervals) {
@@ -406,7 +425,8 @@ adminReviews.get('/reviews', async (c) => {
 
   const sessions = rows.map((row) => {
     const sid = row.id as string
-    const piiCount = piiCountBySession.get(sid) ?? 0
+    // PII-1A: pii_flag/pii_count 는 needs_human_decision 후보 기준 (pii_intervals 아님 — 후속 PII-3/4).
+    const piiCount = piiNeedsReviewBySession.get(sid) ?? 0
 
     const qsCount = qualityScoreCountBySession.get(sid) ?? 0
     const snrCount = snrDbCountBySession.get(sid) ?? 0

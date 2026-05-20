@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { buildRunningOrClause } from './admin-reviews-helpers'
+import {
+  buildRunningOrClause,
+  distinctSessionIds,
+  countCandidatesBySession,
+} from './admin-reviews-helpers'
 
 const THRESHOLD = '2026-05-17T11:30:00.000Z' // 기준 시각 (now - 30min)
 
@@ -46,5 +50,32 @@ describe('buildRunningOrClause — running 필터 OR 절', () => {
     const clause2 = buildRunningOrClause('2026-01-01T00:00:00.000Z')
     expect(clause2).toContain('2026-01-01T00:00:00.000Z')
     expect(clause2).not.toContain(THRESHOLD)
+  })
+})
+
+describe('distinctSessionIds — PII 후보 세션 ID 중복 제거', () => {
+  it('중복 session_id 를 제거한다', () => {
+    const rows = [{ session_id: 's1' }, { session_id: 's1' }, { session_id: 's2' }]
+    expect(distinctSessionIds(rows).sort()).toEqual(['s1', 's2'])
+  })
+
+  it('빈 입력은 빈 배열 (회귀: 후보 0 → 0건)', () => {
+    expect(distinctSessionIds([])).toEqual([])
+    expect(distinctSessionIds(null)).toEqual([])
+    expect(distinctSessionIds(undefined)).toEqual([])
+  })
+})
+
+describe('countCandidatesBySession — 세션별 PII 후보 수', () => {
+  it('session_id 별로 후보 수를 집계한다', () => {
+    const rows = [{ session_id: 's1' }, { session_id: 's1' }, { session_id: 's2' }]
+    const m = countCandidatesBySession(rows)
+    expect(m.get('s1')).toBe(2)
+    expect(m.get('s2')).toBe(1)
+  })
+
+  it('빈 입력은 빈 맵', () => {
+    expect(countCandidatesBySession([]).size).toBe(0)
+    expect(countCandidatesBySession(null).size).toBe(0)
   })
 })
