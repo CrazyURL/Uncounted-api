@@ -155,10 +155,14 @@ adminDashboard.get('/dashboard-stats', async (c) => {
       .from('sessions')
       .select('id', { count: 'exact', head: true })
       .eq('review_status', 'rejected'),
+    // PII-1A: "PII 의심" 칩 카운트 = needs_human_decision + pending 후보 보유 세션.
+    // pii_intervals(PII-3/4 전용, 현재 빈값)가 아니라 후보 기준 — /reviews 필터와 동일.
     supabaseAdmin
-      .from('utterances')
+      .from('pii_candidates')
       .select('session_id')
-      .filter('pii_intervals', 'neq', '[]'),
+      .eq('confidence_tier', 'needs_human_decision')
+      .eq('status', 'pending')
+      .limit(20000),
   ])
   const piiSessionCount = new Set(
     ((piiRowsResult.data ?? []) as Array<{ session_id: string }>).map((r) => r.session_id),
