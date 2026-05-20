@@ -11,14 +11,13 @@ vi.mock('./export-builder.js', () => ({ buildSessionExportZip: (...a: unknown[])
 const isExportEligible = vi.fn()
 vi.mock('../../lib/export/eligibility.js', () => ({ isExportEligible: (...a: unknown[]) => isExportEligible(...a) }))
 
-const s3Send = vi.fn(async () => ({}))
-vi.mock('../../lib/s3.js', () => ({ s3Client: { send: (...a: unknown[]) => s3Send(...a) }, S3_AUDIO_BUCKET: 'bucket' }))
+const uploadObject = vi.fn(async () => {})
+vi.mock('../../lib/s3.js', () => ({ uploadObject: (...a: unknown[]) => uploadObject(...a), S3_AUDIO_BUCKET: 'bucket' }))
 
-const fsStat = vi.fn(async () => ({ size: 4242 }))
+const fsReadFile = vi.fn(async () => Buffer.alloc(4242))
 const fsUnlink = vi.fn(async () => {})
 vi.mock('node:fs', () => ({
-  createReadStream: vi.fn(() => 'fake-stream'),
-  promises: { stat: (...a: unknown[]) => fsStat(...a), unlink: (...a: unknown[]) => fsUnlink(...a) },
+  promises: { readFile: (...a: unknown[]) => fsReadFile(...a), unlink: (...a: unknown[]) => fsUnlink(...a) },
 }))
 
 // supabase mock: 공유 jobRow/sessionRow 에 update 를 적용. claim(.select('id')) 은 성공 처리.
@@ -74,7 +73,7 @@ describe('runEmbeddedExportJob', () => {
     expect(buildSessionExportZip).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: 'sessA', audioExportMode: 'embedded', includeRestricted: false }),
     )
-    expect(s3Send).toHaveBeenCalledTimes(1)
+    expect(uploadObject).toHaveBeenCalledTimes(1)
     expect(jobRow.status).toBe('ready')
     expect(typeof jobRow.storage_path).toBe('string')
     expect(jobRow.size_bytes).toBe(4242)
@@ -104,7 +103,7 @@ describe('runEmbeddedExportJob', () => {
   })
 
   it('빌드 후 업로드 단계 throw → failed + cleanup 호출', async () => {
-    s3Send.mockRejectedValueOnce(new Error('s3 down'))
+    uploadObject.mockRejectedValueOnce(new Error('s3 down'))
 
     await runEmbeddedExportJob('job1')
 

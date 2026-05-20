@@ -13,11 +13,10 @@
 //   - 임시 ZIP 은 finally 에서 cleanup 보장 (디스크 누적 방지).
 //   - legacy buildPackage / billable_units / ledger 미사용.
 
-import { createReadStream, promises as fs } from 'node:fs'
-import { PutObjectCommand } from '@aws-sdk/client-s3'
+import { promises as fs } from 'node:fs'
 
 import { supabaseAdmin } from '../../lib/supabase.js'
-import { s3Client, S3_AUDIO_BUCKET } from '../../lib/s3.js'
+import { uploadObject, S3_AUDIO_BUCKET } from '../../lib/s3.js'
 import { isExportEligible } from '../../lib/export/eligibility.js'
 import { buildSessionExportZip } from './export-builder.js'
 
@@ -115,19 +114,13 @@ export async function runEmbeddedExportJob(jobId: string): Promise<void> {
     })
     zipPath = result.zipPath
 
-    // 5. S3 업로드
+    // 5. S3 업로드 — iwinv 오브젝트 스토리지는 streaming(aws-chunked) 업로드를
+    //    411 MissingContentLength 로 거부한다. 검증된 Buffer 기반 uploadObject 패턴 사용
+    //    (uploadExportPackage 와 동일; createReadStream 스트리밍 금지).
     await setStage(jobId, 'S3 업로드')
     const key = `exports/v2/embedded/${sessionId}_${Date.now()}.zip`
-    const stat = await fs.stat(zipPath)
-    await s3Client.send(
-      new PutObjectCommand({
-        Bucket: EXPORT_BUCKET,
-        Key: key,
-        Body: createReadStream(zipPath),
-        ContentType: 'application/zip',
-        ContentLength: stat.size,
-      }),
-    )
+    const zipBuffer = await fs.readFile(zipPath)
+    await uploadObject(EXPORT_BUCKET, key, zipBuffer, 'application/zip')
 
     // 6. ready (download_url 은 저장하지 않음 — GET 에서 동적 발급)
     await supabaseAdmin
@@ -136,7 +129,7 @@ export async function runEmbeddedExportJob(jobId: string): Promise<void> {
         status: 'ready',
         packaging_stage: '완료',
         storage_path: key,
-        size_bytes: stat.size,
+        size_bytes: zipBuffer.byteLength,
         download_expires_at: new Date(Date.now() + DOWNLOAD_TTL_SEC * 1000).toISOString(),
         updated_at: new Date().toISOString(),
       })
