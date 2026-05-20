@@ -38,7 +38,7 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
   let query = supabaseAdmin
     .from('utterances')
     .select(
-      'id, session_id, speaker_id, session_speaker_id, segment_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at, sessions(session_seq, date, duration, review_status, consent_status), session_speakers!session_speaker_id(speaker_role, speaker_gender, speaker_voice_age_range), session_segments!segment_id(topic)',
+      'id, session_id, speaker_id, session_speaker_id, segment_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at, emotion, emotion_confidence, dialog_act, dialog_act_confidence, label_source, auto_label_model_version, utterance_form, honorific_level, confidence_tier, sessions(session_seq, date, duration, review_status, consent_status), session_speakers!session_speaker_id(speaker_role, speaker_gender, speaker_voice_age_range), session_segments!segment_id(topic)',
       { count: 'exact' },
     )
 
@@ -99,6 +99,19 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
       review_status: ((row.review_status as string) ?? 'pending') as 'pending' | 'excluded',
       exclude_reason: (row.exclude_reason as string) ?? null,
       reviewed_at: (row.reviewed_at as string) ?? null,
+      // 자동라벨 (표시 전용 — 발화 단위 라벨 검수)
+      emotion: (row.emotion as string) ?? null,
+      emotion_confidence: (row.emotion_confidence as number) ?? null,
+      dialog_act: (row.dialog_act as string) ?? null,
+      dialog_act_confidence: (row.dialog_act_confidence as number) ?? null,
+      label_source: (row.label_source as string) ?? null,
+      auto_label_model_version: (row.auto_label_model_version as string) ?? null,
+      utterance_form:
+        row.utterance_form && typeof row.utterance_form === 'object' && !Array.isArray(row.utterance_form)
+          ? (row.utterance_form as Record<string, unknown>)
+          : null,
+      honorific_level: (row.honorific_level as string) ?? null,
+      confidence_tier: (row.confidence_tier as string) ?? null,
     }
   })
 
