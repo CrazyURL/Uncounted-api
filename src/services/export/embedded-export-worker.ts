@@ -1,6 +1,6 @@
 // ── Embedded Export Worker (Phase 2B) ─────────────────────────────────
 //
-// SPEC_EXPORT_V2.md §6.3. export_jobs_v2 단건 embedded WAV job 의 백그라운드 처리.
+// SPEC_EXPORT_V2.md §6.3. export_embedded_jobs_v2 단건 embedded WAV job 의 백그라운드 처리.
 //
 // 흐름: queued → packaging → ready / failed.
 //   1. status='packaging' 전이 (queued 가드)
@@ -34,14 +34,14 @@ interface ExportJobV2Row {
 
 async function setStage(jobId: string, stage: string): Promise<void> {
   await supabaseAdmin
-    .from('export_jobs_v2')
+    .from('export_embedded_jobs_v2')
     .update({ packaging_stage: stage, updated_at: new Date().toISOString() })
     .eq('id', jobId)
 }
 
 async function failJob(jobId: string, message: string): Promise<void> {
   await supabaseAdmin
-    .from('export_jobs_v2')
+    .from('export_embedded_jobs_v2')
     .update({ status: 'failed', error_message: message, updated_at: new Date().toISOString() })
     .eq('id', jobId)
 }
@@ -53,7 +53,7 @@ async function failJob(jobId: string, message: string): Promise<void> {
 export async function runEmbeddedExportJob(jobId: string): Promise<void> {
   // 1. job 조회
   const { data: job, error: jobErr } = await supabaseAdmin
-    .from('export_jobs_v2')
+    .from('export_embedded_jobs_v2')
     .select('id, status, session_ids, audio_export_mode, include_restricted')
     .eq('id', jobId)
     .single()
@@ -71,7 +71,7 @@ export async function runEmbeddedExportJob(jobId: string): Promise<void> {
 
   // 2. queued → packaging (queued 가드: 중복 픽업 방지)
   const { data: claimed, error: claimErr } = await supabaseAdmin
-    .from('export_jobs_v2')
+    .from('export_embedded_jobs_v2')
     .update({ status: 'packaging', packaging_stage: '시작', updated_at: new Date().toISOString() })
     .eq('id', jobId)
     .eq('status', 'queued')
@@ -131,7 +131,7 @@ export async function runEmbeddedExportJob(jobId: string): Promise<void> {
 
     // 6. ready (download_url 은 저장하지 않음 — GET 에서 동적 발급)
     await supabaseAdmin
-      .from('export_jobs_v2')
+      .from('export_embedded_jobs_v2')
       .update({
         status: 'ready',
         packaging_stage: '완료',

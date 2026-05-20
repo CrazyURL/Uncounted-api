@@ -33,7 +33,7 @@ function makeBuilder(table: string) {
       Object.assign(jobRow, payload)
       return { data: [{ id: jobRow.id }], error: null }
     }
-    if (table === 'export_jobs_v2') return { data: jobRow, error: null }
+    if (table === 'export_embedded_jobs_v2') return { data: jobRow, error: null }
     if (table === 'sessions') return { data: sessionRow, error: null }
     return { data: null, error: null }
   }

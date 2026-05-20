@@ -7,7 +7,7 @@
 // 라우트:
 //   - POST /export/sessions/:id    Layer 2 단건
 //       · reference_only → 동기 처리 (ZIP S3 업로드 후 signed URL 반환)
-//       · embedded       → export_jobs_v2 job 생성 + 202 (백그라운드 워커)
+//       · embedded       → export_embedded_jobs_v2 job 생성 + 202 (백그라운드 워커)
 //   - POST /export/sessions/batch  Layer 3 배치 — 501 (Phase 3)
 //   - GET  /export/jobs/:id        embedded job 상태 조회 (ready 시 signed URL 동적 발급)
 
@@ -69,7 +69,7 @@ adminExport.post('/export/sessions/:id', async (c) => {
     }
 
     const { data: job, error: jobErr } = await supabaseAdmin
-      .from('export_jobs_v2')
+      .from('export_embedded_jobs_v2')
       .insert({
         status: 'queued',
         session_ids: [sessionId],
@@ -169,7 +169,7 @@ adminExport.get('/export/jobs/:id', async (c) => {
   const jobId = c.req.param('id')
 
   const { data: job, error } = await supabaseAdmin
-    .from('export_jobs_v2')
+    .from('export_embedded_jobs_v2')
     .select(
       'id, status, audio_export_mode, packaging_stage, storage_path, size_bytes, error_message, created_at, updated_at',
     )
