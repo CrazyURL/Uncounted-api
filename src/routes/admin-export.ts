@@ -12,12 +12,10 @@
 //   - GET  /export/jobs/:id        embedded job 상태 조회 (ready 시 signed URL 동적 발급)
 
 import { Hono } from 'hono'
-import { createReadStream } from 'node:fs'
 import { promises as fs } from 'node:fs'
-import { PutObjectCommand } from '@aws-sdk/client-s3'
 
 import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
-import { getSignedUrl, S3_AUDIO_BUCKET, s3Client } from '../lib/s3.js'
+import { getSignedUrl, S3_AUDIO_BUCKET, uploadObject } from '../lib/s3.js'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { isExportEligible } from '../lib/export/eligibility.js'
 import { buildSessionExportZip } from '../services/export/export-builder.js'
@@ -100,17 +98,11 @@ adminExport.post('/export/sessions/:id', async (c) => {
     })
 
     const key = `exports/v2/single/${sessionId}_${Date.now()}.zip`
-    const stat = await fs.stat(result.zipPath)
-    const stream = createReadStream(result.zipPath)
-    await s3Client.send(
-      new PutObjectCommand({
-        Bucket: EXPORT_BUCKET,
-        Key: key,
-        Body: stream,
-        ContentType: 'application/zip',
-        ContentLength: stat.size,
-      }),
-    )
+
+    // iwinv 오브젝트 스토리지는 streaming(aws-chunked) 업로드를 411 MissingContentLength 로
+    // 거부한다 → 파일을 Buffer 로 읽어 고정 Content-Length 로 업로드(embedded worker 와 동일 패턴, #19).
+    const zipBuffer = await fs.readFile(result.zipPath)
+    await uploadObject(EXPORT_BUCKET, key, zipBuffer, 'application/zip')
 
     const downloadUrl = await getSignedUrl(
       EXPORT_BUCKET,
@@ -128,7 +120,7 @@ adminExport.post('/export/sessions/:id', async (c) => {
       data: {
         download_url: downloadUrl,
         expires_at: expiresAt,
-        size_bytes_estimate: stat.size,
+        size_bytes_estimate: zipBuffer.byteLength,
       },
     })
   } catch (err) {

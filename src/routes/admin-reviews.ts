@@ -13,7 +13,14 @@ import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
 import { formatDisplayTitle } from '../lib/displayTitle.js'
 import { checkSessionAutoApproval } from '../lib/piiRisk.js'
-import { buildRunningOrClause } from './admin-reviews-helpers.js'
+import {
+  buildRunningOrClause,
+  distinctSessionIds,
+  countCandidatesBySession,
+  pipelineComplete,
+  REVIEW_TRANSITION_SELECT,
+} from './admin-reviews-helpers.js'
+import { applyDatasetEligibility } from '../services/export/applyDatasetEligibility.js'
 
 const adminReviews = new Hono()
 
@@ -32,19 +39,8 @@ const VALID_REVIEW = new Set([
   'needs_revision',
 ])
 
-// 처리 흐름이 모두 done/skipped 인지 — pending → in_review 전환 가능 여부 체크용
-// DB: gpu_upload_status / gpu_pii_status (BM v9 컬럼 충돌 회피)
-function pipelineComplete(row: Record<string, unknown>): boolean {
-  const terminal = (v: unknown) => v === 'done' || v === 'skipped'
-  return (
-    terminal(row.gpu_upload_status) &&
-    terminal(row.stt_status) &&
-    terminal(row.diarize_status) &&
-    terminal(row.gpu_pii_status) &&
-    terminal(row.auto_label_status) &&
-    terminal(row.quality_status)
-  )
-}
+// pipelineComplete / PIPELINE_STATUS_COLUMNS / REVIEW_TRANSITION_SELECT 는
+// admin-reviews-helpers.ts 에서 단일 출처로 관리(SELECT↔검사 컬럼 드리프트 방지).
 
 function isAllowedTransition(from: string, to: string, isPipelineComplete: boolean): boolean {
   // pending → in_review (파이프라인 완료 시만)
@@ -83,15 +79,18 @@ adminReviews.get('/reviews', async (c) => {
   const orderCol = sortBy && colMap[sortBy] ? colMap[sortBy] : 'consented_at'
   const ascending = sortDir === 'asc'
 
-  // pii_flag 필터: pii_intervals 있는 발화가 존재하는 세션 ID 선조회
+  // pii_flag 필터(PII-1A): "AI 판단 애매" 후보(needs_human_decision + pending)가 있는 세션.
+  // pii_intervals 는 PII-3/4 가 채우는 최종 구간이라 현재 전부 빈값 → 항상 0건이던 문제를 후보 기반으로 교체.
+  // auto_confirmed / auto_rejected 는 관리자 검수 대상이 아니므로 필터에 포함하지 않는다.
   let piiSessionIds: string[] | null = null
   if (piiFlag) {
     const { data: piiRows } = await supabaseAdmin
-      .from('utterances')
+      .from('pii_candidates')
       .select('session_id')
-      .filter('pii_intervals', 'neq', '[]')
-      .limit(5000)
-    piiSessionIds = [...new Set((piiRows ?? []).map((r) => (r as Record<string, unknown>).session_id as string))]
+      .eq('confidence_tier', 'needs_human_decision')
+      .eq('status', 'pending')
+      .limit(20000)
+    piiSessionIds = distinctSessionIds(piiRows as Array<{ session_id: string }> | null)
     if (piiSessionIds.length === 0) {
       return c.json({
         data: {
@@ -257,7 +256,8 @@ adminReviews.get('/reviews', async (c) => {
   const sessionIds = rows.map((r) => r.id as string)
 
   // 발화 배치 조회 — pii/quality/speakers 집계용
-  const piiCountBySession = new Map<string, number>()
+  // PII-1A: pii_flag/pii_count 는 needs_human_decision 후보 기준(아래에서 채움).
+  let piiNeedsReviewBySession = new Map<string, number>()
   const gradeBySession = new Map<string, 'A' | 'B' | 'C' | null>()
   const qualityScoreSumBySession = new Map<string, number>()
   const qualityScoreCountBySession = new Map<string, number>()
@@ -284,6 +284,18 @@ adminReviews.get('/reviews', async (c) => {
   const durationSecBySpeaker = new Map<string, number>()
 
   if (sessionIds.length > 0) {
+    // PII-1A: 표시 중인 세션들의 needs_human_decision + pending 후보 수 집계 → pii_flag/pii_count.
+    const { data: piiCandRows } = await supabaseAdmin
+      .from('pii_candidates')
+      .select('session_id')
+      .eq('confidence_tier', 'needs_human_decision')
+      .eq('status', 'pending')
+      .in('session_id', sessionIds)
+      .limit(20000)
+    piiNeedsReviewBySession = countCandidatesBySession(
+      piiCandRows as Array<{ session_id: string }> | null,
+    )
+
     const { data: uttRows } = await supabaseAdmin
       .from('utterances')
       .select('session_id, quality_grade, pii_intervals, quality_score, snr_db, speech_ratio, speaker_id, duration_sec')
@@ -296,7 +308,6 @@ adminReviews.get('/reviews', async (c) => {
 
       const piiIntervals = row.pii_intervals as unknown[]
       if (Array.isArray(piiIntervals) && piiIntervals.length > 0) {
-        piiCountBySession.set(sid, (piiCountBySession.get(sid) ?? 0) + 1)
         const samples = piiSamplesBySession.get(sid) ?? []
         if (samples.length < 5) {
           for (const iv of piiIntervals) {
@@ -406,7 +417,8 @@ adminReviews.get('/reviews', async (c) => {
 
   const sessions = rows.map((row) => {
     const sid = row.id as string
-    const piiCount = piiCountBySession.get(sid) ?? 0
+    // PII-1A: pii_flag/pii_count 는 needs_human_decision 후보 기준 (pii_intervals 아님 — 후속 PII-3/4).
+    const piiCount = piiNeedsReviewBySession.get(sid) ?? 0
 
     const qsCount = qualityScoreCountBySession.get(sid) ?? 0
     const snrCount = snrDbCountBySession.get(sid) ?? 0
@@ -473,18 +485,18 @@ adminReviews.post('/reviews/:sessionId{[0-9a-f-]+}', async (c) => {
     return c.json({ error: 'invalid review status' }, 400)
   }
 
-  const { data: existing, error: fetchErr } = await supabaseAdmin
+  const { data: existingRaw, error: fetchErr } = await supabaseAdmin
     .from('sessions')
-    .select(
-      'id, review_status, gpu_upload_status, stt_status, diarize_status, gpu_pii_status, quality_status',
-    )
+    .select(REVIEW_TRANSITION_SELECT)
     .eq('id', sessionId)
     .single()
 
-  if (fetchErr || !existing) {
+  if (fetchErr || !existingRaw) {
     return c.json({ error: 'session not found' }, 404)
   }
 
+  // 동적 select 문자열은 supabase-js 가 컬럼 타입을 추론하지 못하므로 명시 캐스트.
+  const existing = existingRaw as unknown as Record<string, unknown>
   const from = (existing.review_status as string) ?? 'pending'
   const complete = pipelineComplete(existing)
 
@@ -505,6 +517,15 @@ adminReviews.post('/reviews/:sessionId{[0-9a-f-]+}', async (c) => {
 
   if (updateErr) {
     return c.json({ error: updateErr.message }, 500)
+  }
+
+  // 창 B: 승인 직후 판매 적격 평가/세팅(best-effort — 전환 응답을 막지 않음).
+  if (status === 'approved') {
+    try {
+      await applyDatasetEligibility([sessionId])
+    } catch (err) {
+      console.error('[admin-reviews] dataset eligibility eval failed (single)', { sessionId, err })
+    }
   }
 
   return c.json({ data: { ok: true } })
@@ -535,7 +556,7 @@ adminReviews.post('/reviews/bulk-auto-approve', async (c) => {
   // 대상 세션 선정 — in_review + 파이프라인 완료
   let sessionQuery = supabaseAdmin
     .from('sessions')
-    .select('id, review_status, gpu_upload_status, stt_status, diarize_status, gpu_pii_status, quality_status')
+    .select(REVIEW_TRANSITION_SELECT)
     .eq('review_status', 'in_review')
 
   if (body?.sessionIds && body.sessionIds.length > 0) {
@@ -545,7 +566,9 @@ adminReviews.post('/reviews/bulk-auto-approve', async (c) => {
   const { data: sessionRows, error: sessErr } = await sessionQuery
   if (sessErr) return c.json({ error: sessErr.message }, 500)
 
-  const candidateSessions = (sessionRows ?? []).filter((s) => pipelineComplete(s as Record<string, unknown>))
+  // 동적 select 문자열은 supabase-js 가 컬럼 타입을 추론하지 못하므로 명시 캐스트.
+  const sessionRecords = (sessionRows ?? []) as unknown as Record<string, unknown>[]
+  const candidateSessions = sessionRecords.filter((s) => pipelineComplete(s))
   const candidateIds = candidateSessions.map((s) => s.id as string)
 
   if (candidateIds.length === 0) {
@@ -599,6 +622,13 @@ adminReviews.post('/reviews/bulk-auto-approve', async (c) => {
       .update({ review_status: 'approved', label_source: 'auto:bulk_review' })
       .in('id', eligible)
     if (updateErr) return c.json({ error: updateErr.message }, 500)
+
+    // 창 B: 일괄 승인 직후 판매 적격 평가/세팅(best-effort).
+    try {
+      await applyDatasetEligibility(eligible)
+    } catch (err) {
+      console.error('[admin-reviews] dataset eligibility eval failed (bulk)', { count: eligible.length, err })
+    }
   }
 
   return c.json({
@@ -608,6 +638,25 @@ adminReviews.post('/reviews/bulk-auto-approve', async (c) => {
       details,
     },
   })
+})
+
+// ── POST /api/admin/reviews/re-evaluate-eligibility (창 B 수동 재평가) ──
+//
+// approved 세션의 session_dataset_eligible 을 재평가/세팅한다.
+// body:
+//   - sessionIds?: string[]  → 지정 세션만 (없으면 approved 전체)
+//   - dryRun?: boolean        → true 면 평가만, DB 변경 X
+// 응답: { evaluated, setTrue, setFalse, results: [{id, eligible, reasons, warnings, exportModes}] }
+adminReviews.post('/reviews/re-evaluate-eligibility', async (c) => {
+  const body = getBody<{ sessionIds?: string[]; dryRun?: boolean }>(c)
+  try {
+    const summary = await applyDatasetEligibility(body?.sessionIds, { dryRun: body?.dryRun === true })
+    return c.json({ data: summary })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'unknown error'
+    console.error('[admin-reviews] re-evaluate-eligibility failed', { err })
+    return c.json({ error: msg }, 500)
+  }
 })
 
 // ── GET /api/admin/sessions/:sessionId ───────────────────────────────
