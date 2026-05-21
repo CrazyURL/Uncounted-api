@@ -242,7 +242,7 @@ adminReviews.get('/reviews', async (c) => {
       durQuery = durQuery.in('id', qualitySessionIds)
     }
     if (search) {
-      durQuery = durQuery.or(`title.ilike.%${search}%,id.ilike.${search}%,user_id.eq.${search}`)
+      durQuery = durQuery.or(`title.ilike.%${search}%,id.ilike.${search}%${isUuid(search) ? `,user_id.eq.${search}` : ''}`)
     }
     const { data: durRows } = await durQuery
     filteredDurationSec = (durRows ?? []).reduce(
