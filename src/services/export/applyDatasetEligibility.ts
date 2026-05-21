@@ -3,17 +3,19 @@
 // 오직 이 경로로만 session_dataset_eligible 을 세팅한다(수동 UPDATE 금지).
 // 승인 훅(단건/일괄) + 재평가 엔드포인트 + backfill 스크립트가 공유한다.
 
-import { supabaseAdmin } from '../../lib/supabase.js'
+import { supabaseAdmin, fetchAllPaginated } from '../../lib/supabase.js'
 import {
   evaluateDatasetEligibility,
   type DatasetEligibilityResult,
 } from '../../lib/export/datasetEligibility.js'
 
 // 평가에 필요한 sessions 컬럼만 선택.
+// (utterance_upload_status 는 앱 클라이언트 플래그라 embedded readiness 에 쓰지 않음 — wav_present 는
+//  utterances 테이블의 실제 업로드 신호로 별도 계산한다.)
 const EVAL_SELECT =
   'id, review_status, consent_status, raw_audio_url, utterance_count, duration, ' +
   'session_quality_tier, strategy_locked, lock_reason, dup_status, dup_representative, ' +
-  'pii_status, gpu_pii_status, is_pii_cleaned, utterance_upload_status'
+  'pii_status, gpu_pii_status, is_pii_cleaned'
 
 export interface SessionEligibilityResult extends DatasetEligibilityResult {
   id: string
@@ -26,11 +28,40 @@ export interface ApplyDatasetEligibilitySummary {
   results: SessionEligibilityResult[]
 }
 
-function toEvalInput(row: Record<string, unknown>) {
-  // utterance_upload_status 는 실제 S3 WAV 존재의 cheap proxy(reporting 용).
-  // 실제 embedded export 의 WAV 검증은 #14 worker 가 수행. 저장값(eligible)에는 영향 없음.
-  const uploadStatus = (row.utterance_upload_status as string | null) ?? null
-  const wavPresent = uploadStatus != null && uploadStatus !== 'none'
+/**
+ * 세션별 실제 업로드된 발화 WAV 수를 조회한다(embedded readiness 판정용).
+ * upload_status='uploaded' + storage_path 비어있지 않은 utterances 만 카운트.
+ * worker(persist_results)가 세팅하는 utterance-level 신호이며, 앱 플래그
+ * sessions.utterance_upload_status 와 무관하다(그 플래그는 S3 실태와 어긋남).
+ */
+async function fetchUploadedWavCounts(sessionIds: string[]): Promise<Map<string, number>> {
+  const counts = new Map<string, number>()
+  if (sessionIds.length === 0) return counts
+
+  const rows = await fetchAllPaginated<{ session_id: string; storage_path: string | null }>(() =>
+    supabaseAdmin
+      .from('utterances')
+      .select('session_id, storage_path')
+      .in('session_id', sessionIds)
+      .eq('upload_status', 'uploaded')
+      .order('id', { ascending: true }),
+  )
+
+  for (const row of rows) {
+    const sid = row.session_id
+    const path = row.storage_path
+    if (!sid || path == null || path.trim() === '') continue
+    counts.set(sid, (counts.get(sid) ?? 0) + 1)
+  }
+  return counts
+}
+
+function toEvalInput(row: Record<string, unknown>, uploadedWavCount: number) {
+  // wav_present(embedded readiness): 전체 발화가 실제 업로드되었는지(full coverage).
+  // utterance_count > 0 AND uploaded_wav_count == utterance_count.
+  // 저장값(session_dataset_eligible)에는 영향 없음 — embedded readiness 리포팅에만 쓰인다.
+  const utteranceCount = (row.utterance_count as number | null) ?? 0
+  const wavPresent = utteranceCount > 0 && uploadedWavCount === utteranceCount
   return {
     review_status: (row.review_status as string | null) ?? null,
     consent_status: (row.consent_status as string | null) ?? null,
@@ -73,9 +104,12 @@ export async function applyDatasetEligibility(
   const trueIds: string[] = []
   const falseIds: string[] = []
 
+  // embedded readiness 판정에 쓸 세션별 업로드 WAV 수(reporting 전용).
+  const wavCounts = await fetchUploadedWavCounts(rows.map((r) => r.id as string))
+
   for (const row of rows) {
     const id = row.id as string
-    const res = evaluateDatasetEligibility(toEvalInput(row))
+    const res = evaluateDatasetEligibility(toEvalInput(row, wavCounts.get(id) ?? 0))
     results.push({ id, ...res })
     ;(res.eligible ? trueIds : falseIds).push(id)
   }
