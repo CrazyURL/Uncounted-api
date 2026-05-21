@@ -20,6 +20,7 @@ import {
   pipelineComplete,
   REVIEW_TRANSITION_SELECT,
 } from './admin-reviews-helpers.js'
+import { applyDatasetEligibility } from '../services/export/applyDatasetEligibility.js'
 
 const adminReviews = new Hono()
 
@@ -518,6 +519,15 @@ adminReviews.post('/reviews/:sessionId{[0-9a-f-]+}', async (c) => {
     return c.json({ error: updateErr.message }, 500)
   }
 
+  // 창 B: 승인 직후 판매 적격 평가/세팅(best-effort — 전환 응답을 막지 않음).
+  if (status === 'approved') {
+    try {
+      await applyDatasetEligibility([sessionId])
+    } catch (err) {
+      console.error('[admin-reviews] dataset eligibility eval failed (single)', { sessionId, err })
+    }
+  }
+
   return c.json({ data: { ok: true } })
 })
 
@@ -612,6 +622,13 @@ adminReviews.post('/reviews/bulk-auto-approve', async (c) => {
       .update({ review_status: 'approved', label_source: 'auto:bulk_review' })
       .in('id', eligible)
     if (updateErr) return c.json({ error: updateErr.message }, 500)
+
+    // 창 B: 일괄 승인 직후 판매 적격 평가/세팅(best-effort).
+    try {
+      await applyDatasetEligibility(eligible)
+    } catch (err) {
+      console.error('[admin-reviews] dataset eligibility eval failed (bulk)', { count: eligible.length, err })
+    }
   }
 
   return c.json({
@@ -621,6 +638,25 @@ adminReviews.post('/reviews/bulk-auto-approve', async (c) => {
       details,
     },
   })
+})
+
+// ── POST /api/admin/reviews/re-evaluate-eligibility (창 B 수동 재평가) ──
+//
+// approved 세션의 session_dataset_eligible 을 재평가/세팅한다.
+// body:
+//   - sessionIds?: string[]  → 지정 세션만 (없으면 approved 전체)
+//   - dryRun?: boolean        → true 면 평가만, DB 변경 X
+// 응답: { evaluated, setTrue, setFalse, results: [{id, eligible, reasons, warnings, exportModes}] }
+adminReviews.post('/reviews/re-evaluate-eligibility', async (c) => {
+  const body = getBody<{ sessionIds?: string[]; dryRun?: boolean }>(c)
+  try {
+    const summary = await applyDatasetEligibility(body?.sessionIds, { dryRun: body?.dryRun === true })
+    return c.json({ data: summary })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'unknown error'
+    console.error('[admin-reviews] re-evaluate-eligibility failed', { err })
+    return c.json({ error: msg }, 500)
+  }
 })
 
 // ── GET /api/admin/sessions/:sessionId ───────────────────────────────
