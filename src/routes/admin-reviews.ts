@@ -124,7 +124,8 @@ adminReviews.get('/reviews', async (c) => {
     .from('sessions')
     .select(
       'id, user_id, pid, session_seq, date, duration, consent_status, consented_at, ' +
-        'gpu_upload_status, gpu_uploaded_at, stt_status, stt_at, diarize_status, diarize_at, ' +
+        'gpu_upload_status, gpu_uploaded_at, gpu_last_error, raw_audio_url, ' +
+        'stt_status, stt_at, diarize_status, diarize_at, ' +
         'gpu_pii_status, gpu_pii_at, auto_label_status, label_at, quality_status, quality_at, review_status, utterance_count',
       { count: 'exact' },
     )
@@ -439,6 +440,8 @@ adminReviews.get('/reviews', async (c) => {
       consented_at: (row.consented_at as string) ?? null,
       upload_status: (row.gpu_upload_status as string) ?? 'pending',
       uploaded_at: (row.gpu_uploaded_at as string) ?? null,
+      upload_error_message: (row.gpu_last_error as string | null) ?? null,
+      raw_audio_url_present: row.raw_audio_url != null,
       stt_status: (row.stt_status as string) ?? 'pending',
       stt_at: (row.stt_at as string) ?? null,
       diarize_status: (row.diarize_status as string) ?? 'pending',
@@ -686,6 +689,8 @@ adminReviews.get('/sessions/:sessionId', async (c) => {
       consent_status: row.consent_status as string,
       consented_at: row.consented_at as string,
       upload_status: (row.gpu_upload_status as string) ?? 'pending',
+      upload_error_message: (row.gpu_last_error as string | null) ?? null,
+      raw_audio_url_present: row.raw_audio_url != null,
       stt_status: (row.stt_status as string) ?? 'pending',
       diarize_status: (row.diarize_status as string) ?? 'pending',
       pii_status: (row.gpu_pii_status as string) ?? 'pending',
