@@ -384,10 +384,11 @@ adminReviews.get('/reviews', async (c) => {
       }
     }
 
-    const { data: spRows } = await supabaseAdmin
+    const { data: spRows, error: spError } = await supabaseAdmin
       .from('session_speakers')
       .select('session_id, speaker_label, speaker_role, speaker_gender, speaker_voice_age_range, speaker_speech_age_range, speaker_relation')
       .in('session_id', sessionIds)
+    if (spError) console.error('[admin-reviews] session_speakers query error:', spError)
     for (const sp of spRows ?? []) {
       const spRow = sp as Record<string, unknown>
       const sid = spRow.session_id as string
