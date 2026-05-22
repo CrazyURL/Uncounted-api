@@ -35,17 +35,26 @@ adminDeliveryPackages.get('/delivery/packages', async (c) => {
     return c.json({ success: false, error: error.message }, 500)
   }
 
-  // 테이블이 존재한다면 실제 목록 쿼리 — 본 창 산출은 여기까지 stub.
-  // 후속 워크스트림에서 status 필터 / 페이지네이션 / metadata.export_eligibility_summary 매핑 추가.
-  return c.json(
-    {
-      success: false,
-      error:
-        'list query not implemented yet: delivery_packages exists but follow-up workstream ' +
-        'must add status filter, pagination, and metadata mapping (SPEC §6.4).',
-    },
-    501,
-  )
+  const page = Math.max(1, Number(c.req.query('page') ?? '1'))
+  const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') ?? '20')))
+  const from = (page - 1) * limit
+  const to = from + limit - 1
+
+  const { data, error: listError, count } = await supabaseAdmin
+    .from('delivery_packages')
+    .select('*', { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .range(from, to)
+
+  if (listError) {
+    return c.json({ success: false, error: listError.message }, 500)
+  }
+
+  return c.json({
+    success: true,
+    data: data ?? [],
+    meta: { total: count ?? 0, page, limit },
+  })
 })
 
 // ── 6.5 패키지 다운로드 ──────────────────────────────────────────────
