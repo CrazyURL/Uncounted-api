@@ -22,6 +22,7 @@ import {
   sanitizeExternalSpeakerRole,
 } from '../../lib/export/transforms.js'
 import { isExportEligible } from '../../lib/export/eligibility.js'
+import { isUtteranceDeliverable } from '../../lib/export/utteranceDeliverability.js'
 
 /** embedded WAV S3 다운로드 동시성 (packageBuilder 와 동일 정책). */
 const AUDIO_DOWNLOAD_CONCURRENCY = 4
@@ -104,7 +105,10 @@ export async function buildSessionExportZip(
     requestedMode === 'embedded' ? 'embedded' : 'reference_only'
   const includeAudio = audioExportMode === 'embedded'
 
-  const { session, utterances } = await loadSessionContext(sessionId)
+  const { session, utterances: loadedUtterances } = await loadSessionContext(sessionId)
+
+  // 기본은 로드된 전체 발화. 일반 납품 플로우에서는 발화 단위 품질 필터를 적용한다.
+  let utterances = loadedUtterances
 
   if (!includeRestricted) {
     const eligibility = isExportEligible(session)
@@ -114,6 +118,11 @@ export async function buildSessionExportZip(
           `set includeRestricted=true to override (안전선 #5).`,
       )
     }
+
+    // 발화 단위 납품 품질 필터 (PR2): 부적격 발화(excluded_low_quality / needs_* /
+    // pii_unresolved / D·F / 미승인 C / 품질 미측정)는 패키지에서 제외.
+    // includeRestricted=true (admin 진단/재다운로드) 시에는 미적용 — 전체 동봉.
+    utterances = loadedUtterances.filter((u) => isUtteranceDeliverable(u).included)
   }
 
   const baseDir = outputDir ?? os.tmpdir()
