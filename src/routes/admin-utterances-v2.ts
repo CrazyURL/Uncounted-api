@@ -16,6 +16,7 @@ import { authMiddleware, adminMiddleware } from '../lib/middleware.js'
 import { formatDisplayTitle } from '../lib/displayTitle.js'
 import { HOURLY_RATE_KRW } from '../lib/pricing.js'
 import { getSignedUrl, S3_AUDIO_BUCKET } from '../lib/s3.js'
+import { maskKnownNames } from '../lib/piiNameMask.js'
 
 const adminUtterancesV2 = new Hono()
 
@@ -93,7 +94,9 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
       start_ms: startMs,
       end_ms: endMs,
       duration_seconds: durSec,
-      text: ((row.transcript_text as string) ?? '').slice(0, 200),
+      // Track 0 응급 PII — 알려진 실명(PII_NAME_DENYLIST) 표시-시점 마스킹.
+      // DB 미변형(비파괴). env 미설정 시 no-op.
+      text: maskKnownNames(((row.transcript_text as string) ?? '').slice(0, 200)),
       unit_price_krw: storedPrice ?? computedPrice,
       settled_at: (row.settled_at as string) ?? null,
       review_status: ((row.review_status as string) ?? 'pending') as 'pending' | 'excluded',

@@ -24,6 +24,7 @@ import { authMiddleware, adminMiddleware } from '../lib/middleware.js'
 import { decryptId } from '../lib/crypto.js'
 import { s3Client, S3_AUDIO_BUCKET } from '../lib/s3.js'
 import { formatDisplayTitle } from '../lib/displayTitle.js'
+import { maskKnownNames } from '../lib/piiNameMask.js'
 
 const adminDownloads = new Hono()
 
@@ -160,7 +161,9 @@ adminDownloads.get('/sessions/:id/download-package', async (c) => {
           startSec: u.start_sec,
           endSec: u.end_sec,
           durationSec: u.duration_sec,
-          text: u.transcript_text,
+          // Track 0 응급 PII — 스트리밍 ZIP 은 safety-check staging 스캔을 거치지 않으므로
+          // 여기서 직접 실명 마스킹(PII_NAME_DENYLIST). env 미설정 시 no-op. null 은 보존.
+          text: u.transcript_text == null ? null : maskKnownNames(u.transcript_text as string),
           snrDb: u.snr_db,
           qualityScore: u.quality_score,
           qualityGrade: u.quality_grade,
