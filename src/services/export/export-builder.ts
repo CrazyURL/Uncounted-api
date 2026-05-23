@@ -66,6 +66,8 @@ interface UtteranceRow {
   storage_path: string | null
   transcript_text: string | null
   labels?: Record<string, unknown> | null
+  emotion?: string | null
+  emotion_confidence?: number | string | null
   dialog_act?: string | null
   dialog_intensity?: number | null
   label_source?: string | null
@@ -458,7 +460,7 @@ function buildLabelLine(
     audio_metadata_ref: sessionId,
 
     auto_labels: {
-      emotion: extractEmotion(u.labels),
+      emotion: buildAutoEmotion(u),
       speech_act: speechAct,
     },
 
@@ -528,11 +530,29 @@ function pickSpeechAct(raw: unknown): Record<string, unknown> | null {
   }
 }
 
-function extractEmotion(labels: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
-  if (!labels || typeof labels !== 'object') return null
-  const emotion = (labels as Record<string, unknown>).emotion
-  if (!emotion || typeof emotion !== 'object') return null
-  return emotion as Record<string, unknown>
+/**
+ * 자동 추정 emotion 라벨 (사람 검수 X). flat 컬럼 기반.
+ *
+ * 버그 수정: 기존 extractEmotion 은 `labels` JSONB(사람 검수용, 대부분 null)에서
+ * 읽어 auto_labels.emotion 이 항상 null 이었다. flat 컬럼(emotion/emotion_confidence/
+ * auto_label_model_version)에서 직접 매핑한다.
+ *
+ * - value: u.emotion (긍정/중립/부정)
+ * - confidence: u.emotion_confidence (NUMERIC → number)
+ * - source: 'automatic' — 자동 추정 marker (최상위 label_origin 과 구분)
+ * - model_version: 안전선 #6 일반화 (raw 모델명 ZIP 노출 금지)
+ *
+ * emotion 미산출(null/empty) 이면 null 반환 → 정직하게 null 노출.
+ */
+function buildAutoEmotion(u: UtteranceRow): Record<string, unknown> | null {
+  const value = typeof u.emotion === 'string' && u.emotion.length > 0 ? u.emotion : null
+  if (value === null) return null
+  return {
+    value,
+    confidence: toNumOrNull(u.emotion_confidence),
+    source: 'automatic',
+    model_version: sanitizeExternalMethod(u.auto_label_model_version),
+  }
 }
 
 // ── metadata 리포트 ──────────────────────────────────────────────────────
@@ -834,4 +854,5 @@ export const EXPORT_V2_SAFETY_NOTES = [
 export const _testInternals = {
   buildAudioManifest,
   downloadAudioFilesToStaging,
+  buildLabelLine,
 }
