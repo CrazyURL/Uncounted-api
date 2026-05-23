@@ -660,4 +660,86 @@ adminUtterances.post('/utterances/labels', async (c) => {
   }
 })
 
+/**
+ * POST /admin/utterances/:id/quality-review
+ * 납품 품질 검수 판정 저장 (저품질 검수 큐 액션 버튼에서 호출).
+ *
+ * ⚠️ 일반 review_status 와 직교 — 이 엔드포인트는 quality_review_status 만 변경하며
+ *    review_status / exclude_reason 은 절대 건드리지 않는다.
+ *
+ * Body: { status, reason?, note? }
+ *   status: 'pending' | 'approved_exception' | 'excluded_low_quality'
+ *         | 'needs_retranscription' | 'needs_pii_masking' | 'needs_transcript_edit'
+ *   reason (excluded_low_quality 시 필수): 'noisy' | 'too_short' | 'clipped'
+ *         | 'unintelligible' | 'wrong_transcript' | 'pii_unresolved' | 'duplicate' | 'other'
+ *   note: 선택 자유 메모
+ */
+const QUALITY_REVIEW_STATUSES = [
+  'pending',
+  'approved_exception',
+  'excluded_low_quality',
+  'needs_retranscription',
+  'needs_pii_masking',
+  'needs_transcript_edit',
+] as const
+type QualityReviewStatus = (typeof QUALITY_REVIEW_STATUSES)[number]
+
+const QUALITY_EXCLUSION_REASONS = [
+  'noisy',
+  'too_short',
+  'clipped',
+  'unintelligible',
+  'wrong_transcript',
+  'pii_unresolved',
+  'duplicate',
+  'other',
+] as const
+type QualityExclusionReason = (typeof QUALITY_EXCLUSION_REASONS)[number]
+
+adminUtterances.post('/utterances/:id/quality-review', async (c) => {
+  const utteranceId = c.req.param('id')
+  const userId = c.get('userId') as string
+  const { status, reason, note } = getBody<{
+    status: QualityReviewStatus
+    reason?: QualityExclusionReason | null
+    note?: string | null
+  }>(c)
+
+  if (!QUALITY_REVIEW_STATUSES.includes(status)) {
+    return c.json({ error: `status must be one of: ${QUALITY_REVIEW_STATUSES.join(', ')}` }, 400)
+  }
+
+  if (reason != null && !QUALITY_EXCLUSION_REASONS.includes(reason)) {
+    return c.json({ error: `reason must be one of: ${QUALITY_EXCLUSION_REASONS.join(', ')}` }, 400)
+  }
+
+  // 제외 판정은 사유 필수 (감사 추적 + 리포트 분류)
+  if (status === 'excluded_low_quality' && reason == null) {
+    return c.json({ error: 'reason is required when status is excluded_low_quality' }, 400)
+  }
+
+  // pending 으로 되돌릴 때는 사유/메모 초기화
+  const resetToPending = status === 'pending'
+
+  try {
+    const now = new Date().toISOString()
+    const { error } = await supabaseAdmin
+      .from('utterances')
+      .update({
+        quality_review_status: status,
+        quality_exclusion_reason: resetToPending ? null : (reason ?? null),
+        quality_review_note: resetToPending ? null : (note ?? null),
+        quality_reviewed_at: now,
+        quality_reviewed_by: userId,
+        updated_at: now,
+      })
+      .eq('id', utteranceId)
+
+    if (error) return c.json({ error: error.message }, 500)
+    return c.json({ data: { ok: true, status, reason: resetToPending ? null : (reason ?? null) } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
 export default adminUtterances
