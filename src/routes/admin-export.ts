@@ -20,6 +20,7 @@ import { supabaseAdmin } from '../lib/supabase.js'
 import { isExportEligible } from '../lib/export/eligibility.js'
 import { buildSessionExportZip } from '../services/export/export-builder.js'
 import { runEmbeddedExportJob } from '../services/export/embedded-export-worker.js'
+import { decryptId } from '../lib/crypto.js'
 
 const adminExport = new Hono()
 
@@ -28,6 +29,7 @@ adminExport.use('/*', adminMiddleware)
 
 const EXPORT_BUCKET = process.env.S3_EXPORT_BUCKET ?? S3_AUDIO_BUCKET
 const DOWNLOAD_TTL_SEC = 60 * 60 * 24 // 24h
+const ENC_SUFFIX = '@enc_uncounted'
 
 // Phase 2B: 외부 계약은 audio_export_mode 만. include_audio 는 받지 않음(있어도 무시).
 interface ExportLayer2Body {
@@ -37,7 +39,17 @@ interface ExportLayer2Body {
 
 // ── 6.1 Layer 2 단건 export ───────────────────────────────────────────
 adminExport.post('/export/sessions/:id', async (c) => {
-  const sessionId = c.req.param('id')
+  const idParam = decodeURIComponent(c.req.param('id'))
+  let sessionId: string
+  if (idParam.endsWith(ENC_SUFFIX)) {
+    try {
+      sessionId = decryptId(idParam)
+    } catch {
+      return c.json({ success: false, error: 'invalid encrypted session id' }, 400)
+    }
+  } else {
+    sessionId = idParam
+  }
   const body = getBody<ExportLayer2Body>(c)
   const mode = body.audio_export_mode === 'embedded' ? 'embedded' : 'reference_only'
 
