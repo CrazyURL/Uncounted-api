@@ -15,6 +15,7 @@
 import { promises as fs } from 'fs'
 import path from 'path'
 import { sanitizeExternalMethod } from '../../lib/export/transforms.js'
+import { parseNameDenylist, maskKnownNames } from '../../lib/piiNameMask.js'
 
 // ── 키워드 / 키 / value 화이트리스트 ──────────────────────────────────────
 
@@ -82,6 +83,10 @@ export async function validateExportSafety(
   const violations: string[] = []
   const warnings: string[] = []
 
+  // Track 0 응급 PII — 알려진 실명(PII_NAME_DENYLIST)이 내보내기 결과물에 있으면
+  // fail-closed 로 ZIP 차단. 메시지에 이름 자체는 노출하지 않는다(재유출 방지).
+  const nameDenylist = parseNameDenylist()
+
   const files = await collectTextFiles(stagingDir)
 
   for (const filePath of files) {
@@ -109,6 +114,11 @@ export async function validateExportSafety(
       if (re.test(content)) {
         violations.push(`${rel}: forbidden content pattern "${label}"`)
       }
+    }
+
+    // Track 0 응급 PII — denylist 실명이 결과물에 있으면 차단 (이름 미노출).
+    if (nameDenylist.length > 0 && maskKnownNames(content, nameDenylist) !== content) {
+      violations.push(`${rel}: forbidden PII name match (PII_NAME_DENYLIST)`)
     }
 
     if (JSON_LIKE_EXTENSIONS.includes(ext)) {
