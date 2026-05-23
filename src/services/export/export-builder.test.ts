@@ -184,3 +184,107 @@ describe('export-builder — downloadAudioFilesToStaging (embedded)', () => {
     expect(s3SendMock).toHaveBeenCalledTimes(1)
   })
 })
+
+// ── auto_labels.emotion: flat 컬럼 매핑 (labels JSONB 버그 수정) ────────────
+describe('export-builder — buildLabelLine auto_labels.emotion (flat 매핑)', () => {
+  async function getBuildLabelLine() {
+    const { buildLabelLine } = await import('./export-builder.js').then((m) => m._testInternals)
+    return buildLabelLine as (
+      u: Record<string, unknown>,
+      sessionId: string,
+      audioExportMode: 'reference_only' | 'embedded',
+    ) => Record<string, unknown>
+  }
+
+  const baseUtt = {
+    id: 'u1',
+    session_id: 'sess1',
+    sequence_order: 0,
+    speaker_id: 'SPEAKER_00',
+    start_sec: 0,
+    end_sec: 1.5,
+    transcript_text: '안녕하세요',
+  }
+
+  it('flat 컬럼에서 emotion 을 자동 추정 object 로 매핑한다', async () => {
+    const buildLabelLine = await getBuildLabelLine()
+    const line = buildLabelLine(
+      {
+        ...baseUtt,
+        emotion: '긍정',
+        emotion_confidence: '0.870', // supabase NUMERIC 은 string 으로 옴
+        auto_label_model_version: 'kcelectra_emotion_v1',
+        labels: null,
+      },
+      'sess1',
+      'reference_only',
+    )
+    const autoLabels = line.auto_labels as Record<string, unknown>
+    expect(autoLabels.emotion).toEqual({
+      value: '긍정',
+      confidence: 0.87,
+      source: 'automatic',
+      model_version: 'supervised_model', // sanitizeExternalMethod(kcelectra_*) (안전선 #6)
+    })
+  })
+
+  it('안전선 #6: raw 내부 모델명(kcelectra)이 직렬화 결과에 노출되지 않는다', async () => {
+    const buildLabelLine = await getBuildLabelLine()
+    const line = buildLabelLine(
+      {
+        ...baseUtt,
+        emotion: '부정',
+        emotion_confidence: 0.42,
+        auto_label_model_version: 'kcelectra_emotion_v1',
+        labels: null,
+      },
+      'sess1',
+      'reference_only',
+    )
+    expect(JSON.stringify(line)).not.toContain('kcelectra')
+  })
+
+  it('emotion 미산출(null/empty) 이면 auto_labels.emotion=null', async () => {
+    const buildLabelLine = await getBuildLabelLine()
+    const nullLine = buildLabelLine({ ...baseUtt, emotion: null }, 'sess1', 'reference_only')
+    const emptyLine = buildLabelLine({ ...baseUtt, emotion: '' }, 'sess1', 'reference_only')
+    expect((nullLine.auto_labels as Record<string, unknown>).emotion).toBeNull()
+    expect((emptyLine.auto_labels as Record<string, unknown>).emotion).toBeNull()
+  })
+
+  it('labels JSONB(사람 검수) 의 stale emotion 은 무시하고 flat 컬럼을 사용한다', async () => {
+    const buildLabelLine = await getBuildLabelLine()
+    const line = buildLabelLine(
+      {
+        ...baseUtt,
+        emotion: '부정',
+        emotion_confidence: 0.61,
+        labels: { emotion: { value: 'STALE_HUMAN_LABEL' } },
+      },
+      'sess1',
+      'reference_only',
+    )
+    const emotion = (line.auto_labels as Record<string, unknown>).emotion as Record<string, unknown>
+    expect(emotion.value).toBe('부정')
+    expect(JSON.stringify(line)).not.toContain('STALE_HUMAN_LABEL')
+  })
+
+  it('speech_act 라인은 이번 수정의 영향을 받지 않는다(기존 동작 유지)', async () => {
+    const buildLabelLine = await getBuildLabelLine()
+    const line = buildLabelLine(
+      {
+        ...baseUtt,
+        emotion: '중립',
+        speech_act_events: [{ value: '질문', confidence: 0.9, method: 'rule_v1' }],
+      },
+      'sess1',
+      'reference_only',
+    )
+    const autoLabels = line.auto_labels as Record<string, unknown>
+    expect(autoLabels.speech_act).toEqual({
+      value: '질문',
+      confidence: 0.9,
+      method: 'rule_based_mvp',
+    })
+  })
+})
