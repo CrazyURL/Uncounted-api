@@ -27,7 +27,8 @@ for (const line of readFileSync(resolve(process.cwd(), '.env'), 'utf-8').split('
 }
 const SUPABASE_URL = env.SUPABASE_URL
 const SERVICE_KEY = env.SUPABASE_SERVICE_ROLE_KEY
-const VOICE_API_URL = env.VOICE_API_URL || 'http://localhost:8001'
+// process.env 우선 — .env 미설정 시에도 `VOICE_API_URL=... node ...` 로 비-로컬 voice-api 지정 가능.
+const VOICE_API_URL = process.env.VOICE_API_URL || env.VOICE_API_URL || 'http://localhost:8001'
 if (!SUPABASE_URL || !SERVICE_KEY) {
   console.error('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing in .env')
   process.exit(1)
@@ -44,6 +45,27 @@ const LIMIT = limitArg >= 0 ? parseInt(args[limitArg + 1], 10) : Infinity
 const DRY_RUN = args.includes('--dry-run')
 const DETECT_BATCH = 50 // detect-batch 한 번에 보낼 발화 수
 const MODEL_VERSION = 'detect_spans_bootstrap_v1'
+
+// ── 이름 후보 정밀도 필터 (PII-1A 보강) ─────────────────────────────
+// predicted_type='이름' 후보는 호칭/직함 인접일 때만 채택(고정밀 discovery 채널). 비-이름(구조
+// PII: 전화/주민/카드/IP 등)은 그대로 통과. 호칭없는 단독 이름은 오탐 대부분이라 드롭.
+// ⚠️ 정본(single source of truth) = src/lib/pii/nameHonorificFilter.ts. 토큰 변경 시 양쪽 동기화.
+const NAME_PII_TYPE = '이름'
+const HONORIFIC_TITLES = ['님', '씨', '매니저', '과장', '차장', '부장', '팀장', '대표', '사장', '이사', '상무', '전무', '회장', '선생', '교수', '박사', '원장', '실장', '대리', '주임', '사원', '국장', '처장', '위원', '총장', '학장', '소장', '반장', '조장', '센터장', '본부장', '지점장', '연구원', '책임', '수석', '전임', '감독', '코치', '기사', '고객']
+const NAME_STOPWORDS = new Set(['안녕하', '감사합', '죄송합', '말씀드', '그러니', '그래서', '그러면', '하니까'])
+function isHonorificAdjacentName(text, s, e) {
+  if (!text || s == null || e == null || e <= s || s < 0 || e > text.length) return false
+  const span = text.slice(s, e)
+  if (NAME_STOPWORDS.has(span)) return false
+  let i = e
+  while (i < text.length && /\s/.test(text[i])) i++
+  const w = text.slice(i, i + 6)
+  if (HONORIFIC_TITLES.some((t) => w.startsWith(t))) return true
+  return HONORIFIC_TITLES.some((t) => span.length > t.length && span.endsWith(t))
+}
+function filterNameCandidates(candidates, text) {
+  return (candidates || []).filter((c) => c.type !== NAME_PII_TYPE || isHonorificAdjacentName(text, c.char_start, c.char_end))
+}
 
 // ── voice-api detect-batch 호출 (candidateService 와 동일 계약) ─────
 async function detectBatch(items) {
@@ -108,26 +130,34 @@ async function main() {
   let uttWithCandidates = 0
   let totalCandidates = 0
   let inserted = 0
+  let nameRawSeen = 0 // detect-batch 가 준 이름 후보(필터 전)
+  let nameKept = 0 // 호칭 필터 통과한 이름 후보
 
   let batch = []
   const flush = async () => {
     if (batch.length === 0) return
     const results = await detectBatch(batch.map((u) => ({ utterance_id: u.id, text: u.transcript_text })))
     const sessionByUtt = new Map(batch.map((u) => [u.id, u.session_id]))
+    const textByUtt = new Map(batch.map((u) => [u.id, u.transcript_text]))
 
     const rowsToInsert = []
     const utteranceIdsWithCands = []
     for (const r of results) {
       uttProcessed++
-      if (!r.candidates || r.candidates.length === 0) continue
+      const raw = r.candidates || []
+      nameRawSeen += raw.filter((c) => c.type === NAME_PII_TYPE).length
+      // 정밀도 필터: 이름 후보는 호칭/직함 인접만 채택. 구조 PII 는 통과.
+      const cands = filterNameCandidates(raw, textByUtt.get(r.utterance_id) || '')
+      nameKept += cands.filter((c) => c.type === NAME_PII_TYPE).length
+      if (cands.length === 0) continue
       uttWithCandidates++
-      totalCandidates += r.candidates.length
-      for (const c of r.candidates) {
+      totalCandidates += cands.length
+      for (const c of cands) {
         tierCounts[c.confidence_tier] = (tierCounts[c.confidence_tier] ?? 0) + 1
         typeCounts[c.type] = (typeCounts[c.type] ?? 0) + 1
       }
       utteranceIdsWithCands.push(r.utterance_id)
-      rowsToInsert.push(...toRows(r.utterance_id, sessionByUtt.get(r.utterance_id), r.candidates))
+      rowsToInsert.push(...toRows(r.utterance_id, sessionByUtt.get(r.utterance_id), cands))
     }
 
     if (!DRY_RUN && rowsToInsert.length > 0) {
@@ -164,6 +194,8 @@ async function main() {
   for (const [k, v] of Object.entries(typeCounts).sort((a, b) => b[1] - a[1])) {
     console.log(`  ${k.padEnd(12)} ${v}`)
   }
+  console.log('\n[이름 후보 정밀도 필터]')
+  console.log(`  raw 이름 후보(필터 전): ${nameRawSeen}  →  호칭 동반 채택: ${nameKept}  (드롭 ${nameRawSeen - nameKept})`)
   console.log('\n관리자 큐(needs_human_decision) 후보:', tierCounts.needs_human_decision)
 }
 
