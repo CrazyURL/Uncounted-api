@@ -86,6 +86,7 @@ paths: src/routes/**
 | | `/api/admin/export-requests/:id/utterances/review` | PUT | 어드민 | 발화 검수 일괄 반영 (202 비동기 → review_sync_status 폴링) |
 | | `/api/admin/utterances/:id/review-status` | PATCH | 어드민 | 단건 검수 상태 즉시 저장 (검수 화면 토글) |
 | | `/api/admin/utterances/:id/pii` | GET/PUT | 어드민 | PII 구간 조회/저장 (응답 마스킹 메타 포함) |
+| | `/api/admin/utterances/:id/raw-transcript` | GET | 어드민 | 단일 발화 원문 전사 조회 (수동 PII span 등록 UI 전용, 캐시·로깅 금지) |
 | | `/api/admin/utterances/:id/apply-mask` | POST | 어드민 | 마스킹 실행 + 감사 메타 기록 (jobId 시 작업 로그) |
 | | `/api/admin/utterances/:id/restore-original` | POST | 어드민 | 원본 복원 + 마스킹 메타 전체 리셋 |
 | | `/api/admin/utterances/labels` | POST | 어드민 | 발화 라벨 배치 저장 |

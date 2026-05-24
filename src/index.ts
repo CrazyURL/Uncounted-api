@@ -39,6 +39,7 @@ import adminTraining from './routes/admin-training.js'
 import adminDeliveryPackages from './routes/admin-delivery-packages.js'
 import adminPiiCandidates from './routes/admin-pii-candidates.js'
 import adminPiiAnnotations from './routes/admin-pii-annotations.js'
+import adminUtterancesRawTranscript from './routes/admin-utterances-raw-transcript.js'
 import calls from './routes/calls.js'
 import contracts from './routes/contracts.js'
 
@@ -126,6 +127,7 @@ app.route('/api/admin', adminTraining)
 app.route('/api/admin', adminDeliveryPackages)
 app.route('/api/admin', adminPiiCandidates)
 app.route('/api/admin', adminPiiAnnotations)
+app.route('/api/admin', adminUtterancesRawTranscript)
 app.route('/api/user', userRewards)
 app.route('/api/logging', logging)
 app.route('/api/consent', consent)
