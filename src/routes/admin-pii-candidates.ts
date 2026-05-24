@@ -15,6 +15,11 @@ import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
 import { buildSnippet, isValidDecision, buildDecisionUpdate } from '../lib/pii/candidateReview.js'
+import {
+  extractSpan,
+  hashNormalized,
+  mapPredictedToAnnotationType,
+} from '../lib/pii/annotationReview.js'
 
 const adminPiiCandidates = new Hono()
 
@@ -165,6 +170,103 @@ adminPiiCandidates.post('/pii-candidates/:id{[0-9a-f-]+}/decision', async (c) =>
   }
 
   return c.json({ success: true, data: { id, decision: body.decision, status: 'decided' } })
+})
+
+// ── POST /api/admin/pii-candidates/:id/promote ──────────────────────
+// PR-P2A-2: confirmed/corrected 후보를 pii_annotations 로 "원자적" 승격.
+// candidate verdict 업데이트 + annotation 삽입을 단일 RPC(트랜잭션)로 처리한다.
+//   - confirmed → annotation.pii_type 는 predicted_type 을 따른다.
+//   - corrected → selected_type 필수, annotation.pii_type 는 selected_type 을 따른다.
+//   - rejected/skipped 는 본 엔드포인트 대상이 아니다(기존 /decision 사용).
+// 안전: 응답/로그에 원문 PII 미포함. 전사 span 은 hash 산출 후 폐기.
+adminPiiCandidates.post('/pii-candidates/:id{[0-9a-f-]+}/promote', async (c) => {
+  const id = c.req.param('id')
+  const body = getBody<{ decision?: string; selected_type?: string }>(c)
+  const decision = body?.decision
+
+  if (decision !== 'confirmed' && decision !== 'corrected') {
+    return c.json({ error: 'invalid decision for promote (confirmed|corrected)' }, 400)
+  }
+
+  const selectedTypeRaw = typeof body?.selected_type === 'string' ? body.selected_type.trim() : ''
+  if (decision === 'corrected' && selectedTypeRaw.length === 0) {
+    return c.json({ error: 'selected_type required when decision=corrected' }, 400)
+  }
+
+  // 후보 조회(404 판정 + offset/예측유형 확보).
+  const { data: candidate, error: fetchErr } = await supabaseAdmin
+    .from('pii_candidates')
+    .select('id, utterance_id, predicted_type, char_start, char_end')
+    .eq('id', id)
+    .single()
+
+  if (fetchErr || !candidate) {
+    return c.json({ error: 'candidate not found' }, 404)
+  }
+  const cand = candidate as unknown as {
+    id: string
+    utterance_id: string
+    predicted_type: string
+    char_start: number | null
+    char_end: number | null
+  }
+
+  // confirmed → predicted_type, corrected → selected_type 를 annotation enum 으로 매핑.
+  const sourceTypeLabel = decision === 'corrected' ? selectedTypeRaw : cand.predicted_type
+  const annotationPiiType = mapPredictedToAnnotationType(sourceTypeLabel)
+  if (!annotationPiiType) {
+    return c.json({ error: `unmappable pii type: ${decision === 'corrected' ? 'selected_type' : 'predicted_type'}` }, 400)
+  }
+
+  // 후보에 기록할 정정 유형(한글 라벨). confirmed 는 predicted_type 을 그대로 확정으로 기록.
+  const adminSelectedType = decision === 'corrected' ? selectedTypeRaw : cand.predicted_type
+
+  // 전사 span → 단방향 hash (원문 미저장/미반환). offset 누락 시 null 허용.
+  let normalizedTextHash: string | null = null
+  if (typeof cand.char_start === 'number' && typeof cand.char_end === 'number') {
+    const { data: utt, error: uttErr } = await supabaseAdmin
+      .from('utterances')
+      .select('transcript_text')
+      .eq('id', cand.utterance_id)
+      .single()
+    if (uttErr) {
+      return c.json({ error: uttErr.message }, 500)
+    }
+    const text = (utt as { transcript_text: string | null } | null)?.transcript_text ?? null
+    const span = extractSpan(text, cand.char_start, cand.char_end)
+    normalizedTextHash = hashNormalized(span)
+  }
+
+  const reviewedBy = c.get('userId') as string
+  const reviewedAt = new Date().toISOString()
+
+  const { data: annotationId, error: rpcErr } = await supabaseAdmin.rpc(
+    'promote_pii_candidate_to_annotation',
+    {
+      p_candidate_id: id,
+      p_decision: decision,
+      p_admin_selected_type: adminSelectedType,
+      p_annotation_pii_type: annotationPiiType,
+      p_normalized_text_hash: normalizedTextHash,
+      p_reviewed_by: reviewedBy,
+      p_reviewed_at: reviewedAt,
+    },
+  )
+
+  if (rpcErr) {
+    return c.json({ error: rpcErr.message }, 500)
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      id,
+      decision,
+      status: 'decided',
+      pii_type: annotationPiiType,
+      annotation_id: annotationId ?? null,
+    },
+  })
 })
 
 export default adminPiiCandidates
