@@ -76,3 +76,29 @@ describe('maskKnownNames', () => {
     }
   })
 })
+
+describe('parseNameDenylist — 따옴표 trim / NFC 정규화', () => {
+  it('값 전체가 따옴표로 감싸진 경우 각 항목의 앞뒤 따옴표를 제거한다', () => {
+    expect(parseNameDenylist('"홍길동, 성춘향"')).toEqual(['홍길동', '성춘향'])
+    expect(parseNameDenylist("'홍길동','성춘향'")).toEqual(['홍길동', '성춘향'])
+  })
+
+  it('NFD(조합형) 입력을 NFC 로 정규화한다', () => {
+    const nfd = FAKE.normalize('NFD')
+    expect(nfd).not.toBe(FAKE) // 사전조건: 조합형은 코드포인트가 다름
+    expect(parseNameDenylist(nfd)).toEqual([FAKE]) // NFC 로 정규화되어 동일
+  })
+})
+
+describe('maskKnownNames — NFC/NFD 정규화 매칭', () => {
+  it('전사 텍스트가 NFD 여도 NFC denylist 로 매칭·치환한다', () => {
+    const nfdText = `메일은 ${FAKE.normalize('NFD')} 소장님 보내줘`
+    expect(maskKnownNames(nfdText, [FAKE])).toBe(`메일은 ${NAME_MASK_TOKEN} 소장님 보내줘`)
+  })
+
+  it('denylist 가 NFD 여도(인자 직접 전달) 정규화 후 매칭한다', () => {
+    expect(maskKnownNames(`${FAKE} 소장님`, [FAKE.normalize('NFD')])).toBe(
+      `${NAME_MASK_TOKEN} 소장님`,
+    )
+  })
+})
