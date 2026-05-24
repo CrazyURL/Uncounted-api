@@ -98,6 +98,9 @@ function truncateArrays(value: unknown, limit = 5): unknown {
 export async function devBodyLogger(c: Context, next: Next) {
   await next()
   if (process.env.NODE_ENV === 'production') return
+  // PII-1B: /pii-candidates 응답은 후보 주변 스니펫(candidate_text 원문 일부)을 포함한다.
+  // raw PII 가 Render dev stdout 로 영속 기록되지 않도록 본 경로의 응답 로깅을 스킵한다.
+  if (c.req.path.includes('/pii-candidates')) return
   try {
     const cloned = c.res.clone()
     const body = await cloned.json()
