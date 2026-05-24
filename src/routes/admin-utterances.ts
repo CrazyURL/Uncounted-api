@@ -12,6 +12,7 @@ import { GetObjectCommand } from '@aws-sdk/client-s3'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { validatePiiIntervals } from './admin-utterances-helpers.js'
+import { isUtteranceDeliverable } from '../lib/export/utteranceDeliverability.js'
 
 const execFileAsync = promisify(execFile)
 const adminUtterances = new Hono()
@@ -737,6 +738,83 @@ adminUtterances.post('/utterances/:id/quality-review', async (c) => {
 
     if (error) return c.json({ error: error.message }, 500)
     return c.json({ data: { ok: true, status, reason: resetToPending ? null : (reason ?? null) } })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * GET /admin/quality-review/report
+ * 저품질 검수 큐 리포트 집계 (발화 수 기준).
+ *
+ * Query:
+ *   session_id — 특정 세션 범위 (해당 세션 전체 발화)
+ *   filter=quality_c — 전역 C등급(+파생 C) 큐 범위
+ *   (둘 중 하나 필수)
+ *
+ * 설계 §6.1. C등급 판정은 admin-reviews 의 C 필터 조건과 동일:
+ *   quality_grade='C' OR (quality_grade IS NULL AND quality_score < 50)
+ */
+adminUtterances.get('/quality-review/report', async (c) => {
+  const sessionId = c.req.query('session_id') ?? null
+  const filter = c.req.query('filter') ?? null
+
+  if (!sessionId && filter !== 'quality_c') {
+    return c.json({ error: 'session_id or filter=quality_c is required' }, 400)
+  }
+
+  const cols = 'quality_grade, quality_score, quality_review_status, quality_exclusion_reason'
+
+  try {
+    let query = supabaseAdmin.from('utterances').select(cols)
+    if (sessionId) {
+      query = query.eq('session_id', sessionId).limit(50000)
+    } else {
+      // 전역 C 큐: admin-reviews.ts 의 C 필터 조건과 동일
+      query = query.or('quality_grade.eq.C,and(quality_grade.is.null,quality_score.lt.50)').limit(5000)
+    }
+
+    const { data, error } = await query
+    if (error) return c.json({ error: error.message }, 500)
+
+    const rows = (data ?? []) as Array<Record<string, unknown>>
+
+    const isCGrade = (r: Record<string, unknown>): boolean => {
+      const g = typeof r.quality_grade === 'string' ? r.quality_grade.trim().toUpperCase() : null
+      if (g === 'C') return true
+      const score = typeof r.quality_score === 'number' ? r.quality_score : null
+      return g === null && score !== null && score < 50
+    }
+
+    const statusOf = (r: Record<string, unknown>): string =>
+      typeof r.quality_review_status === 'string' ? r.quality_review_status : 'pending'
+
+    const cRows = rows.filter(isCGrade)
+    const countStatus = (status: string) => cRows.filter((r) => statusOf(r) === status).length
+
+    let finalIncluded = 0
+    for (const r of rows) {
+      if (isUtteranceDeliverable(r).included) finalIncluded += 1
+    }
+
+    return c.json({
+      data: {
+        scope: sessionId ? 'session' : 'quality_c',
+        sessionId,
+        scopeTotalUtterances: rows.length,
+        // C등급 처리 현황 (발화 수)
+        totalCUtterances: cRows.length,
+        excludedCount: countStatus('excluded_low_quality'),
+        approvedExceptionCount: countStatus('approved_exception'),
+        transcriptEditCount: countStatus('needs_transcript_edit'),
+        piiMaskingCount: countStatus('needs_pii_masking'),
+        retranscriptionCount: countStatus('needs_retranscription'),
+        pendingCount: countStatus('pending'),
+        // 최종 납품 판정 (범위 전체 기준)
+        finalIncludedUtterances: finalIncluded,
+        finalExcludedUtterances: rows.length - finalIncluded,
+      },
+    })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
