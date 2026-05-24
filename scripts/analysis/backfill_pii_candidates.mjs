@@ -53,15 +53,23 @@ const MODEL_VERSION = 'detect_spans_bootstrap_v1'
 const NAME_PII_TYPE = '이름'
 const HONORIFIC_TITLES = ['님', '씨', '매니저', '과장', '차장', '부장', '팀장', '대표', '사장', '이사', '상무', '전무', '회장', '선생', '교수', '박사', '원장', '실장', '대리', '주임', '사원', '국장', '처장', '위원', '총장', '학장', '소장', '반장', '조장', '센터장', '본부장', '지점장', '연구원', '책임', '수석', '전임', '감독', '코치', '기사', '고객']
 const NAME_STOPWORDS = new Set(['안녕하', '감사합', '죄송합', '말씀드', '그러니', '그래서', '그러면', '하니까'])
+// 관계/지위 호칭(이름부가 이 집합이면 드롭 — '장모님' 류 오탐 제거). 직함계는 불변.
+const KINSHIP_NONNAME = new Set(['장모', '사모', '시모', '빙모', '빙장', '처남', '처제', '형수', '제수', '형부', '매부', '동서', '시누', '올케', '며느리', '사돈', '사부', '은사', '선배', '후배', '형', '누', '아우'])
+// 호칭 부분문자열과 충돌하는 비-이름 합성명사(정확 일치 드롭).
+const NAME_FULL_DENYLIST = new Set(['주차장', '세차장'])
 function isHonorificAdjacentName(text, s, e) {
   if (!text || s == null || e == null || e <= s || s < 0 || e > text.length) return false
   const span = text.slice(s, e)
   if (NAME_STOPWORDS.has(span)) return false
+  if (NAME_FULL_DENYLIST.has(span)) return false
   let i = e
   while (i < text.length && /\s/.test(text[i])) i++
   const w = text.slice(i, i + 6)
-  if (HONORIFIC_TITLES.some((t) => w.startsWith(t))) return true
-  return HONORIFIC_TITLES.some((t) => span.length > t.length && span.endsWith(t))
+  if (HONORIFIC_TITLES.some((t) => w.startsWith(t))) return !KINSHIP_NONNAME.has(span)
+  for (const t of HONORIFIC_TITLES) {
+    if (span.length > t.length && span.endsWith(t)) return !KINSHIP_NONNAME.has(span.slice(0, span.length - t.length))
+  }
+  return false
 }
 function filterNameCandidates(candidates, text) {
   return (candidates || []).filter((c) => c.type !== NAME_PII_TYPE || isHonorificAdjacentName(text, c.char_start, c.char_end))

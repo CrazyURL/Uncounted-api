@@ -34,6 +34,24 @@ export const NAME_STOPWORDS: ReadonlySet<string> = new Set<string>([
   '안녕하', '감사합', '죄송합', '말씀드', '그러니', '그래서', '그러면', '하니까',
 ])
 
+/**
+ * 관계/지위 호칭. "X님"·"X 님" 형태로 자주 등장하나 X 가 사람 이름이 아닌 표현.
+ * (휴먼 검수 실측 2026-05-24: '장모님' 류가 endsWith('님') suffix 매치로 이름 오탐 다발.)
+ * 이름부(span 또는 span 에서 호칭을 뗀 부분)가 이 집합이면 드롭. 직함계(매니저/책임/차장…)는 불변.
+ */
+export const KINSHIP_NONNAME: ReadonlySet<string> = new Set<string>([
+  '장모', '사모', '시모', '빙모', '빙장', '처남', '처제', '형수', '제수', '형부', '매부',
+  '동서', '시누', '올케', '며느리', '사돈', '사부', '은사', '선배', '후배', '형', '누', '아우',
+])
+
+/**
+ * span 전체가 비-이름 합성명사인데 호칭 부분문자열과 충돌하는 경우(예: '주차장'→'차장').
+ * 정확 일치로만 드롭(보수적·확장 가능). 실측에서 '주차장'(주차장→차장) 오탐 확인.
+ */
+export const NAME_FULL_DENYLIST: ReadonlySet<string> = new Set<string>([
+  '주차장', '세차장',
+])
+
 /** detect-batch 후보 1건(원문 미포함 — type/offset/confidence/tier 만). */
 export interface DetectedCandidateLike {
   type: string
@@ -59,7 +77,8 @@ function honorificAt(text: string, start: number): string | null {
  *
  * - 후보 span 바로 뒤(공백 허용)에 호칭이 오거나,
  * - span 자체가 호칭으로 끝나는 경우(탐지기가 호칭까지 span 에 포함한 경우) true.
- * - span 텍스트가 NAME_STOPWORDS 에 정확히 해당하면 false(흔한 비-이름 표현).
+ * - span 텍스트가 NAME_STOPWORDS / NAME_FULL_DENYLIST 에 해당하면 false(흔한 비-이름 표현).
+ * - 이름부가 KINSHIP_NONNAME(관계/지위 호칭)이면 false('장모님' 류 오탐 제거).
  */
 export function isHonorificAdjacentName(text: string, charStart: number, charEnd: number): boolean {
   if (!text || charStart == null || charEnd == null || charEnd <= charStart) return false
@@ -67,13 +86,18 @@ export function isHonorificAdjacentName(text: string, charStart: number, charEnd
 
   const span = text.slice(charStart, charEnd)
   if (NAME_STOPWORDS.has(span)) return false
+  if (NAME_FULL_DENYLIST.has(span)) return false
 
-  // 1) span 바로 뒤 호칭.
-  if (honorificAt(text, charEnd) != null) return true
+  // 1) span 바로 뒤 호칭. 단 이름부(span)가 관계호칭이면 드롭(예: '장모' + '님').
+  if (honorificAt(text, charEnd) != null) return !KINSHIP_NONNAME.has(span)
 
   // 2) span 자체가 호칭으로 끝남(탐지기가 호칭 포함 span 반환한 경우).
+  //    호칭을 뗀 이름부가 관계호칭이면 드롭(예: '장모님' → 이름부 '장모').
   for (const token of HONORIFIC_TITLES) {
-    if (span.length > token.length && span.endsWith(token)) return true
+    if (span.length > token.length && span.endsWith(token)) {
+      const namePart = span.slice(0, span.length - token.length)
+      return !KINSHIP_NONNAME.has(namePart)
+    }
   }
   return false
 }
