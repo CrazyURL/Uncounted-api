@@ -101,6 +101,9 @@ export async function devBodyLogger(c: Context, next: Next) {
   // PII-1B: /pii-candidates 응답은 후보 주변 스니펫(candidate_text 원문 일부)을 포함한다.
   // raw PII 가 Render dev stdout 로 영속 기록되지 않도록 본 경로의 응답 로깅을 스킵한다.
   if (c.req.path.includes('/pii-candidates')) return
+  // PR-P2B-A: /utterances/:id/raw-transcript 응답은 마스킹 전 원문 전사 전체를 포함한다.
+  // 동일하게 raw PII 가 dev stdout 에 영속 기록되지 않도록 응답 로깅을 스킵한다.
+  if (c.req.path.includes('/raw-transcript')) return
   try {
     const cloned = c.res.clone()
     const body = await cloned.json()
