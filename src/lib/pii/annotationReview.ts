@@ -92,6 +92,45 @@ export function hashNormalized(text: string | null | undefined): string | null {
   return createHash('sha256').update(normalized, 'utf8').digest('hex')
 }
 
+// ── 후보 타입(한글) → annotation pii_type(enum) 매핑 (PR-P2A-2) ──────
+// pii_candidates.predicted_type / admin_selected_type 는 한글 라벨(이름/전화번호/…)로 저장된다.
+// 승격 시 annotation.pii_type(enum)으로 변환해야 한다. 매핑 불가한 값은 null → 호출부가 거부.
+// (admin 화면 라벨 집합: 이름/전화번호/주소/계좌번호/주민번호/IP/이메일/기관·회사명/기타)
+export const KOREAN_PII_TYPE_MAP: Readonly<Record<string, PiiType>> = {
+  이름: 'name',
+  성명: 'name',
+  전화번호: 'phone',
+  휴대폰번호: 'phone',
+  계좌번호: 'account',
+  주소: 'address',
+  IP주소: 'ip',
+  IP: 'ip',
+  이메일: 'email',
+  주민등록번호: 'resident_id',
+  주민번호: 'resident_id',
+  기관명: 'organization',
+  회사명: 'organization',
+  '기관/회사명': 'organization',
+  '기관·회사명': 'organization',
+  기타: 'other',
+}
+
+/**
+ * 한글 후보 타입 라벨을 annotation pii_type(enum)으로 변환한다(순수).
+ * 이미 enum 값(name/phone/…)이면 그대로 통과시켜 입력 형태에 관대하게 처리한다.
+ * 매핑 불가 / nullish / 비문자열은 null → 호출부에서 승격을 거부해야 한다.
+ */
+export function mapPredictedToAnnotationType(raw: string | null | undefined): PiiType | null {
+  if (!raw || typeof raw !== 'string') {
+    return null
+  }
+  const trimmed = raw.trim()
+  if (isValidPiiType(trimmed)) {
+    return trimmed
+  }
+  return KOREAN_PII_TYPE_MAP[trimmed] ?? null
+}
+
 // ── insert 행 생성 ───────────────────────────────────────────────────
 export interface ManualAnnotationParams {
   utteranceId: string

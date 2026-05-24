@@ -7,6 +7,9 @@ import {
   normalizeForHash,
   hashNormalized,
   buildManualAnnotationInsert,
+  mapPredictedToAnnotationType,
+  KOREAN_PII_TYPE_MAP,
+  VALID_PII_TYPES,
 } from './annotationReview.js'
 
 describe('enum validators', () => {
@@ -131,5 +134,55 @@ describe('buildManualAnnotationInsert', () => {
     expect(keys).not.toContain('candidate_text')
     expect(keys).not.toContain('snippet')
     expect(keys).not.toContain('matched_text')
+  })
+})
+
+describe('mapPredictedToAnnotationType (PR-P2A-2)', () => {
+  it('maps every Korean candidate label to a valid enum pii_type', () => {
+    for (const [korean, expected] of Object.entries(KOREAN_PII_TYPE_MAP)) {
+      const mapped = mapPredictedToAnnotationType(korean)
+      expect(mapped).toBe(expected)
+      expect((VALID_PII_TYPES as readonly string[]).includes(mapped as string)).toBe(true)
+    }
+  })
+
+  it('maps the live dev predicted_type values seen in pii_candidates', () => {
+    // 이름(306), IP주소(5), 전화번호(1), 계좌번호(1)
+    expect(mapPredictedToAnnotationType('이름')).toBe('name')
+    expect(mapPredictedToAnnotationType('IP주소')).toBe('ip')
+    expect(mapPredictedToAnnotationType('전화번호')).toBe('phone')
+    expect(mapPredictedToAnnotationType('계좌번호')).toBe('account')
+  })
+
+  it('promotes 주민등록번호 to first-class resident_id (not other)', () => {
+    expect(mapPredictedToAnnotationType('주민등록번호')).toBe('resident_id')
+    expect(mapPredictedToAnnotationType('주민번호')).toBe('resident_id')
+  })
+
+  it('maps organization aliases', () => {
+    expect(mapPredictedToAnnotationType('기관명')).toBe('organization')
+    expect(mapPredictedToAnnotationType('회사명')).toBe('organization')
+    expect(mapPredictedToAnnotationType('기관/회사명')).toBe('organization')
+  })
+
+  it('passes through values that are already valid enums', () => {
+    expect(mapPredictedToAnnotationType('name')).toBe('name')
+    expect(mapPredictedToAnnotationType('resident_id')).toBe('resident_id')
+    expect(mapPredictedToAnnotationType('organization')).toBe('organization')
+  })
+
+  it('trims surrounding whitespace before mapping', () => {
+    expect(mapPredictedToAnnotationType('  이름  ')).toBe('name')
+    expect(mapPredictedToAnnotationType(' name ')).toBe('name')
+  })
+
+  it('returns null for unknown, empty, or non-string input', () => {
+    expect(mapPredictedToAnnotationType('성씨')).toBeNull()
+    expect(mapPredictedToAnnotationType('unknown')).toBeNull()
+    expect(mapPredictedToAnnotationType('')).toBeNull()
+    expect(mapPredictedToAnnotationType('   ')).toBeNull()
+    expect(mapPredictedToAnnotationType(null)).toBeNull()
+    expect(mapPredictedToAnnotationType(undefined)).toBeNull()
+    expect(mapPredictedToAnnotationType(123 as unknown as string)).toBeNull()
   })
 })
