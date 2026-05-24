@@ -6,6 +6,8 @@
 // 안전 계약: 입력/출력 어디에도 원문 PII(matched_text/original_text) 가 포함되지 않는다.
 // detect-batch 응답은 type/offset/confidence/tier 만 담고 있으며, 본 모듈은 그대로 보존한다.
 
+import { filterCandidatesByPrecision } from './nameHonorificFilter.js'
+
 export type ConfidenceTier = 'auto_confirmed' | 'needs_human_decision' | 'auto_rejected'
 
 export interface DetectBatchItem {
@@ -92,4 +94,21 @@ export function toCandidateRows(
     model_version: modelVersion,
     status: 'pending',
   }))
+}
+
+/**
+ * 정밀도 필터를 적용해 후보 → pii_candidates 행으로 매핑한다(PII-1A 보강).
+ * predicted_type='이름' 후보는 호칭/직함 인접(고정밀)일 때만 채택, 구조 PII 는 그대로 통과.
+ * 라이브 적재 경로는 toCandidateRows 대신 이 함수를 사용해 관리자 큐 노이즈를 줄인다.
+ *
+ * @param text 해당 발화 transcript_text — 호칭 인접 검사용. 행에는 저장되지 않는다(offset만).
+ */
+export function toCandidateRowsFiltered(
+  utteranceId: string,
+  sessionId: string,
+  candidates: ReadonlyArray<DetectedCandidate>,
+  text: string,
+  modelVersion: string | null,
+): PiiCandidateRow[] {
+  return toCandidateRows(utteranceId, sessionId, filterCandidatesByPrecision(candidates, text), modelVersion)
 }
