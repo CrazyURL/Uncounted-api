@@ -61,6 +61,48 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
   if (error) return c.json({ error: error.message }, 500)
 
   const rows = (data ?? []) as unknown as Array<Record<string, unknown>>
+
+  // H2b — 사람 emotion 라벨 보강 읽기 (새로고침 후 배지 유지용).
+  // utterances.emotion(모델 출력)은 절대 건드리지 않음 — 별도 테이블 utterance_human_labels.
+  // 정렬: updated_at desc → id desc 로 결정적 tie-break 후, utterance 당 first row = 최신.
+  // 단일 labeler 운영(설계 §10): 다중 labeler IAA/합의는 미도입 — 지금은 "최신 행" 채택.
+  // 실패 시 graceful: human_label 전부 null 로, 목록 응답은 막지 않음.
+  const humanLabelByUtt = new Map<string, {
+    fine_label: string | null
+    emotion_category: string | null
+    category_decision: string | null
+    category_source: string | null
+    updated_at: string | null
+  }>()
+  const uttIds = rows.map((r) => r.id as string).filter(Boolean)
+  if (uttIds.length > 0) {
+    const { data: hlRows, error: hlError } = await supabaseAdmin
+      .from('utterance_human_labels')
+      .select('utterance_id, fine_label, emotion_category, category_decision, category_source, updated_at')
+      .in('utterance_id', uttIds)
+      .eq('label_type', 'emotion')
+      .order('updated_at', { ascending: false })
+      .order('id', { ascending: false })
+      // PostgREST 기본 1000행 클립 방지 — 목록 cap(5000)에 맞춤.
+      // 단일 labeler + UNIQUE(utterance_id,label_type,labeler_id)라 라벨된 utterance당 1행이므로 충분.
+      .limit(5000)
+    if (hlError) {
+      console.error('[admin-utterances-v2] human_label query error:', hlError.message)
+    } else {
+      for (const hl of (hlRows ?? []) as Array<Record<string, unknown>>) {
+        const uid = hl.utterance_id as string
+        if (!uid || humanLabelByUtt.has(uid)) continue  // first = 최신
+        humanLabelByUtt.set(uid, {
+          fine_label: (hl.fine_label as string) ?? null,
+          emotion_category: (hl.emotion_category as string) ?? null,
+          category_decision: (hl.category_decision as string) ?? null,
+          category_source: (hl.category_source as string) ?? null,
+          updated_at: (hl.updated_at as string) ?? null,
+        })
+      }
+    }
+  }
+
   const utterances = rows.map((row) => {
     const startMs = (row.start_ms as number) ?? 0
     const endMs = (row.end_ms as number) ?? 0
@@ -119,6 +161,8 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
           : null,
       honorific_level: (row.honorific_level as string) ?? null,
       confidence_tier: (row.confidence_tier as string) ?? null,
+      // H2b — 사람 emotion 라벨 (최신 1행). 없으면 null. labeler 식별자는 응답에서 제외.
+      human_label: humanLabelByUtt.get(row.id as string) ?? null,
     }
   })
 
