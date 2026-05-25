@@ -5,7 +5,7 @@ import { Hono } from 'hono'
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie'
 import type { Context } from 'hono'
 import { createHash, randomBytes, randomUUID } from 'crypto'
-import { supabaseAdmin } from '../lib/supabase.js'
+import { supabaseAdmin, supabaseAuth } from '../lib/supabase.js'
 import { encryptId, decryptId } from '../lib/crypto.js'
 import { getBody } from '../lib/middleware.js'
 
@@ -68,7 +68,8 @@ auth.post('/signin', async (c) => {
   }
 
   try {
-    const { data, error } = await supabaseAdmin.auth.signInWithPassword({
+    // 세션을 설정하는 호출은 supabaseAuth 로 한다(supabaseAdmin 오염 방지).
+    const { data, error } = await supabaseAuth.auth.signInWithPassword({
       email,
       password,
     })
@@ -273,7 +274,8 @@ auth.post('/refresh', async (c) => {
   }
 
   try {
-    const { data, error } = await supabaseAdmin.auth.refreshSession({
+    // 세션을 설정하는 호출은 supabaseAuth 로 한다(supabaseAdmin 오염 방지).
+    const { data, error } = await supabaseAuth.auth.refreshSession({
       refresh_token: raw_refresh_token,
     })
 
