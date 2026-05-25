@@ -211,3 +211,84 @@ export function computeEmotionGate(stats: HumanLabelStats): GateResult {
   // E0
   return { gate: 'E0', nextRequired: { metric: 'resolved_total', need: 10 - stats.resolvedTotal } }
 }
+
+// ── 사람 수동 라벨 저장 (PR-H2a-api) ────────────────────────────────────────
+
+export const LABEL_CONFIDENCES = ['high', 'medium', 'low'] as const
+export function isLabelConfidence(v: unknown): v is (typeof LABEL_CONFIDENCES)[number] {
+  return typeof v === 'string' && (LABEL_CONFIDENCES as readonly string[]).includes(v)
+}
+
+export interface HumanLabelInput {
+  fine_label?: unknown
+  emotion_category?: unknown
+  category_decision?: unknown
+  label_confidence?: unknown
+  note?: unknown
+}
+
+export interface HumanLabelUpsertRow {
+  utterance_id: string
+  session_id: string
+  label_type: 'emotion'
+  fine_label: string | null
+  emotion_category: string | null
+  category_decision: CategoryDecision
+  category_source: 'manual' | null
+  label_confidence: string | null
+  note: string | null
+  labeler_id: string
+  labeler_email: string | null
+  updated_at: string
+}
+
+export interface HumanLabelUpsertContext {
+  utteranceId: string
+  sessionId: string
+  labelerId: string
+  labelerEmail?: string | null
+}
+
+/**
+ * 관리자 수동 human-label 저장용 upsert row 빌드 + 검증 (DB CHECK 미러).
+ * - category_source: resolved ⇒ 'manual', 그 외(pending_context/undecidable) ⇒ null.
+ * - 반환: { error } (400 사유 문자열) 또는 { row }.
+ * - utterances.emotion 은 본 경로가 절대 건드리지 않는다(별도 테이블만 write).
+ */
+export function buildHumanLabelUpsert(
+  input: HumanLabelInput,
+  ctx: HumanLabelUpsertContext,
+  nowIso: string,
+): { error: string } | { row: HumanLabelUpsertRow } {
+  const fine_label = typeof input.fine_label === 'string' ? input.fine_label : null
+  const emotion_category = typeof input.emotion_category === 'string' ? input.emotion_category : null
+  const category_decision = input.category_decision
+  const label_confidence = typeof input.label_confidence === 'string' ? input.label_confidence : null
+  const note = typeof input.note === 'string' && input.note.length > 0 ? input.note : null
+
+  if (!isCategoryDecision(category_decision)) return { error: 'invalid category_decision' }
+  const category_source: 'manual' | null = category_decision === 'resolved' ? 'manual' : null
+
+  const verr = validateHumanLabelRow({ fine_label, emotion_category, category_decision, category_source })
+  if (verr) return { error: verr }
+  if (label_confidence !== null && !isLabelConfidence(label_confidence)) {
+    return { error: 'invalid label_confidence (high|medium|low)' }
+  }
+
+  return {
+    row: {
+      utterance_id: ctx.utteranceId,
+      session_id: ctx.sessionId,
+      label_type: 'emotion',
+      fine_label,
+      emotion_category,
+      category_decision,
+      category_source,
+      label_confidence,
+      note,
+      labeler_id: ctx.labelerId,
+      labeler_email: ctx.labelerEmail ?? null,
+      updated_at: nowIso,
+    },
+  }
+}

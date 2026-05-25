@@ -1,32 +1,34 @@
-// ── Admin Emotion Human Label API (PR-H1a: DDL + 읽기 골격) ─────────────
-// utterance_human_labels(사람/자동파생 emotion 라벨)의 검수 큐 조회 + 진행도 stats.
+// ── Admin Emotion Human Label API (PR-H1a 읽기 골격 + PR-H2a-api 저장) ──────
+// utterance_human_labels(사람/자동파생 emotion 라벨)의 검수 큐 조회 + 진행도 stats + 사람 라벨 저장.
 // 설계: scripts/analysis/design_human_emotion_label_loop_20260524.md
 //
 // 라우트:
-//   GET /api/admin/emotion-labels/queue — 검수 큐(저신뢰 utterances + human pending/undecidable)
-//   GET /api/admin/emotion-labels/stats — 진행도 집계 + 학습 게이트(§11)
+//   GET  /api/admin/emotion-labels/queue        — 검수 큐(저신뢰 utterances + human pending/undecidable)
+//   GET  /api/admin/emotion-labels/stats        — 진행도 집계 + 학습 게이트(§11)
+//   POST /api/admin/utterances/:id/human-label  — 사람 emotion 라벨 저장(upsert) [PR-H2a-api]
 //
-// 범위 한정(PR-H1a):
-//   - 읽기 전용. POST(라벨 저장)/역마이그/PATCH 차단/UI 는 본 PR 에서 하지 않는다(H1b/H2).
-//   - utterances.emotion(모델 출력)은 절대 수정하지 않는다.
-//
+// 불변식: utterances.emotion(모델 출력)은 절대 수정하지 않는다. 사람 라벨은 utterance_human_labels 에만.
 // 안전 계약: 발화 원문은 기존 admin utterance 정책과 동일하게 maskKnownNames + 200자 슬라이스.
 
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
-import { authMiddleware, adminMiddleware } from '../lib/middleware.js'
+import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
 import { maskKnownNames } from '../lib/piiNameMask.js'
 import {
   LOW_CONFIDENCE_THRESHOLD,
   summarizeHumanLabelStats,
   computeEmotionGate,
+  buildHumanLabelUpsert,
   type HumanLabelStatsRow,
+  type HumanLabelInput,
 } from '../lib/emotion/humanLabelReview.js'
 
 const adminEmotionLabels = new Hono()
 
 adminEmotionLabels.use('/emotion-labels/*', authMiddleware)
 adminEmotionLabels.use('/emotion-labels/*', adminMiddleware)
+adminEmotionLabels.use('/utterances/:id/human-label', authMiddleware)
+adminEmotionLabels.use('/utterances/:id/human-label', adminMiddleware)
 
 const DEFAULT_LIMIT = 50
 const MAX_LIMIT = 200
@@ -176,5 +178,52 @@ async function fetchTexts(utteranceIds: string[]): Promise<Map<string, string | 
   }
   return map
 }
+
+// ── POST /api/admin/utterances/:id/human-label (PR-H2a-api) ──────────────
+// body: { fine_label?, emotion_category?, category_decision, label_confidence?, note? }
+//   - category_source 는 서버가 강제(resolved⇒manual / 그 외⇒null) — 클라이언트 미신뢰.
+//   - session_id 는 utterance 에서 서버측 도출. labeler_id = auth uid, labeler_email = 조회.
+//   - utterances.emotion 은 절대 수정하지 않는다. utterance_human_labels 만 upsert.
+adminEmotionLabels.post('/utterances/:id/human-label', async (c) => {
+  const utteranceId = c.req.param('id')
+  const body = getBody<HumanLabelInput>(c) ?? {}
+
+  // 발화 존재 확인 + session_id 서버측 도출(클라이언트 미신뢰).
+  const { data: utt, error: uttErr } = await supabaseAdmin
+    .from('utterances')
+    .select('id, session_id')
+    .eq('id', utteranceId)
+    .single()
+  if (uttErr || !utt) return c.json({ error: '발화를 찾을 수 없습니다.' }, 404)
+  const utterance = utt as { id: string; session_id: string }
+
+  const labelerId = c.get('userId') as string
+  let labelerEmail: string | null = null
+  try {
+    const { data: u } = await supabaseAdmin.auth.admin.getUserById(labelerId)
+    labelerEmail = u?.user?.email ?? null
+  } catch {
+    labelerEmail = null
+  }
+
+  const built = buildHumanLabelUpsert(
+    body,
+    { utteranceId: utterance.id, sessionId: utterance.session_id, labelerId, labelerEmail },
+    new Date().toISOString(),
+  )
+  if ('error' in built) return c.json({ error: built.error }, 400)
+
+  // 검수자 1인당 발화·타입당 1행. 재저장 시 갱신(upsert).
+  const { data, error } = await supabaseAdmin
+    .from('utterance_human_labels')
+    .upsert(built.row, { onConflict: 'utterance_id,label_type,labeler_id' })
+    .select(
+      'id, utterance_id, session_id, label_type, fine_label, emotion_category, category_decision, category_source, label_confidence, note, labeler_id, created_at, updated_at',
+    )
+    .single()
+  if (error) return c.json({ error: error.message }, 500)
+
+  return c.json({ success: true, data }, 200)
+})
 
 export default adminEmotionLabels
