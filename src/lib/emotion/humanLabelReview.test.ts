@@ -188,3 +188,69 @@ describe('computeEmotionGate (§11.2)', () => {
     expect(g.nextRequired).toBeNull()
   })
 })
+
+import { buildHumanLabelUpsert } from './humanLabelReview.js'
+
+describe('buildHumanLabelUpsert (PR-H2a-api 저장)', () => {
+  const ctx = { utteranceId: 'utt_1', sessionId: 'sess_1', labelerId: 'uid-9', labelerEmail: 'a@b.c' }
+  const NOW = '2026-05-25T00:00:00.000Z'
+
+  it('resolved + fine + category → row, source=manual, utterances.emotion 무관', () => {
+    const r = buildHumanLabelUpsert({ fine_label: '기쁨', emotion_category: '긍정', category_decision: 'resolved' }, ctx, NOW)
+    expect('row' in r).toBe(true)
+    if ('row' in r) {
+      expect(r.row.category_source).toBe('manual')
+      expect(r.row.label_type).toBe('emotion')
+      expect(r.row.utterance_id).toBe('utt_1')
+      expect(r.row.session_id).toBe('sess_1')
+      expect(r.row.labeler_id).toBe('uid-9')
+      expect(r.row.labeler_email).toBe('a@b.c')
+      expect(r.row.updated_at).toBe(NOW)
+    }
+  })
+
+  it('undecidable → category/source null 허용, fine null 허용', () => {
+    const r = buildHumanLabelUpsert({ category_decision: 'undecidable' }, ctx, NOW)
+    expect('row' in r).toBe(true)
+    if ('row' in r) {
+      expect(r.row.category_source).toBeNull()
+      expect(r.row.emotion_category).toBeNull()
+      expect(r.row.fine_label).toBeNull()
+    }
+  })
+
+  it('resolved 인데 emotion_category 누락 → error(400 사유)', () => {
+    const r = buildHumanLabelUpsert({ fine_label: '기쁨', category_decision: 'resolved' }, ctx, NOW)
+    expect('error' in r).toBe(true)
+    if ('error' in r) expect(r.error).toMatch(/resolved requires fine_label and emotion_category/)
+  })
+
+  it('resolved 인데 fine_label 누락 → error', () => {
+    const r = buildHumanLabelUpsert({ emotion_category: '긍정', category_decision: 'resolved' }, ctx, NOW)
+    expect('error' in r).toBe(true)
+  })
+
+  it('잘못된 category_decision → error', () => {
+    const r = buildHumanLabelUpsert({ category_decision: 'bogus' }, ctx, NOW)
+    expect('error' in r && /invalid category_decision/.test(r.error)).toBe(true)
+  })
+
+  it('잘못된 label_confidence → error', () => {
+    const r = buildHumanLabelUpsert({ category_decision: 'undecidable', label_confidence: 'huge' }, ctx, NOW)
+    expect('error' in r && /label_confidence/.test(r.error)).toBe(true)
+  })
+
+  it('note/label_confidence passthrough + email 없으면 null', () => {
+    const r = buildHumanLabelUpsert(
+      { fine_label: '슬픔', emotion_category: '부정', category_decision: 'resolved', label_confidence: 'high', note: '확실' },
+      { utteranceId: 'u', sessionId: 's', labelerId: 'x' },
+      NOW,
+    )
+    expect('row' in r).toBe(true)
+    if ('row' in r) {
+      expect(r.row.label_confidence).toBe('high')
+      expect(r.row.note).toBe('확실')
+      expect(r.row.labeler_email).toBeNull()
+    }
+  })
+})
