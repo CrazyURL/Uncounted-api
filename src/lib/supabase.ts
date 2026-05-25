@@ -16,7 +16,23 @@ if (!url || !serviceRoleKey) {
   )
 }
 
+// 데이터/RPC/admin 전용 클라이언트. service_role 권한으로만 동작해야 한다.
+// 주의: 이 클라이언트에 signInWithPassword / refreshSession / setSession 을 호출하지 말 것.
+// 그러면 supabase-js 가 Authorization 헤더를 사용자(authenticated) JWT 로 바꿔
+// 이후의 .from / .rpc 가 service_role 이 아닌 authenticated 로 실행된다.
+// auth flow(로그인/갱신)는 아래 supabaseAuth 를 사용한다.
 export const supabaseAdmin: SupabaseClient = createClient(url, serviceRoleKey, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false,
+  },
+})
+
+// auth flow 전용 클라이언트(로그인/토큰갱신). 사용자 세션을 설정하는 호출
+// (signInWithPassword / refreshSession / setSession)은 반드시 이 클라이언트로 한다.
+// supabaseAdmin 과 분리해 데이터 클라이언트의 service_role 신원이 오염되지 않게 한다.
+// 데이터 조회/쓰기(.from / .rpc)에는 사용하지 않는다.
+export const supabaseAuth: SupabaseClient = createClient(url, serviceRoleKey, {
   auth: {
     autoRefreshToken: false,
     persistSession: false,
