@@ -9,3 +9,6 @@ dist/
 # 벤치마크 샘플 (PII 오디오, 커밋 금지)
 benchmark-samples/
 downloads/
+
+# PII training export output (data only, not source)
+data/pii_training/
