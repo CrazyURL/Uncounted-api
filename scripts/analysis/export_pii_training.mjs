@@ -146,11 +146,46 @@ const report = {
   skipped: { count: skipped.length, by_predicted_type: dist(skipped, 'predicted_type') },
 }
 
+// ── 검수 대기(needs_human + pending) 수 ─────────────────────────────
+const prRes = await fetch(
+  `${SUPABASE_URL}/rest/v1/pii_candidates?confidence_tier=eq.needs_human_decision&status=eq.pending&select=id`,
+  { headers: { ...H, Prefer: 'count=exact', Range: '0-0' } },
+)
+const pendingReview = Number((prRes.headers.get('content-range') || '/0').split('/')[1]) || 0
+
+// ── 학습 연동 게이트 (positive/negative 임계 기반) ──────────────────
+// Gate 0/1: 학습 투입 금지(도구 준비/스모크). Gate 3+ : 학습 가능. 자동 반영은 Gate 5 + 별도 승인.
+const GATES = [
+  { id: 1, name: 'Gate 1: smoke export only', pos: 0, neg: 0, learning: false },
+  { id: 2, name: 'Gate 2: 검수 루프 검증', pos: 10, neg: 10, learning: false },
+  { id: 3, name: 'Gate 3: 학습 파일럿', pos: 50, neg: 50, learning: true },
+  { id: 4, name: 'Gate 4: detector 개선 실험', pos: 200, neg: 200, learning: true, perTypePos: 30 },
+  { id: 5, name: 'Gate 5: 정기 학습/자동반영 후보', pos: 500, neg: 500, learning: true, perTypePos: 100 },
+]
+const P = report.positive.count
+const N = report.negative.count
+let currentGate = GATES[0]
+for (const g of GATES) if (P >= g.pos && N >= g.neg) currentGate = g
+const nextGate = GATES.find((g) => g.id === currentGate.id + 1) ?? null
+const pilotGate = GATES.find((g) => g.id === 3)
+const deficitTo = (g) => (g ? { positive: Math.max(0, g.pos - P), negative: Math.max(0, g.neg - N) } : null)
+const learningEligible = currentGate.learning
+const gateReport = {
+  current_gate: currentGate.name,
+  learning_eligible: learningEligible,
+  next_gate: nextGate ? { name: nextGate.name, required: { positive: nextGate.pos, negative: nextGate.neg }, deficit: deficitTo(nextGate) } : null,
+  learning_pilot_gate: { name: pilotGate.name, required: { positive: pilotGate.pos, negative: pilotGate.neg }, deficit: deficitTo(pilotGate) },
+  pending_review_needs_human: pendingReview,
+}
+
 console.log('===== PII training export (read-only, 원문 미포함) =====')
 console.log('mode:', DRY_RUN ? 'DRY-RUN (파일 미생성)' : '파일 생성')
 console.log('positive(pii_annotations):', report.positive.count, JSON.stringify(report.positive.by_pii_type), 'source', JSON.stringify(report.positive.by_source))
 console.log('negative(rejected candidates):', report.negative.count, JSON.stringify(report.negative.by_predicted_type))
 console.log('skipped(candidates):', report.skipped.count, JSON.stringify(report.skipped.by_predicted_type))
+console.log('pending review(needs_human):', pendingReview)
+console.log('현재 게이트:', gateReport.current_gate, '| 학습 투입 가능:', learningEligible ? 'YES' : 'NO (보류)')
+console.log('학습 파일럿(Gate3) 부족분:', JSON.stringify(gateReport.learning_pilot_gate.deficit))
 console.log('원문 필드 가드: FORBIDDEN_KEYS', FORBIDDEN_KEYS.length, '종 검사 통과(예외 없음 = 원문 미포함)')
 
 if (DRY_RUN) {
@@ -185,6 +220,18 @@ const md = `# PII training export report — ${new Date().toISOString()}
 ## Skipped (pii_candidates, admin_decision='skipped' — 학습 기본 미포함)
 - count: ${report.skipped.count}
 - predicted_type: ${JSON.stringify(report.skipped.by_predicted_type)}
+
+## 학습 연동 게이트 (positive/negative 임계 기반)
+- pending review(needs_human): ${pendingReview}
+- **current_gate: ${gateReport.current_gate}**
+- **learning_eligible: ${learningEligible}** ${learningEligible ? '' : '(학습 투입 금지 — 별도 승인 + Gate 3 이상 필요)'}
+- next_gate: ${nextGate ? `${nextGate.name} (required pos≥${nextGate.pos}/neg≥${nextGate.neg}, 부족 pos ${gateReport.next_gate.deficit.positive}/neg ${gateReport.next_gate.deficit.negative})` : '(최상위)'}
+- learning_pilot_gate: ${pilotGate.name} (required pos≥${pilotGate.pos}/neg≥${pilotGate.neg}, **부족 pos ${gateReport.learning_pilot_gate.deficit.positive}/neg ${gateReport.learning_pilot_gate.deficit.negative}**)
+- 게이트 정의: Gate1 smoke / Gate2 검수루프(10·10) / Gate3 파일럿(50·50, 학습가능) / Gate4 실험(200·200, type별 pos≥30) / Gate5 정기(500·500, type별 pos≥100, 자동반영 별도승인)
+- positive type별: ${JSON.stringify(report.positive.by_pii_type)}
+- negative type별: ${JSON.stringify(report.negative.by_predicted_type)}
+
+> ⚠️ 본 export 결과는 학습에 자동 투입하지 않는다. learning_eligible=true 이고 별도 승인이 있을 때만 학습 파이프라인 연동.
 
 ## 파일
 - data/pii_training/pii_positive_annotations.jsonl
