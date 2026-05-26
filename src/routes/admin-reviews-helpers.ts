@@ -45,6 +45,24 @@ export const REVIEW_TRANSITION_SELECT = [
   ...PIPELINE_STATUS_COLUMNS,
 ].join(', ')
 
+// "처리 오류"(pipeline_failed) 판정 컬럼 단일 출처.
+// PIPELINE_STATUS_COLUMNS 와 의도적으로 다르다 — auto_label_status 를 제외한다:
+//   자동 라벨링은 학습 고도화 중 graceful skip/fail 이 정상이며(CLAUDE.md §9/§15),
+//   라벨 미산출을 "처리 오류"로 셈하면 운영자에게 실재하지 않는 오류를 노출한다.
+//   라벨 누락은 별도 신호(auto_label_status='skipped')로 다루지, 실패로 합산하지 않는다.
+// 이 상수를 reviews 목록 필터 / duration 합산 / dashboard 카운트 세 곳에서 공유해
+// "처리 오류 N건" 표시가 어긋나는 드리프트를 차단한다.
+export const PIPELINE_FAILED_COLUMNS = [
+  'gpu_upload_status',
+  'stt_status',
+  'diarize_status',
+  'gpu_pii_status',
+  'quality_status',
+] as const
+
+// supabase-js .or() 절: 위 컬럼 중 하나라도 failed 면 매칭.
+export const PIPELINE_FAILED_OR = PIPELINE_FAILED_COLUMNS.map((col) => `${col}.eq.failed`).join(',')
+
 // running 필터 OR 절 — stuck(이전 단계 완료 후 30분 초과) 세션 제외
 // threshold: ISO 8601 (Date.now() - 30min)
 export function buildRunningOrClause(threshold: string): string {
