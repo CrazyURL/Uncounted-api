@@ -8,6 +8,8 @@ import {
   REVIEW_TRANSITION_SELECT,
   PIPELINE_FAILED_COLUMNS,
   PIPELINE_FAILED_OR,
+  resolveProcessFilter,
+  PROCESS_DONE_FILTERS,
 } from './admin-reviews-helpers'
 
 const THRESHOLD = '2026-05-17T11:30:00.000Z' // 기준 시각 (now - 30min)
@@ -196,5 +198,97 @@ describe('PIPELINE_FAILED_OR — supabase .or() 절', () => {
 
   it('정확히 5개 절을 쉼표로 연결한다', () => {
     expect(PIPELINE_FAILED_OR.split(',')).toHaveLength(5)
+  })
+})
+
+// 3그룹 필터(read-only) — process_status 단일 필터를 기존 내부 필터로 매핑.
+// 레거시 pipeline_state/pipeline_failed 와 공존(shim)하고, 'done' 만 신규 절을 유발한다.
+describe('resolveProcessFilter — process_status 정규화 + 레거시 shim', () => {
+  it('pending → idle', () => {
+    expect(resolveProcessFilter({ processStatus: 'pending' })).toEqual({
+      pipelineState: 'idle',
+      pipelineFailed: false,
+      processDone: false,
+    })
+  })
+
+  it('processing → running', () => {
+    expect(resolveProcessFilter({ processStatus: 'processing' }).pipelineState).toBe('running')
+  })
+
+  it('stopped → waiting', () => {
+    expect(resolveProcessFilter({ processStatus: 'stopped' }).pipelineState).toBe('waiting')
+  })
+
+  it('failed → pipelineFailed=true (pipelineState 미설정)', () => {
+    const r = resolveProcessFilter({ processStatus: 'failed' })
+    expect(r.pipelineFailed).toBe(true)
+    expect(r.pipelineState).toBeUndefined()
+    expect(r.processDone).toBe(false)
+  })
+
+  it('done → processDone=true (pipelineState/failed 미설정)', () => {
+    const r = resolveProcessFilter({ processStatus: 'done' })
+    expect(r.processDone).toBe(true)
+    expect(r.pipelineState).toBeUndefined()
+    expect(r.pipelineFailed).toBe(false)
+  })
+
+  it('알 수 없는 process_status → 무필터(매핑 없음)', () => {
+    expect(resolveProcessFilter({ processStatus: 'bogus' })).toEqual({
+      pipelineState: undefined,
+      pipelineFailed: false,
+      processDone: false,
+    })
+  })
+
+  it('레거시 pipeline_state 가 명시되면 우선 (shim 하위호환)', () => {
+    // 레거시 pipeline_state='stuck' 은 process_status 매핑에 없는 값이라도 그대로 보존
+    expect(resolveProcessFilter({ pipelineState: 'stuck', processStatus: 'pending' }).pipelineState).toBe('stuck')
+  })
+
+  it('레거시 pipeline_failed=true 보존 + process_status=done 과 독립 공존', () => {
+    const r = resolveProcessFilter({ pipelineFailed: true, processStatus: 'done' })
+    expect(r.pipelineFailed).toBe(true) // 회귀: 기존 pipeline_failed 동작 불변
+    expect(r.processDone).toBe(true)
+  })
+
+  it('아무 것도 없으면 전부 비활성 (전체 목록)', () => {
+    expect(resolveProcessFilter({})).toEqual({
+      pipelineState: undefined,
+      pipelineFailed: false,
+      processDone: false,
+    })
+  })
+})
+
+describe('PROCESS_DONE_FILTERS — "데이터 처리 완료" WHERE 절', () => {
+  it('PIPELINE_STATUS_COLUMNS 전 단계를 1:1 로 덮는다 (드리프트 방지)', () => {
+    expect(PROCESS_DONE_FILTERS.map((f) => f.col)).toEqual([...PIPELINE_STATUS_COLUMNS])
+  })
+
+  it('핵심 단계는 eq done, auto_label_status 만 in (done,skipped)', () => {
+    for (const f of PROCESS_DONE_FILTERS) {
+      if (f.col === 'auto_label_status') {
+        expect(f.op).toBe('in')
+        expect([...f.value]).toEqual(['done', 'skipped'])
+      } else {
+        expect(f.op).toBe('eq')
+        expect(f.value).toBe('done')
+      }
+    }
+  })
+
+  it('auto_label_status 외에는 skipped 를 허용하지 않는다 (핵심 단계는 done 만 완료로 인정)', () => {
+    const core = PROCESS_DONE_FILTERS.filter((f) => f.col !== 'auto_label_status')
+    expect(core.every((f) => f.op === 'eq' && f.value === 'done')).toBe(true)
+  })
+
+  it('조합 가능성: done(auto_label in done|skipped) ∩ label_missing(auto_label=skipped) = auto_label skipped 교집합', () => {
+    // 라우트에서 process_status=done 과 label_missing=1 을 AND 로 적용하면
+    // auto_label_status 는 (done|skipped) ∩ (skipped) = skipped 로 좁혀진다(논리 정합).
+    const autoLabel = PROCESS_DONE_FILTERS.find((f) => f.col === 'auto_label_status')!
+    expect(autoLabel.op).toBe('in')
+    expect([...autoLabel.value]).toContain('skipped')
   })
 })

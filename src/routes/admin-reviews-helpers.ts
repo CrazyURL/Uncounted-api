@@ -63,6 +63,40 @@ export const PIPELINE_FAILED_COLUMNS = [
 // supabase-js .or() 절: 위 컬럼 중 하나라도 failed 면 매칭.
 export const PIPELINE_FAILED_OR = PIPELINE_FAILED_COLUMNS.map((col) => `${col}.eq.failed`).join(',')
 
+// ── 3그룹 필터(read-only): process_status 정규화 + "데이터 처리 완료" 절 ──
+// process_status(신규 단일 필터)는 기존 내부 필터로 매핑한다(레거시 pipeline_state/pipeline_failed 와 공존).
+//   pending→idle · processing→running · stopped→waiting · failed→pipeline_failed · done→전 단계 terminal
+// 명시된 레거시 pipeline_state 가 있으면 우선(shim 하위호환). write/migration/DB rename 없음.
+const PROCESS_TO_STATE: Record<string, string> = {
+  pending: 'idle',
+  processing: 'running',
+  stopped: 'waiting',
+}
+
+export function resolveProcessFilter(opts: {
+  processStatus?: string
+  pipelineState?: string
+  pipelineFailed?: boolean
+}): { pipelineState?: string; pipelineFailed: boolean; processDone: boolean } {
+  const ps = opts.processStatus
+  return {
+    pipelineState: opts.pipelineState ?? (ps ? PROCESS_TO_STATE[ps] : undefined),
+    pipelineFailed: Boolean(opts.pipelineFailed) || ps === 'failed',
+    processDone: ps === 'done',
+  }
+}
+
+// process_status=done("데이터 처리 완료") WHERE 절 — supabase-js .eq/.in 으로 적용할 (컬럼,연산,값) 목록.
+// PIPELINE_STATUS_COLUMNS 단일출처에서 파생(드리프트 방지): 핵심 단계는 'done', auto_label_status 만
+// (done|skipped) 허용 — 자동 라벨은 학습 중 graceful skip 이 정상(§15)이라 처리완료를 막지 않는다.
+export const PROCESS_DONE_FILTERS: ReadonlyArray<
+  { col: string; op: 'eq'; value: string } | { col: string; op: 'in'; value: readonly string[] }
+> = PIPELINE_STATUS_COLUMNS.map((col) =>
+  col === 'auto_label_status'
+    ? { col, op: 'in' as const, value: ['done', 'skipped'] as const }
+    : { col, op: 'eq' as const, value: 'done' },
+)
+
 // running 필터 OR 절 — stuck(이전 단계 완료 후 30분 초과) 세션 제외
 // threshold: ISO 8601 (Date.now() - 30min)
 export function buildRunningOrClause(threshold: string): string {
