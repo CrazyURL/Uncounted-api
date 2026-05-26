@@ -20,6 +20,8 @@ import {
   pipelineComplete,
   REVIEW_TRANSITION_SELECT,
   PIPELINE_FAILED_OR,
+  resolveProcessFilter,
+  PROCESS_DONE_FILTERS,
 } from './admin-reviews-helpers.js'
 import { applyDatasetEligibility } from '../services/export/applyDatasetEligibility.js'
 
@@ -80,6 +82,20 @@ adminReviews.get('/reviews', async (c) => {
   const orderCol = sortBy && colMap[sortBy] ? colMap[sortBy] : 'consented_at'
   const ascending = sortDir === 'asc'
 
+  // ── 신규(read-only) 필터: process_status(단일) + label_missing(독립 bool) ──
+  // 3그룹 필터 UI(처리/검수/플래그)용. 기존 pipeline_state / pipeline_failed 는 그대로 지원(레거시 shim).
+  // process_status 는 기존 내부 분기로 매핑하고, 'done' 만 신규 WHERE 절을 추가한다:
+  //   pending→idle · processing→running · stopped→waiting · failed→pipeline_failed · done→전 단계 terminal
+  // label_missing 은 pipeline_state='label_skipped' 와 동일 조건이되 process_status 와 조합 가능한 독립 플래그.
+  // write/migration/DB enum rename 없음 — 순수 read 필터 확장.
+  const processStatus = url.searchParams.get('process_status') ?? undefined
+  const labelMissing = url.searchParams.get('label_missing') === '1'
+  const {
+    pipelineState: effectivePipelineState,
+    pipelineFailed: effectivePipelineFailed,
+    processDone,
+  } = resolveProcessFilter({ processStatus, pipelineState, pipelineFailed })
+
   // pii_flag 필터(PII-1A): "AI 판단 애매" 후보(needs_human_decision + pending)가 있는 세션.
   // pii_intervals 는 PII-3/4 가 채우는 최종 구간이라 현재 전부 빈값 → 항상 0건이던 문제를 후보 기반으로 교체.
   // auto_confirmed / auto_rejected 는 관리자 검수 대상이 아니므로 필터에 포함하지 않는다.
@@ -139,10 +155,10 @@ adminReviews.get('/reviews', async (c) => {
   if (qualityLow) {
     query = query.eq('quality_status', 'failed')
   }
-  if (pipelineFailed) {
+  if (effectivePipelineFailed) {
     query = query.or(PIPELINE_FAILED_OR)
   }
-  if (pipelineState === 'idle') {
+  if (effectivePipelineState === 'idle') {
     // nullable 컬럼(DEFAULT 'pending' 이지만 NOT NULL 없음)은 is.null 포함 — auto_label_status만 NOT NULL(migration 070)
     query = query
       .or('gpu_upload_status.is.null,gpu_upload_status.eq.pending')
@@ -151,12 +167,12 @@ adminReviews.get('/reviews', async (c) => {
       .or('gpu_pii_status.is.null,gpu_pii_status.eq.pending')
       .eq('auto_label_status', 'pending')
       .or('quality_status.is.null,quality_status.eq.pending')
-  } else if (pipelineState === 'running') {
+  } else if (effectivePipelineState === 'running') {
     const threshold = new Date(Date.now() - 30 * 60 * 1000).toISOString()
     query = query.or(buildRunningOrClause(threshold))
-  } else if (pipelineState === 'label_skipped') {
+  } else if (effectivePipelineState === 'label_skipped') {
     query = query.eq('auto_label_status', 'skipped')
-  } else if (pipelineState === 'waiting') {
+  } else if (effectivePipelineState === 'waiting') {
     // 일부 단계 완료, 실행 중 없음, 미완료 단계 존재 (파이프라인 정체 세션)
     const stageNotActive = (col: string) =>
       `${col}.is.null,and(${col}.neq.running,${col}.neq.failed)`
@@ -182,7 +198,7 @@ adminReviews.get('/reviews', async (c) => {
         'auto_label_status.is.null,auto_label_status.eq.pending,' +
         'quality_status.is.null,quality_status.eq.pending',
     )
-  } else if (pipelineState === 'stuck') {
+  } else if (effectivePipelineState === 'stuck') {
     // 단계가 running 중이나 이전 단계 완료 후 30분 초과 (처리 병목)
     const threshold = new Date(Date.now() - 30 * 60 * 1000).toISOString()
     query = query.or(
@@ -192,6 +208,17 @@ adminReviews.get('/reviews', async (c) => {
         `and(auto_label_status.eq.running,gpu_pii_at.lt.${threshold}),` +
         `and(quality_status.eq.running,label_at.lt.${threshold})`,
     )
+  }
+  if (processDone) {
+    // process_status=done — "데이터 처리 완료": 핵심 단계 done + auto_label done/skipped (§15).
+    // PROCESS_DONE_FILTERS 단일출처(.eq/.in 체인=AND).
+    for (const f of PROCESS_DONE_FILTERS) {
+      query = f.op === 'in' ? query.in(f.col, [...f.value]) : query.eq(f.col, f.value)
+    }
+  }
+  if (labelMissing) {
+    // 라벨링 누락(독립 플래그) — auto_label_status='skipped'. process_status 와 AND 조합 가능.
+    query = query.eq('auto_label_status', 'skipped')
   }
   if (piiSessionIds !== null) {
     query = query.in('id', piiSessionIds)
@@ -228,8 +255,18 @@ adminReviews.get('/reviews', async (c) => {
     if (qualityLow) {
       durQuery = durQuery.eq('quality_status', 'failed')
     }
-    if (pipelineFailed) {
+    if (effectivePipelineFailed) {
       durQuery = durQuery.or(PIPELINE_FAILED_OR)
+    }
+    // process_status=done / label_missing 은 단순 .eq/.in 절이라 duration 합산에도 반영(정확).
+    // (idle/running/waiting/stuck 의 .or 블록은 기존부터 duration 미반영 — 본 PR 범위 밖.)
+    if (processDone) {
+      for (const f of PROCESS_DONE_FILTERS) {
+        durQuery = f.op === 'in' ? durQuery.in(f.col, [...f.value]) : durQuery.eq(f.col, f.value)
+      }
+    }
+    if (labelMissing) {
+      durQuery = durQuery.eq('auto_label_status', 'skipped')
     }
     if (piiSessionIds !== null) {
       durQuery = durQuery.in('id', piiSessionIds)
