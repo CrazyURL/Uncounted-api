@@ -127,7 +127,8 @@ export interface HumanLabelStats {
   resolvedDerived: number
   pendingContext: number
   undecidable: number
-  byCategory: Record<EmotionCategory, number> // resolved 기준
+  byCategory: Record<EmotionCategory, number> // resolved 기준 (manual + derived 합산)
+  byCategoryManual: Record<EmotionCategory, number> // resolved + manual(gold) 만 — 게이트 category 균형 판정용
   byFineLabel: Record<FineLabel, number> // fine_label 보유 행 전부
 }
 
@@ -149,6 +150,7 @@ export function summarizeHumanLabelStats(rows: HumanLabelStatsRow[]): HumanLabel
     pendingContext: 0,
     undecidable: 0,
     byCategory: emptyCategoryCounts(),
+    byCategoryManual: emptyCategoryCounts(),
     byFineLabel: emptyFineCounts(),
   }
   for (const row of rows) {
@@ -156,7 +158,11 @@ export function summarizeHumanLabelStats(rows: HumanLabelStatsRow[]): HumanLabel
       stats.resolvedTotal += 1
       if (row.category_source === 'manual') stats.resolvedManual += 1
       else if (row.category_source === 'derived') stats.resolvedDerived += 1
-      if (isEmotionCategory(row.emotion_category)) stats.byCategory[row.emotion_category] += 1
+      if (isEmotionCategory(row.emotion_category)) {
+        stats.byCategory[row.emotion_category] += 1
+        // gold(manual) 만 별도 집계 — derived 가 category 균형 게이트를 부풀리지 않도록.
+        if (row.category_source === 'manual') stats.byCategoryManual[row.emotion_category] += 1
+      }
     } else if (row.category_decision === 'pending_context') {
       stats.pendingContext += 1
     } else if (row.category_decision === 'undecidable') {
@@ -178,19 +184,25 @@ export interface GateResult {
 }
 
 function minCategoryManual(stats: HumanLabelStats): number {
-  // resolved/manual 의 category별 최소값 근사: byCategory 는 manual+derived 합산이라
-  // 정확한 category별 manual 분리는 stats 행 재집계가 필요(후속). 여기선 보수적으로
-  // resolvedManual 총량과 3 category 존재 여부만 게이트에 사용한다.
-  return Math.min(stats.byCategory.긍정, stats.byCategory.중립, stats.byCategory.부정)
+  // resolved/manual(gold) 의 category별 최소값. derived(자동파생) 는 제외 —
+  // 자동파생이 category 균형을 부풀려 게이트가 gold 부족 상태에서 조기 통과하는 것을 막는다.
+  return Math.min(
+    stats.byCategoryManual.긍정,
+    stats.byCategoryManual.중립,
+    stats.byCategoryManual.부정,
+  )
 }
 
 /**
  * §11.2 게이트 판정. manual(gold)·total·category 균형을 함께 본다.
+ * category 균형은 gold(manual) 기준으로만 본다(derived 미포함).
  * E2 미만에서는 학습 파일럿 버튼 비활성(UI 책임, PR-H5).
  */
 export function computeEmotionGate(stats: HumanLabelStats): GateResult {
   const allThreeCategories =
-    stats.byCategory.긍정 > 0 && stats.byCategory.중립 > 0 && stats.byCategory.부정 > 0
+    stats.byCategoryManual.긍정 > 0 &&
+    stats.byCategoryManual.중립 > 0 &&
+    stats.byCategoryManual.부정 > 0
 
   // E4
   if (stats.resolvedManual >= 500 && stats.resolvedTotal >= 3000 && minCategoryManual(stats) >= 100) {

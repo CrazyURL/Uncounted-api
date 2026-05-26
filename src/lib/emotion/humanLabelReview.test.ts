@@ -139,6 +139,8 @@ describe('summarizeHumanLabelStats', () => {
     expect(s.pendingContext).toBe(1)
     expect(s.undecidable).toBe(1)
     expect(s.byCategory).toEqual({ 긍정: 1, 중립: 1, 부정: 1 })
+    // byCategoryManual: manual(gold) 행만 — 긍정(기쁨)은 derived 라 제외, 중립·부정만 manual.
+    expect(s.byCategoryManual).toEqual({ 긍정: 0, 중립: 1, 부정: 1 })
     expect(s.byFineLabel.당황).toBe(1)
     expect(s.byFineLabel.놀람).toBe(1)
   })
@@ -158,6 +160,7 @@ describe('computeEmotionGate (§11.2)', () => {
       pendingContext: 0,
       undecidable: 0,
       byCategory: { 긍정: 0, 중립: 0, 부정: 0 },
+      byCategoryManual: { 긍정: 0, 중립: 0, 부정: 0 },
       byFineLabel: { 기쁨: 0, 놀람: 0, 슬픔: 0, 분노: 0, 불안: 0, 당황: 0, 중립: 0 },
       ...over,
     }
@@ -168,24 +171,66 @@ describe('computeEmotionGate (§11.2)', () => {
   it('E1: resolved >= 10 (학습 금지)', () => {
     expect(computeEmotionGate(statsOf({ resolvedTotal: 10, resolvedDerived: 10 })).gate).toBe('E1')
   })
-  it('E2: manual>=50 ∧ total>=200 ∧ 3 category 존재', () => {
+  it('E2: manual>=50 ∧ total>=200 ∧ 3 category(gold) 존재', () => {
     const g = computeEmotionGate(
-      statsOf({ resolvedTotal: 200, resolvedManual: 50, byCategory: { 긍정: 20, 중립: 15, 부정: 15 } }),
+      statsOf({
+        resolvedTotal: 200,
+        resolvedManual: 50,
+        byCategory: { 긍정: 20, 중립: 15, 부정: 15 },
+        byCategoryManual: { 긍정: 20, 중립: 15, 부정: 15 },
+      }),
     )
     expect(g.gate).toBe('E2')
   })
-  it('E2 미달: 3 category 중 하나라도 0이면 E1로 강등', () => {
+  it('E2 미달: gold category 중 하나라도 0이면 E1로 강등', () => {
     const g = computeEmotionGate(
-      statsOf({ resolvedTotal: 200, resolvedManual: 50, byCategory: { 긍정: 30, 중립: 20, 부정: 0 } }),
+      statsOf({
+        resolvedTotal: 200,
+        resolvedManual: 50,
+        byCategory: { 긍정: 30, 중립: 20, 부정: 0 },
+        byCategoryManual: { 긍정: 30, 중립: 20, 부정: 0 },
+      }),
     )
     expect(g.gate).toBe('E1')
   })
   it('E4: manual>=500 ∧ total>=3000 ∧ category별>=100', () => {
     const g = computeEmotionGate(
-      statsOf({ resolvedTotal: 3000, resolvedManual: 500, byCategory: { 긍정: 100, 중립: 100, 부정: 100 } }),
+      statsOf({
+        resolvedTotal: 3000,
+        resolvedManual: 500,
+        byCategory: { 긍정: 100, 중립: 100, 부정: 100 },
+        byCategoryManual: { 긍정: 100, 중립: 100, 부정: 100 },
+      }),
     )
     expect(g.gate).toBe('E4')
     expect(g.nextRequired).toBeNull()
+  })
+
+  // ── manual gold 기준 정밀도 보정 (derived inflation 방지) ──────────────────
+  it('E4 부적격: derived 가 category 를 부풀려도 manual gold 가 category별 100 미만이면 E4 아님(E3)', () => {
+    // byCategory(합산) 은 모두 ≥100 이지만 byCategoryManual(gold) 의 부정은 50 → E4 미달, E3.
+    const g = computeEmotionGate(
+      statsOf({
+        resolvedTotal: 3000,
+        resolvedManual: 500,
+        byCategory: { 긍정: 150, 중립: 150, 부정: 150 },
+        byCategoryManual: { 긍정: 150, 중립: 150, 부정: 50 },
+      }),
+    )
+    expect(g.gate).toBe('E3')
+  })
+
+  it('E2 부적격: derived 로 3 category 가 채워져도 manual gold 가 한 category 0 이면 E2 아님(E1)', () => {
+    // byCategory(합산) 은 3 category 모두 >0 이지만 byCategoryManual 의 부정 gold=0 → E2 미달, E1.
+    const g = computeEmotionGate(
+      statsOf({
+        resolvedTotal: 200,
+        resolvedManual: 50,
+        byCategory: { 긍정: 30, 중립: 20, 부정: 10 },
+        byCategoryManual: { 긍정: 30, 중립: 20, 부정: 0 },
+      }),
+    )
+    expect(g.gate).toBe('E1')
   })
 })
 
