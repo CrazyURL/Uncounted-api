@@ -13,6 +13,7 @@ import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
 import { formatDisplayTitle } from '../lib/displayTitle.js'
 import { checkSessionAutoApproval } from '../lib/piiRisk.js'
+import { PIPELINE_FAILED_OR_CLAUSE } from '../lib/pipelineStatus.js'
 import {
   buildRunningOrClause,
   distinctSessionIds,
@@ -124,7 +125,7 @@ adminReviews.get('/reviews', async (c) => {
     .from('sessions')
     .select(
       'id, user_id, pid, session_seq, date, duration, consent_status, consented_at, ' +
-        'gpu_upload_status, gpu_uploaded_at, gpu_last_error, raw_audio_url, ' +
+        'gpu_upload_status, gpu_uploaded_at, gpu_last_error, gpu_retry_count, raw_audio_url, ' +
         'stt_status, stt_at, diarize_status, diarize_at, ' +
         'gpu_pii_status, gpu_pii_at, auto_label_status, label_at, quality_status, quality_at, review_status, utterance_count',
       { count: 'exact' },
@@ -139,10 +140,8 @@ adminReviews.get('/reviews', async (c) => {
     query = query.eq('quality_status', 'failed')
   }
   if (pipelineFailed) {
-    query = query.or(
-      'gpu_upload_status.eq.failed,stt_status.eq.failed,' +
-        'diarize_status.eq.failed,gpu_pii_status.eq.failed,auto_label_status.eq.failed,quality_status.eq.failed',
-    )
+    // 처리 오류 기준은 대시보드 카운트와 동일(공통 상수). auto_label_status 제외.
+    query = query.or(PIPELINE_FAILED_OR_CLAUSE)
   }
   if (pipelineState === 'idle') {
     // nullable 컬럼(DEFAULT 'pending' 이지만 NOT NULL 없음)은 is.null 포함 — auto_label_status만 NOT NULL(migration 070)
@@ -231,10 +230,7 @@ adminReviews.get('/reviews', async (c) => {
       durQuery = durQuery.eq('quality_status', 'failed')
     }
     if (pipelineFailed) {
-      durQuery = durQuery.or(
-        'gpu_upload_status.eq.failed,stt_status.eq.failed,' +
-          'diarize_status.eq.failed,gpu_pii_status.eq.failed,quality_status.eq.failed',
-      )
+      durQuery = durQuery.or(PIPELINE_FAILED_OR_CLAUSE)
     }
     if (piiSessionIds !== null) {
       durQuery = durQuery.in('id', piiSessionIds)
@@ -441,6 +437,7 @@ adminReviews.get('/reviews', async (c) => {
       upload_status: (row.gpu_upload_status as string) ?? 'pending',
       uploaded_at: (row.gpu_uploaded_at as string) ?? null,
       upload_error_message: (row.gpu_last_error as string | null) ?? null,
+      upload_retry_count: (row.gpu_retry_count as number | null) ?? null,
       raw_audio_url_present: row.raw_audio_url != null,
       stt_status: (row.stt_status as string) ?? 'pending',
       stt_at: (row.stt_at as string) ?? null,
@@ -690,6 +687,7 @@ adminReviews.get('/sessions/:sessionId', async (c) => {
       consented_at: row.consented_at as string,
       upload_status: (row.gpu_upload_status as string) ?? 'pending',
       upload_error_message: (row.gpu_last_error as string | null) ?? null,
+      upload_retry_count: (row.gpu_retry_count as number | null) ?? null,
       raw_audio_url_present: row.raw_audio_url != null,
       stt_status: (row.stt_status as string) ?? 'pending',
       diarize_status: (row.diarize_status as string) ?? 'pending',
