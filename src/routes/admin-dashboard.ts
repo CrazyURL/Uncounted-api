@@ -7,6 +7,7 @@
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, adminMiddleware } from '../lib/middleware.js'
+import { buildPipelineFailedOrClause } from './admin-reviews-helpers.js'
 
 const adminDashboard = new Hono()
 
@@ -150,7 +151,7 @@ adminDashboard.get('/dashboard-stats', async (c) => {
     supabaseAdmin
       .from('sessions')
       .select('id', { count: 'exact', head: true })
-      .or('gpu_upload_status.eq.failed,stt_status.eq.failed,diarize_status.eq.failed,gpu_pii_status.eq.failed,quality_status.eq.failed'),
+      .or(buildPipelineFailedOrClause()),
     supabaseAdmin
       .from('sessions')
       .select('id', { count: 'exact', head: true })

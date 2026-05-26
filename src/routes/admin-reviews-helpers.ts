@@ -30,6 +30,21 @@ export const PIPELINE_STATUS_COLUMNS = [
   'quality_status',
 ] as const
 
+// 처리 '실패'(처리 오류) 판정 컬럼 — 운영자에게 노출되는 "처리 오류" 카운트/목록의 단일 출처.
+// auto_label_status 는 의도적으로 제외한다: 자동 라벨(emotion/dialog_act 등)은 부가 enrich 단계로
+// 실패/스킵돼도 핵심 처리(STT·diarize·PII·quality)는 정상일 수 있다. "처리 오류"로 집계하면
+// 운영자에게 거짓 경보가 된다. (대시보드 카운트는 원래 제외했으나 /reviews 목록 필터가 포함해
+// 카운트와 목록이 어긋났음 — 본 상수로 공통화하여 드리프트 차단.)
+export const PIPELINE_FAILED_COLUMNS = PIPELINE_STATUS_COLUMNS.filter(
+  (col) => col !== 'auto_label_status',
+)
+
+// pipeline_failed OR 절 — PIPELINE_FAILED_COLUMNS 중 하나라도 'failed' 면 처리 오류.
+// 카운트(admin-dashboard)·목록·duration 쿼리(admin-reviews)가 모두 이 함수에서 파생된다.
+export function buildPipelineFailedOrClause(): string {
+  return PIPELINE_FAILED_COLUMNS.map((col) => `${col}.eq.failed`).join(',')
+}
+
 // 처리 흐름이 모두 done/skipped 인지 — pending → in_review 전환 가능 여부 체크용.
 // PIPELINE_STATUS_COLUMNS 의 모든 컬럼이 terminal 이어야 true.
 export function pipelineComplete(row: Record<string, unknown>): boolean {

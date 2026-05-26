@@ -15,6 +15,7 @@ import { formatDisplayTitle } from '../lib/displayTitle.js'
 import { checkSessionAutoApproval } from '../lib/piiRisk.js'
 import {
   buildRunningOrClause,
+  buildPipelineFailedOrClause,
   distinctSessionIds,
   countCandidatesBySession,
   pipelineComplete,
@@ -124,7 +125,7 @@ adminReviews.get('/reviews', async (c) => {
     .from('sessions')
     .select(
       'id, user_id, pid, session_seq, date, duration, consent_status, consented_at, ' +
-        'gpu_upload_status, gpu_uploaded_at, gpu_last_error, raw_audio_url, ' +
+        'gpu_upload_status, gpu_uploaded_at, gpu_last_error, gpu_retry_count, raw_audio_url, ' +
         'stt_status, stt_at, diarize_status, diarize_at, ' +
         'gpu_pii_status, gpu_pii_at, auto_label_status, label_at, quality_status, quality_at, review_status, utterance_count',
       { count: 'exact' },
@@ -139,10 +140,8 @@ adminReviews.get('/reviews', async (c) => {
     query = query.eq('quality_status', 'failed')
   }
   if (pipelineFailed) {
-    query = query.or(
-      'gpu_upload_status.eq.failed,stt_status.eq.failed,' +
-        'diarize_status.eq.failed,gpu_pii_status.eq.failed,auto_label_status.eq.failed,quality_status.eq.failed',
-    )
+    // 공통 기준(auto_label_status 제외) — 대시보드 카운트와 동일. helpers 참조.
+    query = query.or(buildPipelineFailedOrClause())
   }
   if (pipelineState === 'idle') {
     // nullable 컬럼(DEFAULT 'pending' 이지만 NOT NULL 없음)은 is.null 포함 — auto_label_status만 NOT NULL(migration 070)
@@ -231,10 +230,7 @@ adminReviews.get('/reviews', async (c) => {
       durQuery = durQuery.eq('quality_status', 'failed')
     }
     if (pipelineFailed) {
-      durQuery = durQuery.or(
-        'gpu_upload_status.eq.failed,stt_status.eq.failed,' +
-          'diarize_status.eq.failed,gpu_pii_status.eq.failed,quality_status.eq.failed',
-      )
+      durQuery = durQuery.or(buildPipelineFailedOrClause())
     }
     if (piiSessionIds !== null) {
       durQuery = durQuery.in('id', piiSessionIds)
