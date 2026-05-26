@@ -19,6 +19,7 @@ import {
   countCandidatesBySession,
   pipelineComplete,
   REVIEW_TRANSITION_SELECT,
+  PIPELINE_FAILED_OR,
 } from './admin-reviews-helpers.js'
 import { applyDatasetEligibility } from '../services/export/applyDatasetEligibility.js'
 
@@ -124,7 +125,7 @@ adminReviews.get('/reviews', async (c) => {
     .from('sessions')
     .select(
       'id, user_id, pid, session_seq, date, duration, consent_status, consented_at, ' +
-        'gpu_upload_status, gpu_uploaded_at, gpu_last_error, raw_audio_url, ' +
+        'gpu_upload_status, gpu_uploaded_at, gpu_last_error, gpu_retry_count, raw_audio_url, ' +
         'stt_status, stt_at, diarize_status, diarize_at, ' +
         'gpu_pii_status, gpu_pii_at, auto_label_status, label_at, quality_status, quality_at, review_status, utterance_count',
       { count: 'exact' },
@@ -139,10 +140,7 @@ adminReviews.get('/reviews', async (c) => {
     query = query.eq('quality_status', 'failed')
   }
   if (pipelineFailed) {
-    query = query.or(
-      'gpu_upload_status.eq.failed,stt_status.eq.failed,' +
-        'diarize_status.eq.failed,gpu_pii_status.eq.failed,auto_label_status.eq.failed,quality_status.eq.failed',
-    )
+    query = query.or(PIPELINE_FAILED_OR)
   }
   if (pipelineState === 'idle') {
     // nullable 컬럼(DEFAULT 'pending' 이지만 NOT NULL 없음)은 is.null 포함 — auto_label_status만 NOT NULL(migration 070)
@@ -231,10 +229,7 @@ adminReviews.get('/reviews', async (c) => {
       durQuery = durQuery.eq('quality_status', 'failed')
     }
     if (pipelineFailed) {
-      durQuery = durQuery.or(
-        'gpu_upload_status.eq.failed,stt_status.eq.failed,' +
-          'diarize_status.eq.failed,gpu_pii_status.eq.failed,quality_status.eq.failed',
-      )
+      durQuery = durQuery.or(PIPELINE_FAILED_OR)
     }
     if (piiSessionIds !== null) {
       durQuery = durQuery.in('id', piiSessionIds)
@@ -441,6 +436,7 @@ adminReviews.get('/reviews', async (c) => {
       upload_status: (row.gpu_upload_status as string) ?? 'pending',
       uploaded_at: (row.gpu_uploaded_at as string) ?? null,
       upload_error_message: (row.gpu_last_error as string | null) ?? null,
+      upload_retry_count: (row.gpu_retry_count as number | null) ?? null,
       raw_audio_url_present: row.raw_audio_url != null,
       stt_status: (row.stt_status as string) ?? 'pending',
       stt_at: (row.stt_at as string) ?? null,

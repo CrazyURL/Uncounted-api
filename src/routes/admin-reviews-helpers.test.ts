@@ -6,6 +6,8 @@ import {
   PIPELINE_STATUS_COLUMNS,
   pipelineComplete,
   REVIEW_TRANSITION_SELECT,
+  PIPELINE_FAILED_COLUMNS,
+  PIPELINE_FAILED_OR,
 } from './admin-reviews-helpers'
 
 const THRESHOLD = '2026-05-17T11:30:00.000Z' // 기준 시각 (now - 30min)
@@ -149,5 +151,50 @@ describe('pipelineComplete — 6단계 모두 terminal 일 때만 true', () => {
 
   it('한 단계라도 running 이면 false', () => {
     expect(pipelineComplete({ ...allDone, stt_status: 'running' })).toBe(false)
+  })
+})
+
+// "처리 오류"(pipeline_failed) 판정은 자동 라벨링 단계를 의도적으로 제외한다.
+// 자동 라벨링은 학습 고도화 중 graceful skip/fail 이 정상이므로(CLAUDE.md §9/§15)
+// 이를 오류로 합산하면 운영자에게 실재하지 않는 "처리 오류"가 노출된다.
+// 목록 필터 / duration 합산 / dashboard 카운트가 이 상수를 공유해 표시 드리프트를 막는다.
+describe('PIPELINE_FAILED_COLUMNS — 처리 오류 판정 컬럼 단일 출처', () => {
+  it('auto_label_status 를 제외한 5개 단계 컬럼만 포함한다', () => {
+    expect([...PIPELINE_FAILED_COLUMNS].sort()).toEqual(
+      [
+        'diarize_status',
+        'gpu_pii_status',
+        'gpu_upload_status',
+        'quality_status',
+        'stt_status',
+      ].sort(),
+    )
+  })
+
+  it('auto_label_status 를 포함하지 않는다 (처리 오류 정의의 핵심)', () => {
+    expect(PIPELINE_FAILED_COLUMNS).not.toContain('auto_label_status')
+  })
+
+  it('PIPELINE_STATUS_COLUMNS 보다 정확히 auto_label_status 하나만 적다', () => {
+    expect(PIPELINE_FAILED_COLUMNS.length).toBe(PIPELINE_STATUS_COLUMNS.length - 1)
+    const failedSet = new Set<string>(PIPELINE_FAILED_COLUMNS)
+    const onlyInStatus = PIPELINE_STATUS_COLUMNS.filter((c) => !failedSet.has(c))
+    expect(onlyInStatus).toEqual(['auto_label_status'])
+  })
+})
+
+describe('PIPELINE_FAILED_OR — supabase .or() 절', () => {
+  it('5개 단계 각각 .eq.failed 조건을 포함한다', () => {
+    for (const col of PIPELINE_FAILED_COLUMNS) {
+      expect(PIPELINE_FAILED_OR).toContain(`${col}.eq.failed`)
+    }
+  })
+
+  it('auto_label_status.eq.failed 를 포함하지 않는다', () => {
+    expect(PIPELINE_FAILED_OR).not.toContain('auto_label_status')
+  })
+
+  it('정확히 5개 절을 쉼표로 연결한다', () => {
+    expect(PIPELINE_FAILED_OR.split(',')).toHaveLength(5)
   })
 })
