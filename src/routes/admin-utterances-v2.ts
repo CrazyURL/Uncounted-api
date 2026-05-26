@@ -249,35 +249,22 @@ adminUtterancesV2.get('/utterances-v2/stats', async (c) => {
   })
 })
 
-// ── PATCH /utterances-v2/:id ────────────────────────────────────────────
-// 어드민 감정/대화행위 라벨 수정 (STAGE 14 검수 UI)
-
-adminUtterancesV2.patch('/utterances-v2/:id', async (c) => {
-  const id = c.req.param('id')
-  const body = await c.req.json<{
-    emotion?: string
-    dialog_act?: string
-    label_source?: string
-  }>().catch(() => ({} as { emotion?: string; dialog_act?: string; label_source?: string }))
-
-  const update: Record<string, unknown> = { updated_at: new Date().toISOString() }
-  if (body.emotion !== undefined) update.emotion = body.emotion
-  if (body.dialog_act !== undefined) update.dialog_act = body.dialog_act
-  if (body.label_source !== undefined) update.label_source = body.label_source
-
-  const { data, error } = await supabaseAdmin
-    .from('utterances')
-    .update(update)
-    .eq('id', id)
-    .select('id, emotion, dialog_act, label_source, updated_at')
-    .single()
-
-  if (error) {
-    if (error.code === 'PGRST116') return c.json({ error: '발화를 찾을 수 없습니다.' }, 404)
-    return c.json({ error: error.message }, 500)
-  }
-
-  return c.json({ data })
+// ── PATCH /utterances-v2/:id — DEPRECATED (PR-H2c, 410 Gone) ────────────
+// utterances 의 모델 라벨(emotion/dialog_act/label_source) 어드민 인플레이스 편집 경로를 폐기한다.
+// 모델 emotion/dialog_act 는 자동라벨(voice-api worker) 산출값으로 고정 — 어드민이 덮어쓰지 않는다.
+// 사람 검수 결과는 별도 테이블 utterance_human_labels 로만 적재한다(POST /utterances/:id/human-label).
+//
+// body 무관 410 반환(엔드포인트 전체 deprecate). DB 에 접근하지 않으므로 utterances.emotion 불변이 보장된다.
+// 설계: scripts/analysis/design_h2c_block_inplace_emotion_patch_20260526.md (완전 차단 · 410 · admin-first).
+adminUtterancesV2.patch('/utterances-v2/:id', (c) => {
+  return c.json(
+    {
+      error:
+        'utterances 모델 라벨(emotion/dialog_act)의 인플레이스 수정은 폐기되었습니다. 사람 감정 라벨은 별도 경로로 저장하세요.',
+      use: 'POST /api/admin/utterances/:id/human-label',
+    },
+    410,
+  )
 })
 
 // ── GET /utterances-v2/:id/audio ────────────────────────────────────────
