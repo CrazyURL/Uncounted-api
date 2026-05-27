@@ -10,6 +10,7 @@ import { Upload } from '@aws-sdk/lib-storage'
 import { supabaseAdmin, fetchAllPaginated } from '../supabase.js'
 import { s3Client, S3_AUDIO_BUCKET } from '../s3.js'
 import { getMetadataForExport } from './metadataRepository.js'
+import { collectMaskTypeDistribution, deriveMaskingMethod } from './maskingProvenance.js'
 
 // ZIP 빌드 동안 S3 다운로드를 batch로 병렬 처리할 동시 다운로드 수.
 // 각 batch는 fully Buffer로 다운로드 후 S3 연결을 즉시 닫는다.
@@ -109,8 +110,16 @@ export interface PiiMeta {
   maskerVersion: string
   maskerCommit: string | null
   piiCategories: Record<string, number>
-  /** 마스킹 방법 (audio: 1kHz 비프 / text: substitute) */
+  /**
+   * 실제 적용된 마스킹 방법. pii_intervals 의 maskType 분포에서 산출한다(provenance).
+   * - `audio_beep_1khz` / `audio_silence` 토큰은 **음향 변형 maskType 이 실재할 때만** 표기.
+   * - `text_only` = 텍스트 마스킹됨 / 저장 오디오 원본(음향 마스킹 미적용) / 구간은 downstream 마스킹용 보존.
+   * - 따라서 text_only 만 있는 패키지는 `text_substitute` 만 표기하고 `audio_beep_1khz` 를 주장하지 않는다.
+   * 무결성 보증 표현이 아니다(잔존 불확실성 disclosure 와 정합).
+   */
   maskingMethod: string
+  /** pii_intervals maskType 분포(provenance 투명성). 비어있으면 PII 구간 0. */
+  maskTypeDistribution: Record<string, number>
   /** KISA 가이드라인 준수 표기 */
   kisaCompliance: string
   /** k-익명성 k 값 (>= 5 권장) */
@@ -719,11 +728,15 @@ async function _buildPackageInner(
       }
     }
   }
+  // maskingMethod 는 하드코딩하지 않고 pii_intervals 의 maskType 분포에서 실제 적용분만 산출한다.
+  // (text_only 패키지가 audio_beep_1khz 적용으로 오표기되는 것을 방지 — D4b-3 provenance 정합.)
+  const maskTypeDistribution = collectMaskTypeDistribution(utterances)
   const piiMeta: PiiMeta = {
     maskerVersion: '1.0',
     maskerCommit: process.env.PII_MASKER_COMMIT ?? null,
     piiCategories: piiCategoriesCount,
-    maskingMethod: 'audio_beep_1khz + text_substitute',
+    maskingMethod: deriveMaskingMethod(Object.keys(maskTypeDistribution)),
+    maskTypeDistribution,
     kisaCompliance: 'guideline_v3.5',
     kAnonymityK: null, // 게이트 3.5 KISA 평가 후 채움
     spotCheckCoveragePct: null, // 게이트 6 spot-check 인프라 후 채움
