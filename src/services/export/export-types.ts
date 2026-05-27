@@ -20,6 +20,13 @@ export interface BuildSessionExportOptions {
   includeRestricted?: boolean
   /** staging dir base. default OS tmp. */
   outputDir?: string
+  /**
+   * Sync Integrity Gate(D1) 활성화 여부. default false.
+   * false → 기존 export 동작 그대로(미배선). true → 발화별 참조무결성 검증 후
+   * 실패 발화 fail-closed 제외 + metadata/sync_quality_report.json 동봉.
+   * (production 기본 활성화는 별도 게이트 — PR-per-step.)
+   */
+  enableSyncIntegrityGate?: boolean
 }
 
 export interface ExportSafetySummary {
