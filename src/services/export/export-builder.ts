@@ -23,6 +23,8 @@ import {
 } from '../../lib/export/transforms.js'
 import { isExportEligible } from '../../lib/export/eligibility.js'
 import { isUtteranceDeliverable } from '../../lib/export/utteranceDeliverability.js'
+import { mapUtteranceRowToSyncInput } from '../../lib/export/utteranceToInternal.js'
+import { applySyncIntegrityGate, type SyncQualityReport } from '../../lib/export/syncIntegrityGate.js'
 
 /** embedded WAV S3 다운로드 동시성 (packageBuilder 와 동일 정책). */
 const AUDIO_DOWNLOAD_CONCURRENCY = 4
@@ -93,6 +95,7 @@ export async function buildSessionExportZip(
     audioExportMode: requestedMode,
     includeRestricted = false,
     outputDir,
+    enableSyncIntegrityGate = false,
   } = options
 
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -125,6 +128,18 @@ export async function buildSessionExportZip(
     utterances = loadedUtterances.filter((u) => isUtteranceDeliverable(u).included)
   }
 
+  // Sync Integrity Gate (D1) — opt-in. 발화별 audio↔transcript↔timing↔pii 참조무결성을
+  // 검증하고, 정합이 깨진 발화는 fail-closed 로 제외(timing 보정 X). 비활성(default)이면
+  // 아래 블록을 건너뛰어 기존 export 동작과 동일.
+  let syncQualityReport: SyncQualityReport | null = null
+  if (enableSyncIntegrityGate) {
+    const syncInputs = utterances.map((u) => mapUtteranceRowToSyncInput(u))
+    const outcome = applySyncIntegrityGate(syncInputs, { audioExportMode })
+    const keptIds = new Set(outcome.kept.map((k) => k.utterance_id))
+    utterances = utterances.filter((u) => keptIds.has(u.id))
+    syncQualityReport = outcome.report
+  }
+
   const baseDir = outputDir ?? os.tmpdir()
   const stagingDir = await fs.mkdtemp(path.join(baseDir, `export-v2-${sessionId}-`))
 
@@ -135,6 +150,7 @@ export async function buildSessionExportZip(
       audioExportMode,
       includeAudio,
       includeRestricted,
+      syncQualityReport,
     })
 
     // ZIP 빌드 직전 safety scan.
@@ -230,6 +246,8 @@ interface WriteContext {
   audioExportMode: AudioExportMode
   includeAudio: boolean
   includeRestricted: boolean
+  /** Sync Integrity Gate(D1) 활성 시에만 채워짐. 있으면 metadata/ 에 동봉. */
+  syncQualityReport?: SyncQualityReport | null
 }
 
 async function writeAllArtifacts(
@@ -297,6 +315,10 @@ async function writeAllArtifacts(
   await writeJson(path.join(metaDir, 'audio_metadata_report.json'), buildAudioMetadataReport(session))
   await writeJson(path.join(metaDir, 'utterance_form_report.json'), buildUtteranceFormReport(utterances))
   await writeJson(path.join(metaDir, 'processing_summary.json'), buildProcessingSummary(audioExportMode, includeAudio, includeRestricted))
+  // Sync Integrity Gate(D1) 리포트 — 게이트 활성 시에만 동봉(미활성 시 파일 미생성 → 기존 ZIP 구조 불변).
+  if (ctx.syncQualityReport) {
+    await writeJson(path.join(metaDir, 'sync_quality_report.json'), ctx.syncQualityReport)
+  }
 
   // audio/ — embedded 모드만 실제 WAV 동봉. reference_only 는 audio_manifest 참조만.
   // storage_path 는 builder 내부에서만 S3 fetch 키로 사용 (외부 ZIP 미노출).
