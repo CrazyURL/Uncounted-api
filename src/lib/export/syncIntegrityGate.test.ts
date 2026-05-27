@@ -147,6 +147,7 @@ describe('applySyncIntegrityGate — partition + report', () => {
     expect(out.excluded.map((e) => e.utterance_id).sort()).toEqual(['bad-timeline', 'bad-transcript'])
     expect(out.report.kept_count).toBe(2)
     expect(out.report.excluded_count).toBe(2)
+    expect(out.report.excluded_by_sync_fail).toBe(2)
   })
 
   it('report records failed_checks per excluded utterance and check_distribution', () => {
@@ -176,6 +177,7 @@ describe('applySyncIntegrityGate — partition + report', () => {
         'audio_export_mode',
         'check_distribution',
         'excluded',
+        'excluded_by_sync_fail',
         'excluded_count',
         'gate',
         'kept_count',

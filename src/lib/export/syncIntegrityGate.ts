@@ -228,6 +228,8 @@ export interface SyncQualityReport {
   tolerance_sec: number
   kept_count: number
   excluded_count: number
+  /** 동의어(명시): sync 정합 실패로 제외된 발화 수 = excluded_count. 본 게이트의 유일 제외 사유. */
+  excluded_by_sync_fail: number
   excluded: SyncExclusion[]
   check_distribution: CheckDistribution
   notes: string[]
@@ -285,6 +287,7 @@ export function applySyncIntegrityGate(
     tolerance_sec: tol,
     kept_count: kept.length,
     excluded_count: excluded.length,
+    excluded_by_sync_fail: excluded.length,
     excluded,
     check_distribution: dist,
     notes: [
