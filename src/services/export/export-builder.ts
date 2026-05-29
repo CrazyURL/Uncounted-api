@@ -25,6 +25,12 @@ import { isExportEligible } from '../../lib/export/eligibility.js'
 import { isUtteranceDeliverable } from '../../lib/export/utteranceDeliverability.js'
 import { mapUtteranceRowToSyncInput } from '../../lib/export/utteranceToInternal.js'
 import { applySyncIntegrityGate, type SyncQualityReport } from '../../lib/export/syncIntegrityGate.js'
+import {
+  buildUtteranceCountMap,
+  filterOrphanUtterances,
+  isOrphanFilterEnabled,
+  summarizeDroppedOrphans,
+} from '../../lib/export/orphanFilter.js'
 
 /** embedded WAV S3 다운로드 동시성 (packageBuilder 와 동일 정책). */
 const AUDIO_DOWNLOAD_CONCURRENCY = 4
@@ -54,6 +60,8 @@ interface SessionRow {
   conversation_context?: Record<string, unknown> | null
   support_quality_labels?: Record<string, unknown> | null
   created_at?: string | null
+  /** mig027 — worker.py persist_results 가 신규 N 으로 갱신. orphan filter 게이트 컬럼. */
+  utterance_count?: number | null
   [key: string]: unknown
 }
 
@@ -206,7 +214,8 @@ interface SessionContext {
   utterances: UtteranceRow[]
 }
 
-async function loadSessionContext(sessionId: string): Promise<SessionContext> {
+// internal — testability 를 위해 export (외부 API 계약은 buildSessionExportZip 만).
+export async function loadSessionContext(sessionId: string): Promise<SessionContext> {
   const sessionResp = await supabaseAdmin
     .from('sessions')
     .select('*')
@@ -232,10 +241,34 @@ async function loadSessionContext(sessionId: string): Promise<SessionContext> {
     )
   }
 
-  return {
-    session: sessionResp.data as SessionRow,
-    utterances: (utteranceResp.data ?? []) as UtteranceRow[],
+  const session = sessionResp.data as SessionRow
+  const allUtterances = (utteranceResp.data ?? []) as UtteranceRow[]
+
+  // orphan utterance 필터 (export hardening, 디렉터 옵션 X 2026-05-29).
+  //   sequence_order > session.utterance_count 인 행은 stale orphan 으로 drop.
+  //   curated marker (pii_reviewed_at / pii_masked_at / quality_reviewed_by) 와 무관.
+  //   설계: scripts/analysis/export_hardening_orphan_filter_20260529.md
+  //   feature flag EXPORT_ORPHAN_FILTER_ENABLED='false' 명시 시에만 우회 (default true).
+  //   single-session 경로라 sessions 추가 query 불필요 (session.utterance_count 그대로 사용).
+  if (isOrphanFilterEnabled()) {
+    const utteranceCountMap = buildUtteranceCountMap([
+      { id: session.id, utterance_count: session.utterance_count },
+    ])
+    const outcome = filterOrphanUtterances(allUtterances, utteranceCountMap)
+    if (outcome.dropped.length > 0) {
+      const summary = summarizeDroppedOrphans(
+        outcome.dropped as Array<{ id?: string | null; session_id?: string | null; sequence_order?: number | null }>,
+      )
+      const count = utteranceCountMap.get(session.id) ?? 0
+      console.warn(
+        `[loadSessionContext] session=${sessionId} dropped ${summary.totalDropped} orphan utterances ` +
+          `(utterance_count=${count}, sample_ids=${JSON.stringify(summary.sampleUtteranceIds)})`,
+      )
+    }
+    return { session, utterances: outcome.kept }
   }
+
+  return { session, utterances: allUtterances }
 }
 
 // ── 아티팩트 작성 ────────────────────────────────────────────────────────
