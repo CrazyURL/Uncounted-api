@@ -11,6 +11,12 @@ import { supabaseAdmin, fetchAllPaginated } from '../supabase.js'
 import { s3Client, S3_AUDIO_BUCKET } from '../s3.js'
 import { getMetadataForExport } from './metadataRepository.js'
 import { collectMaskTypeDistribution, deriveMaskingMethod } from './maskingProvenance.js'
+import {
+  buildUtteranceCountMap,
+  filterOrphanUtterances,
+  isOrphanFilterEnabled,
+  summarizeDroppedOrphans,
+} from './orphanFilter.js'
 
 // ZIP 빌드 동안 S3 다운로드를 batch로 병렬 처리할 동시 다운로드 수.
 // 각 batch는 fully Buffer로 다운로드 후 S3 연결을 즉시 닫는다.
@@ -407,6 +413,53 @@ async function _buildPackageInner(
 
   if (utterances.length === 0) {
     throw new Error(`No utterances found for export job ${exportJobId}`)
+  }
+
+  // 2d. orphan utterance 필터 (export hardening, 디렉터 옵션 X 2026-05-29).
+  //   sequence_order > sessions.utterance_count 인 행은 stale orphan 으로 간주 → drop.
+  //   curated marker (pii_reviewed_at / pii_masked_at / quality_reviewed_by) 와 무관.
+  //   설계: scripts/analysis/export_hardening_orphan_filter_20260529.md
+  //   feature flag EXPORT_ORPHAN_FILTER_ENABLED='false' 명시 시에만 우회 (default true).
+  //   fail-closed: sessions 조회 실패 시 throw → export 전체 중단 (silent 포함 금지).
+  if (isOrphanFilterEnabled()) {
+    await setStage('orphan 필터 (sessions.utterance_count)')
+    const sessionIdsForFilter = [
+      ...new Set(utterances.map((u) => u.session_id as string).filter(Boolean)),
+    ]
+    if (sessionIdsForFilter.length > 0) {
+      const { data: sessionRows, error: sessionRowsError } = await supabaseAdmin
+        .from('sessions')
+        .select('id, utterance_count')
+        .in('id', sessionIdsForFilter)
+
+      if (sessionRowsError) {
+        // fail-closed: silent 포함 금지.
+        throw new Error(
+          `[buildPackage] job=${exportJobId} orphan filter sessions query failed: ${sessionRowsError.message}`,
+        )
+      }
+
+      const utteranceCountMap = buildUtteranceCountMap(
+        (sessionRows ?? []) as Array<{ id: unknown; utterance_count: unknown }>,
+      )
+      const outcome = filterOrphanUtterances(utterances, utteranceCountMap)
+      if (outcome.dropped.length > 0) {
+        const summary = summarizeDroppedOrphans(
+          outcome.dropped as Array<{ id?: string | null; session_id?: string | null; sequence_order?: number | null }>,
+        )
+        console.warn(
+          `[buildPackage] job=${exportJobId} dropped ${summary.totalDropped} orphan utterances ` +
+            `(per_session=${JSON.stringify(summary.perSessionCount)}, sample_ids=${JSON.stringify(summary.sampleUtteranceIds)})`,
+        )
+      }
+      utterances = outcome.kept
+      if (utterances.length === 0) {
+        // 전 utterance 가 orphan → export 의미 없음. 명시적 throw.
+        throw new Error(
+          `[buildPackage] job=${exportJobId} all utterances dropped as orphans (utterance_count mismatch — worker run failed or stale data only)`,
+        )
+      }
+    }
   }
 
   // 3. Load quality metrics for involved sessions
