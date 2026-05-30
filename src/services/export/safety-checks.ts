@@ -16,6 +16,11 @@ import { promises as fs } from 'fs'
 import path from 'path'
 import { sanitizeExternalMethod } from '../../lib/export/transforms.js'
 import { parseNameDenylist, maskKnownNames } from '../../lib/piiNameMask.js'
+import {
+  detectTranscriptPatterns,
+  isSafetyPreflightEnabled,
+  type TranscriptPatternCategory,
+} from '../../lib/export/transcript-pattern-detector.js'
 
 // ── 키워드 / 키 / value 화이트리스트 ──────────────────────────────────────
 
@@ -68,6 +73,22 @@ const JSON_LIKE_EXTENSIONS: readonly string[] = ['.json', '.jsonl']
 export interface ExportSafetyResult {
   violations: string[]
   warnings: string[]
+  /**
+   * PR-A export safety preflight (P0) — transcript / labels / call_*.txt 본문의
+   * 위험 패턴(credential / foreign_id / payment / korean_name / numeric_sensitive)
+   * sweep 결과. enabled=true 면 총 hit ≥1 → fail-closed (호출자 throw 대상).
+   *
+   * 원문(transcript / matched substring) 절대 미포함 — 카테고리 × count 만.
+   */
+  safetyPreflight: {
+    enabled: boolean
+    scannedFiles: number
+    totalHits: number
+    hitsByCategory: Record<TranscriptPatternCategory, number>
+    status: 'pass' | 'fail' | 'skipped'
+    /** 어떤 카테고리에서 첫 hit 가 났는지 (호출자 throw 메시지용, 안전한 식별자만). */
+    failingCategories: TranscriptPatternCategory[]
+  }
 }
 
 // ── 메인 검증 ────────────────────────────────────────────────────────────
@@ -127,7 +148,93 @@ export async function validateExportSafety(
     }
   }
 
-  return { violations, warnings }
+  // PR-A export safety preflight (P0) — transcript / labels / call_*.txt 의
+  // 위험 패턴 sweep. 디렉터 명시: detector silent failure 대응 defense-in-depth.
+  const safetyPreflight = await runTranscriptPreflight(stagingDir, files, violations)
+
+  return { violations, warnings, safetyPreflight }
+}
+
+// ── PR-A: transcript preflight sweep ──────────────────────────────────────
+
+/** sweep 대상 = utterances/*.jsonl, labels/*.jsonl, calls/*.txt, calls/*.json (transcript) */
+function isPreflightTargetFile(stagingDir: string, abs: string): boolean {
+  const rel = path.relative(stagingDir, abs).replace(/\\/g, '/').toLowerCase()
+  return (
+    rel.startsWith('utterances/') ||
+    rel.startsWith('labels/') ||
+    rel.startsWith('calls/')
+  )
+}
+
+async function runTranscriptPreflight(
+  stagingDir: string,
+  files: string[],
+  violations: string[],
+): Promise<ExportSafetyResult['safetyPreflight']> {
+  const enabled = isSafetyPreflightEnabled()
+  if (!enabled) {
+    return {
+      enabled: false,
+      scannedFiles: 0,
+      totalHits: 0,
+      hitsByCategory: emptyCategoryCounts(),
+      status: 'skipped',
+      failingCategories: [],
+    }
+  }
+
+  const targets = files.filter((f) => isPreflightTargetFile(stagingDir, f))
+  const totals = emptyCategoryCounts()
+  let totalHits = 0
+
+  for (const abs of targets) {
+    const content = await fs.readFile(abs, 'utf-8')
+    const r = detectTranscriptPatterns(content)
+    totalHits += r.totalHits
+    for (const [cat, c] of Object.entries(r.hitsByCategory) as Array<
+      [TranscriptPatternCategory, number]
+    >) {
+      totals[cat] += c
+    }
+  }
+
+  const failingCategories: TranscriptPatternCategory[] = (
+    Object.entries(totals) as Array<[TranscriptPatternCategory, number]>
+  )
+    .filter(([, c]) => c > 0)
+    .map(([cat]) => cat)
+
+  const status: 'pass' | 'fail' = totalHits > 0 ? 'fail' : 'pass'
+
+  if (status === 'fail') {
+    // 원문 미포함 — 카테고리 × count 만. 호출자 throw 시 그대로 사용.
+    const summary = failingCategories
+      .map((cat) => `${cat}=${totals[cat]}`)
+      .join(', ')
+    violations.push(
+      `Export safety preflight failed: ${summary} (total ${totalHits} hit${totalHits === 1 ? '' : 's'})`,
+    )
+  }
+
+  return {
+    enabled: true,
+    scannedFiles: targets.length,
+    totalHits,
+    hitsByCategory: totals,
+    status,
+    failingCategories,
+  }
+}
+
+function emptyCategoryCounts(): Record<TranscriptPatternCategory, number> {
+  return {
+    credential_like: 0,
+    foreign_id_like: 0,
+    payment_like: 0,
+    korean_name_like: 0,
+    numeric_sensitive_like: 0,
+  }
 }
 
 // ── 헬퍼: 텍스트 파일 수집 ───────────────────────────────────────────────
