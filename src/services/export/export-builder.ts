@@ -32,6 +32,7 @@ import {
   summarizeDroppedOrphans,
 } from '../../lib/export/orphanFilter.js'
 import { computeSessionQualityTier } from '../../lib/export/sessionQualityTier.js'
+import { computeLabelConfidenceTier } from '../../lib/export/labelConfidenceTier.js'
 
 /** embedded WAV S3 다운로드 동시성 (packageBuilder 와 동일 정책). */
 const AUDIO_DOWNLOAD_CONCURRENCY = 4
@@ -511,6 +512,11 @@ function buildLabelLine(
   const speechAct = pickSpeechAct(u.speech_act_events)
   const numericPatterns = sanitizeNumericPatterns(u.numeric_patterns)
   const labelConfidence = toNumOrNull(u.label_confidence)
+  // PR-D: label_confidence > emotion_confidence > null. pure helper, DB write 0.
+  const tier = computeLabelConfidenceTier({
+    label_confidence: u.label_confidence,
+    emotion_confidence: u.emotion_confidence,
+  })
 
   const line: Record<string, unknown> = {
     utterance_id: u.id,
@@ -524,7 +530,7 @@ function buildLabelLine(
     speaker_role_candidate: sanitizeExternalSpeakerRole(u.speaker_id),
     label_origin: sanitizeExternalLabelOrigin(u.label_source),
     label_version: sanitizeExternalMethod(u.auto_label_model_version),
-    confidence_tier: null,
+    confidence_tier: tier.tier,
     label_confidence: labelConfidence,
 
     audio_export_mode: audioExportMode,
