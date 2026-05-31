@@ -31,6 +31,7 @@ import userRewards from './routes/user-rewards.js'
 import adminReviews from './routes/admin-reviews.js'
 import adminDeliveries from './routes/admin-deliveries.js'
 import adminDashboard from './routes/admin-dashboard.js'
+import adminAnalytics from './routes/admin-analytics.js'
 import adminBalances from './routes/admin-balances.js'
 import adminUtterancesV2 from './routes/admin-utterances-v2.js'
 import adminGpuWorker from './routes/admin-gpu-worker.js'
@@ -120,6 +121,7 @@ app.route('/api/admin', adminRewards)
 app.route('/api/admin', adminReviews)
 app.route('/api/admin', adminDeliveries)
 app.route('/api/admin', adminDashboard)
+app.route('/api/admin/analytics', adminAnalytics)
 app.route('/api/admin', adminBalances)
 app.route('/api/admin', adminUtterancesV2)
 app.route('/api/admin', adminGpuWorker)
