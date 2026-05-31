@@ -31,6 +31,7 @@ import {
   isOrphanFilterEnabled,
   summarizeDroppedOrphans,
 } from '../../lib/export/orphanFilter.js'
+import { computeSessionQualityTier } from '../../lib/export/sessionQualityTier.js'
 
 /** embedded WAV S3 다운로드 동시성 (packageBuilder 와 동일 정책). */
 const AUDIO_DOWNLOAD_CONCURRENCY = 4
@@ -452,13 +453,19 @@ function buildCallJson(
   utterances: UtteranceRow[],
   audioExportMode: AudioExportMode,
 ): Record<string, unknown> {
+  // PR-C: DB 값 우선 → utterances quality_grade 분포 fallback. DB write 0.
+  const tier = computeSessionQualityTier({
+    db_value: session.session_quality_tier ?? null,
+    utterances,
+  })
   return {
     session_id: session.id,
     created_at: session.created_at ?? null,
     audio_export_mode: audioExportMode,
     audio_metadata: session.audio_metadata ?? null,
     session_topic_summary: session.session_topic_summary ?? null,
-    session_quality_tier: session.session_quality_tier ?? null,
+    session_quality_tier: tier.tier,
+    tier_source: tier.source,
     utterance_count: utterances.length,
   }
 }
@@ -623,13 +630,19 @@ function buildAutoEmotion(u: UtteranceRow): Record<string, unknown> | null {
 
 function buildDatasetSummary(session: SessionRow, utterances: UtteranceRow[]): Record<string, unknown> {
   const totalDuration = utterances.reduce((sum, u) => sum + (toNum(u.duration_sec) ?? 0), 0)
+  // PR-C: tier 산정 (DB 우선 → utterances 분포 fallback). dataset_quality_report 와 동일 값.
+  const tier = computeSessionQualityTier({
+    db_value: session.session_quality_tier ?? null,
+    utterances,
+  })
   return {
     session_id: session.id,
     utterance_count: utterances.length,
     total_duration_sec: round(totalDuration, 3),
     consent_status: session.consent_status ?? null,
     review_status: session.review_status ?? null,
-    session_quality_tier: session.session_quality_tier ?? null,
+    session_quality_tier: tier.tier,
+    tier_source: tier.source,
     notes: [
       '안전선 #5: review_status=approved + consent_status=both_agreed + session_dataset_eligible!=false 에 한해 export.',
     ],
@@ -645,10 +658,23 @@ function buildDatasetQualityReport(
     const g = (u as Record<string, unknown>).quality_grade
     if (typeof g === 'string') grades[g] = (grades[g] ?? 0) + 1
   }
+  // PR-C: tier 산정 (DB 우선 → utterances 분포 fallback). 산정 근거 (tier_source /
+  // tier_reason / ab_ratio / df_ratio) 동봉 — buyer/admin 의 신뢰 근거.
+  const tier = computeSessionQualityTier({
+    db_value: session.session_quality_tier ?? null,
+    utterances,
+  })
   return {
     session_id: session.id,
     quality_grade_distribution: grades,
-    session_quality_tier: session.session_quality_tier ?? null,
+    session_quality_tier: tier.tier,
+    tier_source: tier.source,
+    tier_reason: tier.tier_reason,
+    tier_metrics: {
+      total: tier.metrics.total,
+      ab_ratio: round(tier.metrics.ab_ratio, 4),
+      df_ratio: round(tier.metrics.df_ratio, 4),
+    },
   }
 }
 
@@ -919,4 +945,7 @@ export const _testInternals = {
   buildAudioManifest,
   downloadAudioFilesToStaging,
   buildLabelLine,
+  buildCallJson,
+  buildDatasetSummary,
+  buildDatasetQualityReport,
 }
