@@ -471,13 +471,78 @@ function buildCallJson(
   }
 }
 
+// ── PII 텍스트 마스킹 (시간 구간 기반) ────────────────────────────────────
+// detector 가 산출한 pii_intervals(startSec/endSec/piiType)와 transcript_words 의
+// word 시간을 매칭해, 겹치는 word 를 piiType 토큰으로 치환한다. char offset 이
+// 없으므로 시간 교차로 단어를 찾는다. DB 는 변경하지 않고(원본 provenance 유지),
+// 외부로 나가는 ZIP 텍스트에만 적용한다(안전선 #3: 평문 PII 미노출).
+const _PII_TOKEN: Record<string, string> = {
+  이름: '[이름]',
+  IP주소: '[IP]',
+  전화번호: '[전화번호]',
+  주민등록번호: '[주민등록번호]',
+  계좌번호: '[계좌번호]',
+  카드번호: '[카드번호]',
+  여권번호: '[여권번호]',
+  운전면허번호: '[운전면허번호]',
+  이메일: '[이메일]',
+}
+
+function _piiToken(piiType: string): string {
+  return _PII_TOKEN[piiType] ?? '[PII]'
+}
+
+interface _MaskWord { word: string; start: number; end: number }
+
+function _coerceWords(raw: unknown): _MaskWord[] {
+  if (!Array.isArray(raw)) return []
+  const out: _MaskWord[] = []
+  for (const w of raw) {
+    if (!w || typeof w !== 'object') continue
+    const o = w as Record<string, unknown>
+    const word = typeof o.word === 'string' ? o.word : ''
+    const start = toNumOrNull(o.start)
+    const end = toNumOrNull(o.end)
+    if (!word || start === null || end === null) continue
+    out.push({ word, start, end })
+  }
+  return out
+}
+
+/**
+ * pii_intervals 시간과 겹치는 word 를 piiType 토큰으로 치환한 텍스트를 반환한다.
+ * - transcript_words 가 없거나 pii_intervals 가 없으면 원본 텍스트를 그대로 반환.
+ * - 시간 교차 판정: word 와 interval 이 조금이라도 겹치면(>0) 마스킹.
+ */
+function maskTextByPiiIntervals(u: UtteranceRow): string {
+  const text = typeof u.transcript_text === 'string' ? u.transcript_text : ''
+  if (!text) return text
+  const intervals = sanitizePiiLabels(u.pii_intervals)
+  if (intervals.length === 0) return text
+  const words = _coerceWords((u as Record<string, unknown>).transcript_words)
+  if (words.length === 0) return text
+
+  const masked = words.map((w) => {
+    for (const iv of intervals) {
+      const s = iv.startSec as number
+      const e = iv.endSec as number
+      if (w.start < e && w.end > s) {
+        return _piiToken(iv.piiType as string)
+      }
+    }
+    return w.word
+  })
+  const joined = masked.join(' ').replace(/\s+/g, ' ').trim()
+  return joined || text
+}
+
 function buildCallTxt(utterances: UtteranceRow[]): string {
   return utterances
     .map((u) => {
       const label = typeof u.speaker_id === 'string' && u.speaker_id.length > 0
         ? u.speaker_id
         : 'UNKNOWN'
-      const text = typeof u.transcript_text === 'string' ? u.transcript_text : ''
+      const text = maskTextByPiiIntervals(u)
       return `[${label}] ${text}`
     })
     .join('\n')
@@ -497,7 +562,7 @@ function buildUtteranceLine(u: UtteranceRow, sessionId: string): Record<string, 
     speaker_label: typeof u.speaker_id === 'string' ? u.speaker_id : 'UNKNOWN',
     // speaker_role_candidate: 안전선 #1 후보값만 (확정값 X).
     speaker_role_candidate: sanitizeExternalSpeakerRole(u.speaker_id),
-    text: typeof u.transcript_text === 'string' ? u.transcript_text : null,
+    text: maskTextByPiiIntervals(u),
   }
 }
 
@@ -524,7 +589,7 @@ function buildLabelLine(
     sequence_order: u.sequence_order,
     start_sec: toNum(u.start_sec),
     end_sec: toNum(u.end_sec),
-    text: typeof u.transcript_text === 'string' ? u.transcript_text : null,
+    text: maskTextByPiiIntervals(u),
 
     speaker_label: typeof u.speaker_id === 'string' ? u.speaker_id : 'UNKNOWN',
     speaker_role_candidate: sanitizeExternalSpeakerRole(u.speaker_id),
@@ -951,6 +1016,9 @@ export const _testInternals = {
   buildAudioManifest,
   downloadAudioFilesToStaging,
   buildLabelLine,
+  maskTextByPiiIntervals,
+  buildCallTxt,
+  buildUtteranceLine,
   buildCallJson,
   buildDatasetSummary,
   buildDatasetQualityReport,
