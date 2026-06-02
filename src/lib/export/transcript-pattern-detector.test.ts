@@ -234,6 +234,41 @@ describe('numeric_sensitive_like', () => {
     const r = detectTranscriptPatterns('123456 그리고 987654 두개')
     expect(r.hitsByCategory.numeric_sensitive_like).toBe(2)
   })
+
+  // ── ID/hex 오탐 제외 (PR-ε) ──────────────────────────────────────────────
+  // session_id hex(93c28f5700279c51)·utterance_id·audio_reference_id 의 숫자
+  // 조각은 PII 가 아니므로 numeric_sensitive 로 잡지 않는다(영문/_/- 인접).
+  it('session_id hex 안의 숫자 시퀀스 → no hit', () => {
+    const r = detectTranscriptPatterns('93c28f5700279c51')
+    expect(r.hitsByCategory.numeric_sensitive_like).toBe(0)
+  })
+
+  it('utterance_id (utt_<hex>_001) → no hit', () => {
+    const r = detectTranscriptPatterns('utt_93c28f5700279c51_001')
+    expect(r.hitsByCategory.numeric_sensitive_like).toBe(0)
+  })
+
+  it('JSON 라인의 id 필드 값 → no hit', () => {
+    const r = detectTranscriptPatterns('"session_id": "93c28f5700279c51",')
+    expect(r.hitsByCategory.numeric_sensitive_like).toBe(0)
+  })
+
+  it('영문 인접 숫자(abc1234567) → no hit (ID/토큰 조각)', () => {
+    const r = detectTranscriptPatterns('ref abc1234567xyz')
+    expect(r.hitsByCategory.numeric_sensitive_like).toBe(0)
+  })
+
+  it('하이픈 ISO 타임스탬프 조각 → no hit', () => {
+    const r = detectTranscriptPatterns('2026-06-02T08:14:21')
+    expect(r.hitsByCategory.numeric_sensitive_like).toBe(0)
+  })
+
+  // 진짜 PII 는 여전히 잡는다(회귀 가드)
+  it('공백 사이 순수 6+자리(전화/식별번호) → 여전히 hit', () => {
+    expect(detectTranscriptPatterns('번호 123456').hitsByCategory.numeric_sensitive_like).toBe(1)
+    expect(detectTranscriptPatterns('연락처 0212345678').hitsByCategory.numeric_sensitive_like).toBe(1)
+    expect(detectTranscriptPatterns('계좌 1234567890 입니다').hitsByCategory.numeric_sensitive_like).toBe(1)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────
