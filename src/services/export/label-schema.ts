@@ -138,5 +138,35 @@ export const LABEL_SCHEMA_JSON = {
         },
       },
     },
+
+    // Task 5: 화자중첩 메타 (null = 미산출 — false 단정 금지). buildOverlap 구조와 정합.
+    overlap: {
+      oneOf: [
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['is_overlapping', 'count', 'total_sec', 'ratio', 'intervals'],
+          properties: {
+            is_overlapping: { type: 'boolean' },
+            count: { type: 'number' },
+            total_sec: { type: 'number' },
+            ratio: { type: 'number' },
+            intervals: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['start_sec', 'end_sec'],
+                properties: {
+                  start_sec: { type: 'number' },
+                  end_sec: { type: 'number' },
+                },
+              },
+            },
+          },
+        },
+        { type: 'null' },
+      ],
+    },
   },
 } as const

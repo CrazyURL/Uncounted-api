@@ -288,3 +288,42 @@ describe('export-builder — buildLabelLine auto_labels.emotion (flat 매핑)', 
     })
   })
 })
+
+describe('export-builder — provenance sanitize (안전선 #6)', () => {
+  async function internals() {
+    return await import('./export-builder.js').then((m) => m._testInternals)
+  }
+
+  it('sanitizeModelVersions: raw 모델명(whisperx/pyannote) → 메서드 enum', async () => {
+    const { sanitizeModelVersions } = await internals()
+    const out = sanitizeModelVersions({
+      stt: 'large-v3',
+      align: 'whisperx-align',
+      diarization: 'pyannote/speaker-diarization-3.1',
+      compute_type: 'int8',
+    })
+    expect(out).toEqual({
+      stt: 'not_available',
+      align: 'automatic',
+      diarization: 'automatic',
+      compute_type: 'not_available',
+    })
+    expect(JSON.stringify(out).toLowerCase()).not.toMatch(/whisperx|pyannote/)
+  })
+
+  it('sanitizeModelVersions: null/비객체 → null', async () => {
+    const { sanitizeModelVersions } = await internals()
+    expect(sanitizeModelVersions(null)).toBeNull()
+    expect(sanitizeModelVersions('large-v3')).toBeNull()
+    expect(sanitizeModelVersions([])).toBeNull()
+  })
+
+  it('sanitizeVersionString: 인라인 # 주석 + standalone 6+ 숫자 제거', async () => {
+    const { sanitizeVersionString } = await internals()
+    expect(sanitizeVersionString('v2-largev3-int8  # v2 activation 20260531')).toBe('v2-largev3-int8')
+    expect(sanitizeVersionString('2.0.0')).toBe('2.0.0')
+    expect(sanitizeVersionString('번호 1234567')).toBe('번호')
+    expect(sanitizeVersionString(null)).toBeNull()
+    expect(sanitizeVersionString('')).toBeNull()
+  })
+})

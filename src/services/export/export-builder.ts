@@ -90,6 +90,12 @@ interface UtteranceRow {
   speech_act_events?: unknown
   numeric_patterns?: unknown
   utterance_form?: Record<string, unknown> | null
+  // Task 5: 화자중첩(cross-talk) 메타. null = 미산출(평가 안 됨) → false 로 단정 금지.
+  is_overlapping?: boolean | null
+  overlap_count?: number | string | null
+  overlap_total_sec?: number | string | null
+  overlap_ratio?: number | string | null
+  overlap_intervals?: unknown
   review_status?: string | null
   upload_status?: string | null
   [key: string]: unknown
@@ -118,7 +124,7 @@ export async function buildSessionExportZip(
     requestedMode === 'embedded' ? 'embedded' : 'reference_only'
   const includeAudio = audioExportMode === 'embedded'
 
-  const { session, utterances: loadedUtterances } = await loadSessionContext(sessionId)
+  const { session, utterances: loadedUtterances, lineageRun } = await loadSessionContext(sessionId)
 
   // 기본은 로드된 전체 발화. 일반 납품 플로우에서는 발화 단위 품질 필터를 적용한다.
   let utterances = loadedUtterances
@@ -161,6 +167,7 @@ export async function buildSessionExportZip(
       includeAudio,
       includeRestricted,
       syncQualityReport,
+      lineageRun,
     })
 
     // ZIP 빌드 직전 safety scan.
@@ -214,6 +221,8 @@ export async function buildBatchExportZip(): Promise<never> {
 interface SessionContext {
   session: SessionRow
   utterances: UtteranceRow[]
+  // Task 8: 최신 처리 run provenance (없으면 null — 미처리/lineage 이전 세션)
+  lineageRun: Record<string, unknown> | null
 }
 
 // internal — testability 를 위해 export (외부 API 계약은 buildSessionExportZip 만).
@@ -246,6 +255,21 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
   const session = sessionResp.data as SessionRow
   const allUtterances = (utteranceResp.data ?? []) as UtteranceRow[]
 
+  // Task 8: 이 세션의 최신 provenance run (null-safe — 실패/부재 시 null, export 무중단)
+  let lineageRun: Record<string, unknown> | null = null
+  try {
+    const lr = await supabaseAdmin
+      .from('lineage_runs')
+      .select('pipeline_git_sha,pipeline_version,service_version,model_versions,gate_states,created_at')
+      .eq('session_id', sessionId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (!lr.error && lr.data) lineageRun = lr.data as Record<string, unknown>
+  } catch {
+    // lineage optional — 미적용 환경에서도 export 정상
+  }
+
   // orphan utterance 필터 (export hardening, 디렉터 옵션 X 2026-05-29).
   //   sequence_order > session.utterance_count 인 행은 stale orphan 으로 drop.
   //   curated marker (pii_reviewed_at / pii_masked_at / quality_reviewed_by) 와 무관.
@@ -267,10 +291,10 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
           `(utterance_count=${count}, sample_ids=${JSON.stringify(summary.sampleUtteranceIds)})`,
       )
     }
-    return { session, utterances: outcome.kept }
+    return { session, utterances: outcome.kept, lineageRun }
   }
 
-  return { session, utterances: allUtterances }
+  return { session, utterances: allUtterances, lineageRun }
 }
 
 // ── 아티팩트 작성 ────────────────────────────────────────────────────────
@@ -283,6 +307,8 @@ interface WriteContext {
   includeRestricted: boolean
   /** Sync Integrity Gate(D1) 활성 시에만 채워짐. 있으면 metadata/ 에 동봉. */
   syncQualityReport?: SyncQualityReport | null
+  /** Task 8: 최신 처리 run provenance (없으면 null). call_*.json 에 동봉. */
+  lineageRun?: Record<string, unknown> | null
 }
 
 async function writeAllArtifacts(
@@ -290,6 +316,7 @@ async function writeAllArtifacts(
   ctx: WriteContext,
 ): Promise<void> {
   const { session, utterances, audioExportMode, includeAudio, includeRestricted } = ctx
+  const lineageRun = ctx.lineageRun ?? null
   const sid = session.id
 
   await fs.mkdir(path.join(stagingDir, 'calls'), { recursive: true })
@@ -314,7 +341,7 @@ async function writeAllArtifacts(
   // calls/
   await writeJson(
     path.join(stagingDir, 'calls', `call_${sid}.json`),
-    buildCallJson(session, utterances, audioExportMode),
+    buildCallJson(session, utterances, audioExportMode, lineageRun),
   )
   await writeText(
     path.join(stagingDir, 'calls', `call_${sid}.txt`),
@@ -449,10 +476,53 @@ function buildReadme(session: SessionRow): string {
 
 // ── calls/ ───────────────────────────────────────────────────────────────
 
+// 안전선 #6 — provenance 외부 노출 sanitize.
+//   model_versions: raw 모델명(whisperx/pyannote 등)을 메서드 enum 으로 일반화
+//     (auto_label_model_version line 639 과 동일 정책을 provenance 에도 일관 적용).
+//   version 문자열: 인라인 `#` 주석(내부 메모·날짜 누출, 예 "v2-...  # v2 activation 20260531")
+//     제거 + 잔여 standalone 6+ 숫자열 제거(numeric_sensitive 차단).
+function sanitizeVersionString(v: unknown): string | null {
+  if (typeof v !== 'string' || v.length === 0) return null
+  const noComment = v.split('#')[0].trim()
+  const scrubbed = noComment.replace(/(?<![\dA-Za-z._-])\d{6,}(?![\dA-Za-z._-])/g, '').trim()
+  return scrubbed.length > 0 ? scrubbed : null
+}
+
+function sanitizeModelVersions(mv: unknown): Record<string, string> | null {
+  if (!mv || typeof mv !== 'object' || Array.isArray(mv)) return null
+  const out: Record<string, string> = {}
+  for (const [k, val] of Object.entries(mv as Record<string, unknown>)) {
+    out[k] = sanitizeExternalMethod(val)
+  }
+  return Object.keys(out).length > 0 ? out : null
+}
+
+// Task 8: provenance 외부 노출 정화 (안전선 #6 — 내부 모델명/버전·git SHA·게이트
+// 내부값 비노출). raw 상세는 내부 lineage_runs 테이블에만 보존하고, 바이어 산출물엔
+// processed_at + 일반화 method 카테고리(automatic/supervised_model/...)만 노출.
+function sanitizeProvenance(
+  lineageRun: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!lineageRun) return null
+  const mv = (lineageRun.model_versions ?? {}) as Record<string, unknown>
+  const methods = Array.from(
+    new Set(
+      Object.values(mv)
+        .map((v) => sanitizeExternalMethod(v))
+        .filter((m) => m !== 'not_available'),
+    ),
+  )
+  return {
+    processed_at: lineageRun.created_at ?? null,
+    methods,
+  }
+}
+
 function buildCallJson(
   session: SessionRow,
   utterances: UtteranceRow[],
   audioExportMode: AudioExportMode,
+  lineageRun: Record<string, unknown> | null = null,
 ): Record<string, unknown> {
   // PR-C: DB 값 우선 → utterances quality_grade 분포 fallback. DB write 0.
   const tier = computeSessionQualityTier({
@@ -468,6 +538,17 @@ function buildCallJson(
     session_quality_tier: tier.tier,
     tier_source: tier.source,
     utterance_count: utterances.length,
+    // Task 8: 데이터 족보(provenance). null = 미처리/lineage 이전 세션(날조 금지).
+    provenance: lineageRun
+      ? {
+          pipeline_git_sha: lineageRun.pipeline_git_sha ?? null,
+          pipeline_version: sanitizeVersionString(lineageRun.pipeline_version),
+          service_version: sanitizeVersionString(lineageRun.service_version),
+          model_versions: sanitizeModelVersions(lineageRun.model_versions),
+          gate_states: lineageRun.gate_states ?? null,
+          processed_at: lineageRun.created_at ?? null,
+        }
+      : null,
   }
 }
 
@@ -563,6 +644,9 @@ function buildUtteranceLine(u: UtteranceRow, sessionId: string): Record<string, 
     // speaker_role_candidate: 안전선 #1 후보값만 (확정값 X).
     speaker_role_candidate: sanitizeExternalSpeakerRole(u.speaker_id),
     text: maskTextByPiiIntervals(u),
+    // Task 5: 핵심 필터 1개만 코어 파일에 노출(상세는 labels/*.jsonl 의 overlap 객체).
+    // null = 미산출(평가 안 됨) — false 로 단정하지 않는다.
+    is_overlapping: u.is_overlapping ?? null,
   }
 }
 
@@ -611,9 +695,39 @@ function buildLabelLine(
     conversation_context: null,
     emotion_detail: null,
     pii_labels: piiLabels,
+    // Task 5: 화자중첩 메타 (null = 미산출). 바이어 필터: overlap.is_overlapping === false.
+    overlap: buildOverlap(u),
   }
 
   return line
+}
+
+// Task 5: overlap intervals 정제 (jsonb → [{start_sec,end_sec}] 숫자 보장).
+function sanitizeOverlapIntervals(raw: unknown): Array<{ start_sec: number; end_sec: number }> {
+  if (!Array.isArray(raw)) return []
+  const out: Array<{ start_sec: number; end_sec: number }> = []
+  for (const it of raw) {
+    if (it && typeof it === 'object') {
+      const s = toNumOrNull((it as Record<string, unknown>).start_sec)
+      const e = toNumOrNull((it as Record<string, unknown>).end_sec)
+      if (s !== null && e !== null) out.push({ start_sec: s, end_sec: e })
+    }
+  }
+  return out
+}
+
+// Task 5: utterance 단위 overlap 메타 객체.
+// ★무결성: is_overlapping 이 null/undefined(미산출)면 null 반환 — false 로 단정하지 않는다.
+// false 는 "프리미엄(비중첩) 보장"이므로 평가 안 된 발화를 false 로 내보내면 오염 위험.
+function buildOverlap(u: UtteranceRow): Record<string, unknown> | null {
+  if (u.is_overlapping === null || u.is_overlapping === undefined) return null
+  return {
+    is_overlapping: u.is_overlapping === true,
+    count: toNumOrNull(u.overlap_count) ?? 0,
+    total_sec: toNumOrNull(u.overlap_total_sec) ?? 0,
+    ratio: toNumOrNull(u.overlap_ratio) ?? 0,
+    intervals: sanitizeOverlapIntervals(u.overlap_intervals),
+  }
 }
 
 function sanitizePiiLabels(raw: unknown): Array<Record<string, unknown>> {
@@ -1022,4 +1136,6 @@ export const _testInternals = {
   buildCallJson,
   buildDatasetSummary,
   buildDatasetQualityReport,
+  sanitizeVersionString,
+  sanitizeModelVersions,
 }
