@@ -110,8 +110,15 @@ const KOREAN_NAME_TITLE_RE = new RegExp(
   'g',
 )
 
-/** numeric_sensitive_like — 6+ 자리 Arabic 숫자 (전화번호 / 식별번호). */
-const NUMERIC_SENSITIVE_RE = /(?<![\d.])\d{6,}(?![\d.])/g
+/** numeric_sensitive_like — 6+ 자리 Arabic 숫자 (전화번호 / 식별번호).
+ *
+ * 경계에 영문자/언더스코어/하이픈/점이 붙은 숫자는 제외한다. 이는 hex 식별자
+ * (session_id `93c28f5700279c51` 의 `5700279`) 나 ID 필드(`utt_..._001`)의 숫자
+ * 조각을 PII 로 오탐하지 않기 위함이다. 실제 민감 숫자(전화번호/계좌/식별번호)는
+ * 공백·한글·문장부호 사이에 단독으로 나타나므로 영향받지 않는다.
+ * 예: "번호 123456"(hit) / "연락처 0212345678"(hit) / "93c28f5700279c51"(제외).
+ */
+const NUMERIC_SENSITIVE_RE = /(?<![\dA-Za-z._-])\d{6,}(?![\dA-Za-z._-])/g
 
 // ── 핵심 detector ────────────────────────────────────────────────────────
 
