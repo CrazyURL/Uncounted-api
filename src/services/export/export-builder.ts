@@ -538,17 +538,10 @@ function buildCallJson(
     session_quality_tier: tier.tier,
     tier_source: tier.source,
     utterance_count: utterances.length,
-    // Task 8: 데이터 족보(provenance). null = 미처리/lineage 이전 세션(날조 금지).
-    provenance: lineageRun
-      ? {
-          pipeline_git_sha: lineageRun.pipeline_git_sha ?? null,
-          pipeline_version: sanitizeVersionString(lineageRun.pipeline_version),
-          service_version: sanitizeVersionString(lineageRun.service_version),
-          model_versions: sanitizeModelVersions(lineageRun.model_versions),
-          gate_states: lineageRun.gate_states ?? null,
-          processed_at: lineageRun.created_at ?? null,
-        }
-      : null,
+    // Task 8: 데이터 족보(provenance) — 안전선 #6 정화본만(sanitizeProvenance).
+    // git SHA·gate_states·버전문자열(largev3 등 모델힌트)은 내부 lineage_runs 에만 보존,
+    // 바이어 산출물엔 processed_at + 일반화 method 카테고리만. null=미처리(날조 금지).
+    provenance: sanitizeProvenance(lineageRun),
   }
 }
 
