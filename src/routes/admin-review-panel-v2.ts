@@ -8,8 +8,11 @@
 //   POST   /api/admin/utterance-gt              — 검수 GT 저장 (신규)
 //   PATCH  /api/admin/utterance-gt/:id          — GT 수정
 //   POST   /api/admin/utterance-revisions       — 정정 audit 기록
-//   GET    /api/admin/utterances/queue          — 발화 검수 큐 (tier 필터)
-//   GET    /api/admin/sessions/queue            — 통화 검수 큐 (tier 필터)
+//   GET    /api/admin/review-queue/utterances   — 발화 검수 큐 (tier 필터)
+//   GET    /api/admin/review-queue/sessions     — 통화 검수 큐 (tier 필터)
+//
+// ⚠ /sessions/queue, /utterances/queue 패턴은 기존 /sessions/:id, /utterances/:id
+//   라우트와 충돌 (queue 를 :id 로 매칭). /review-queue/* 접두로 분리.
 //
 // 정본 §2.4 자동승인 Tier 정책은 CBO 합의 후 별도 라우트.
 
@@ -176,7 +179,7 @@ adminReviewPanelV2.post('/utterance-revisions', async (c) => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. GET /utterances/queue — 발화 검수 큐
+// 4. GET /review-queue/utterances — 발화 검수 큐
 // ─────────────────────────────────────────────────────────────────────────────
 // 쿼리:
 //   tier      = red | yellow | green | all  (기본 red)
@@ -186,7 +189,7 @@ adminReviewPanelV2.post('/utterance-revisions', async (c) => {
 //   exclude_reviewed = 'true' → 이미 GT 가 있는 발화 제외
 // ─────────────────────────────────────────────────────────────────────────────
 
-adminReviewPanelV2.get('/utterances/queue', async (c) => {
+adminReviewPanelV2.get('/review-queue/utterances', async (c) => {
   const url = new URL(c.req.url)
   const tier = (url.searchParams.get('tier') ?? 'red') as PriorityTier | 'all'
   const sessionId = url.searchParams.get('session_id')
@@ -235,7 +238,7 @@ adminReviewPanelV2.get('/utterances/queue', async (c) => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. GET /sessions/queue — 통화 검수 큐
+// 5. GET /review-queue/sessions — 통화 검수 큐
 // ─────────────────────────────────────────────────────────────────────────────
 // 쿼리:
 //   tier      = red | yellow | green | all  (기본 red)
@@ -243,7 +246,7 @@ adminReviewPanelV2.get('/utterances/queue', async (c) => {
 //   offset    = 0~
 // ─────────────────────────────────────────────────────────────────────────────
 
-adminReviewPanelV2.get('/sessions/queue', async (c) => {
+adminReviewPanelV2.get('/review-queue/sessions', async (c) => {
   const url = new URL(c.req.url)
   const tier = (url.searchParams.get('tier') ?? 'red') as PriorityTier | 'all'
   const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') ?? '20', 10) || 20))
