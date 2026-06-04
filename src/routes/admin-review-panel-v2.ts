@@ -8,8 +8,9 @@
 //   POST   /api/admin/utterance-gt              — 검수 GT 저장 (신규)
 //   PATCH  /api/admin/utterance-gt/:id          — GT 수정
 //   POST   /api/admin/utterance-revisions       — 정정 audit 기록
-//   GET    /api/admin/review-queue/utterances   — 발화 검수 큐 (tier 필터)
-//   GET    /api/admin/review-queue/sessions     — 통화 검수 큐 (tier 필터)
+//   GET    /api/admin/review-queue/utterances        — 발화 검수 큐 (tier 필터)
+//   GET    /api/admin/review-queue/sessions          — 통화 검수 큐 (tier 필터)
+//   GET    /api/admin/review-queue/utterance-context — 대상 발화 ±n 문맥
 //
 // ⚠ /sessions/queue, /utterances/queue 패턴은 기존 /sessions/:id, /utterances/:id
 //   라우트와 충돌 (queue 를 :id 로 매칭). /review-queue/* 접두로 분리.
@@ -304,6 +305,66 @@ adminReviewPanelV2.get('/review-queue/sessions', async (c) => {
   return c.json({
     data: enriched,
     meta: { total: count ?? enriched.length, limit, offset, tier },
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. GET /review-queue/utterance-context — 검수 대상 발화의 앞뒤 문맥
+// ─────────────────────────────────────────────────────────────────────────────
+// 쿼리:
+//   utterance_id = 대상 발화 ID (필수)
+//   n            = 앞뒤 발화 개수 (기본 2, 최대 5)
+//
+// 응답: sequence_order 순으로 정렬된 ±n 발화 + 대상
+//   [{ id, sequence_order, transcript_text, is_user, speaker_id,
+//      start_sec, end_sec, review_priority_tier, is_target }]
+// ─────────────────────────────────────────────────────────────────────────────
+
+adminReviewPanelV2.get('/review-queue/utterance-context', async (c) => {
+  const url = new URL(c.req.url)
+  const utteranceId = url.searchParams.get('utterance_id')
+  const n = Math.min(5, Math.max(1, parseInt(url.searchParams.get('n') ?? '2', 10) || 2))
+
+  if (!utteranceId) {
+    return c.json({ error: 'utterance_id required' }, 400)
+  }
+
+  // 1. 대상 발화 메타
+  const { data: target, error: e1 } = await supabaseAdmin
+    .from('utterances')
+    .select('id, session_id, sequence_order')
+    .eq('id', utteranceId)
+    .single()
+
+  if (e1 || !target) {
+    return c.json({ error: e1?.message ?? 'utterance not found' }, 404)
+  }
+
+  const targetSeq = target.sequence_order as number
+
+  // 2. session 내 sequence_order ±n 발화
+  const { data: rows, error: e2 } = await supabaseAdmin
+    .from('utterances')
+    .select(
+      'id, sequence_order, transcript_text, is_user, speaker_id, start_sec, end_sec, review_priority_tier, review_priority_score, emotion, quality_grade',
+    )
+    .eq('session_id', target.session_id)
+    .gte('sequence_order', targetSeq - n)
+    .lte('sequence_order', targetSeq + n)
+    .order('sequence_order', { ascending: true })
+
+  if (e2) {
+    return c.json({ error: e2.message }, 500)
+  }
+
+  const items = (rows ?? []).map((r) => ({
+    ...r,
+    is_target: r.id === utteranceId,
+  }))
+
+  return c.json({
+    data: items,
+    meta: { target_utterance_id: utteranceId, session_id: target.session_id, target_sequence: targetSeq, n },
   })
 })
 
