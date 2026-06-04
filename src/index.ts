@@ -16,6 +16,8 @@ import sessions from './routes/sessions.js'
 import storage from './routes/storage.js'
 import admin from './routes/admin.js'
 import adminExports from './routes/admin-exports.js'
+import adminExport from './routes/admin-export.js'
+import adminDeliveryPackages from './routes/admin-delivery-packages.js'
 import adminLedger from './routes/admin-ledger.js'
 import adminUtterances from './routes/admin-utterances.js'
 import logging from './routes/logging.js'
@@ -32,6 +34,7 @@ import adminDeliveries from './routes/admin-deliveries.js'
 import adminDashboard from './routes/admin-dashboard.js'
 import adminBalances from './routes/admin-balances.js'
 import adminUtterancesV2 from './routes/admin-utterances-v2.js'
+import adminReviewPanelV2 from './routes/admin-review-panel-v2.js'
 import adminGpuWorker from './routes/admin-gpu-worker.js'
 import adminDownloads from './routes/admin-downloads.js'
 import adminTraining from './routes/admin-training.js'
@@ -115,9 +118,13 @@ app.route('/api/admin', adminDeliveries)
 app.route('/api/admin', adminDashboard)
 app.route('/api/admin', adminBalances)
 app.route('/api/admin', adminUtterancesV2)
+app.route('/api/admin', adminReviewPanelV2)
 app.route('/api/admin', adminGpuWorker)
 app.route('/api/admin', adminDownloads)
 app.route('/api/admin', adminTraining)
+// ── 창 D (Export v2 — 별도 prefix /api/admin/export/* / /api/admin/delivery/*) ──
+app.route('/api/admin', adminExport)
+app.route('/api/admin', adminDeliveryPackages)
 app.route('/api/user', userRewards)
 app.route('/api/logging', logging)
 app.route('/api/consent', consent)
