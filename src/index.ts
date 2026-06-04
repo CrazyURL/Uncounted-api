@@ -34,6 +34,7 @@ import adminDashboard from './routes/admin-dashboard.js'
 import adminAnalytics from './routes/admin-analytics.js'
 import adminBalances from './routes/admin-balances.js'
 import adminUtterancesV2 from './routes/admin-utterances-v2.js'
+import adminReviewPanelV2 from './routes/admin-review-panel-v2.js'
 import adminGpuWorker from './routes/admin-gpu-worker.js'
 import adminDownloads from './routes/admin-downloads.js'
 import adminTraining from './routes/admin-training.js'
@@ -124,6 +125,7 @@ app.route('/api/admin', adminDashboard)
 app.route('/api/admin/analytics', adminAnalytics)
 app.route('/api/admin', adminBalances)
 app.route('/api/admin', adminUtterancesV2)
+app.route('/api/admin', adminReviewPanelV2)
 app.route('/api/admin', adminGpuWorker)
 app.route('/api/admin', adminDownloads)
 app.route('/api/admin', adminTraining)
