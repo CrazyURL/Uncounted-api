@@ -39,6 +39,7 @@ const AUDIO_DOWNLOAD_CONCURRENCY = 4
 
 import { validateExportSafety } from './safety-checks.js'
 import { validateDeliveryRecords } from './delivery-schema.js'
+import { signPackage } from './package-signing.js'
 import { LABEL_SCHEMA_JSON } from './label-schema.js'
 import type {
   AudioExportMode,
@@ -187,6 +188,9 @@ export async function buildSessionExportZip(
     )
     await assembleZip(stagingDir, zipPath)
 
+    // 패키지 암호서명(C2PA 경량 대안): ZIP SHA-256 + (키 있으면) Ed25519 서명 → <zip>.SIGNATURE.json
+    const signature = await signPackage(zipPath, new Date().toISOString())
+
     const manifest = buildManifest({
       session,
       utterances,
@@ -195,7 +199,7 @@ export async function buildSessionExportZip(
       includeRestricted,
     })
 
-    return { zipPath, manifest, safety }
+    return { zipPath, manifest, safety, signature }
   } finally {
     // staging dir 정리는 호출자가 zip 파일을 옮긴 후로 미뤄도 됨.
     // 본 단계에서는 staging dir 를 유지하여 검증 grep 이 가능하도록 보존하지 않고 zip 후 삭제.

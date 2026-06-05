@@ -38,6 +38,7 @@ export interface BuildSessionExportResult {
   zipPath: string
   manifest: ExportManifest
   safety: ExportSafetySummary
+  signature?: import('./package-signing.js').PackageSignature
 }
 
 export interface ExportManifest {
