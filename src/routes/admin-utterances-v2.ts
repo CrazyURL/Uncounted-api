@@ -39,7 +39,7 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
   let query = supabaseAdmin
     .from('utterances')
     .select(
-      'id, session_id, speaker_id, session_speaker_id, segment_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at, quality_grade, quality_review_status, quality_exclusion_reason, emotion, emotion_confidence, dialog_act, dialog_act_confidence, label_source, auto_label_model_version, utterance_form, honorific_level, confidence_tier, sessions(session_seq, date, duration, review_status, consent_status), session_speakers!session_speaker_id(speaker_role, speaker_gender, speaker_voice_age_range), session_segments!segment_id(topic)',
+      'id, session_id, speaker_id, session_speaker_id, segment_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at, quality_grade, quality_review_status, quality_exclusion_reason, emotion, emotion_confidence, dialog_act, dialog_act_confidence, label_source, auto_label_model_version, utterance_form, honorific_level, confidence_tier, review_flags, review_priority_score, sessions(session_seq, date, duration, review_status, consent_status), session_speakers!session_speaker_id(speaker_role, speaker_gender, speaker_voice_age_range), session_segments!segment_id(topic)',
       { count: 'exact' },
     )
 
@@ -161,6 +161,9 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
           : null,
       honorific_level: (row.honorific_level as string) ?? null,
       confidence_tier: (row.confidence_tier as string) ?? null,
+      // T2 검수 소프트플래그 (호격/Nim-Guard 등). 마스킹 아님 — 사람 검수 대기 신호.
+      review_flags: Array.isArray(row.review_flags) ? (row.review_flags as Record<string, unknown>[]) : null,
+      review_priority_score: (row.review_priority_score as number) ?? null,
       // H2b — 사람 emotion 라벨 (최신 1행). 없으면 null. labeler 식별자는 응답에서 제외.
       human_label: humanLabelByUtt.get(row.id as string) ?? null,
     }
