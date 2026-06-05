@@ -550,20 +550,23 @@ function buildCallJson(
 // word 시간을 매칭해, 겹치는 word 를 piiType 토큰으로 치환한다. char offset 이
 // 없으므로 시간 교차로 단어를 찾는다. DB 는 변경하지 않고(원본 provenance 유지),
 // 외부로 나가는 ZIP 텍스트에만 적용한다(안전선 #3: 평문 PII 미노출).
+// 토큰은 voice-api P0 표준(2026-06-04)과 통일: [PII_<타입>]. 기존 [이름]/[IP] 폐기 →
+// DB transcript_text 의 [PII_*] 와 납품물 토큰 체계 일치(타입 보존, downstream LLM 정합).
 const _PII_TOKEN: Record<string, string> = {
-  이름: '[이름]',
-  IP주소: '[IP]',
-  전화번호: '[전화번호]',
-  주민등록번호: '[주민등록번호]',
-  계좌번호: '[계좌번호]',
-  카드번호: '[카드번호]',
-  여권번호: '[여권번호]',
-  운전면허번호: '[운전면허번호]',
-  이메일: '[이메일]',
+  이름: '[PII_이름]',
+  IP주소: '[PII_IP주소]',
+  전화번호: '[PII_전화번호]',
+  주민등록번호: '[PII_주민등록번호]',
+  계좌번호: '[PII_계좌번호]',
+  카드번호: '[PII_카드번호]',
+  여권번호: '[PII_여권번호]',
+  운전면허번호: '[PII_운전면허번호]',
+  이메일: '[PII_이메일]',
 }
 
 function _piiToken(piiType: string): string {
-  return _PII_TOKEN[piiType] ?? '[PII]'
+  // 미등록 타입(extended numeric_sensitive_like 등)도 [PII_<타입>] 로 일관.
+  return _PII_TOKEN[piiType] ?? `[PII_${piiType}]`
 }
 
 interface _MaskWord { word: string; start: number; end: number }

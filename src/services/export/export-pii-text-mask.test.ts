@@ -44,15 +44,15 @@ function utt(over: Record<string, unknown> = {}): Record<string, unknown> {
 }
 
 describe('PR-δ: maskTextByPiiIntervals', () => {
-  it('IP 구간 word 를 [IP] 토큰으로 치환', () => {
+  it('IP 구간 word 를 [PII_IP주소] 토큰으로 치환', () => {
     const out = maskTextByPiiIntervals(utt())
-    expect(out).toContain('[IP]')
+    expect(out).toContain('[PII_IP주소]')
     expect(out).not.toContain('10.45.55.177')   // 평문 IP 미노출
     expect(out).toContain('서버')                 // 비-PII word 보존
     expect(out).toContain('입니다')
   })
 
-  it('이름 piiType 은 [이름] 토큰', () => {
+  it('이름 piiType 은 [PII_이름] 토큰', () => {
     const out = maskTextByPiiIntervals(utt({
       transcript_text: '저는 이진석 입니다',
       transcript_words: [
@@ -62,7 +62,7 @@ describe('PR-δ: maskTextByPiiIntervals', () => {
       ],
       pii_intervals: [{ startSec: 0.6, endSec: 1.2, piiType: '이름', maskType: 'text_only' }],
     }))
-    expect(out).toContain('[이름]')
+    expect(out).toContain('[PII_이름]')
     expect(out).not.toContain('이진석')
   })
 
@@ -87,11 +87,11 @@ describe('PR-δ: maskTextByPiiIntervals', () => {
     expect(out).toContain('10.45.55.177')   // 시간 안 겹침 → 원본 유지
   })
 
-  it('알 수 없는 piiType 은 [PII] 토큰', () => {
+  it('알 수 없는 piiType 은 [PII_<타입>] 토큰', () => {
     const out = maskTextByPiiIntervals(utt({
       pii_intervals: [{ startSec: 1.1, endSec: 2.0, piiType: '미지', maskType: 'text_only' }],
     }))
-    expect(out).toContain('[PII]')
+    expect(out).toContain('[PII_미지]')
     expect(out).not.toContain('10.45.55.177')
   })
 })
@@ -100,13 +100,13 @@ describe('PR-δ: buildCallTxt / buildUtteranceLine 마스킹 통합', () => {
   it('buildCallTxt 출력에 평문 PII 없음', () => {
     const txt = buildCallTxt([utt()])
     expect(txt).toContain('[SPEAKER_01]')
-    expect(txt).toContain('[IP]')
+    expect(txt).toContain('[PII_IP주소]')
     expect(txt).not.toContain('10.45.55.177')
   })
 
   it('buildUtteranceLine.text 에 평문 PII 없음', () => {
     const line = buildUtteranceLine(utt(), 's')
-    expect(String(line.text)).toContain('[IP]')
+    expect(String(line.text)).toContain('[PII_IP주소]')
     expect(String(line.text)).not.toContain('10.45.55.177')
   })
 
