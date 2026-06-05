@@ -269,23 +269,66 @@ describe('export-builder — buildLabelLine auto_labels.emotion (flat 매핑)', 
     expect(JSON.stringify(line)).not.toContain('STALE_HUMAN_LABEL')
   })
 
-  it('speech_act 라인은 이번 수정의 영향을 받지 않는다(기존 동작 유지)', async () => {
+  it('speech_act(대화목적)을 dialog_act 백필 컬럼에서 생성한다', async () => {
     const buildLabelLine = await getBuildLabelLine()
     const line = buildLabelLine(
       {
         ...baseUtt,
         emotion: '중립',
-        speech_act_events: [{ value: '질문', confidence: 0.9, method: 'rule_v1' }],
+        // 실제 백필: speech_act_events 는 비어 있고 dialog_act flat 컬럼에 라벨이 들어옴.
+        speech_act_events: [],
+        dialog_act: '제안',
+        dialog_act_confidence: '0.9', // supabase NUMERIC → string
+        label_source: 'heuristic_mvp',
       },
       'sess1',
       'reference_only',
     )
     const autoLabels = line.auto_labels as Record<string, unknown>
     expect(autoLabels.speech_act).toEqual({
-      value: '질문',
+      value: '제안',
       confidence: 0.9,
-      method: 'rule_based_mvp',
+      // 안전선 #12: heuristic_mvp 임시 라벨을 supervised 로 위장하지 않고 정직 노출.
+      method: 'heuristic_mvp',
     })
+  })
+
+  it('dialog_act 미산출이면 speech_act=null (정직 노출, fallback)', async () => {
+    const buildLabelLine = await getBuildLabelLine()
+    const nullLine = buildLabelLine(
+      { ...baseUtt, dialog_act: null, label_source: 'heuristic_mvp' },
+      'sess1',
+      'reference_only',
+    )
+    const emptyLine = buildLabelLine(
+      { ...baseUtt, dialog_act: '', label_source: 'heuristic_mvp' },
+      'sess1',
+      'reference_only',
+    )
+    expect((nullLine.auto_labels as Record<string, unknown>).speech_act).toBeNull()
+    expect((emptyLine.auto_labels as Record<string, unknown>).speech_act).toBeNull()
+  })
+
+  it('conversation_context 는 DB JSONB 그대로 passthrough (하드코딩 null 아님)', async () => {
+    const buildLabelLine = await getBuildLabelLine()
+    const cc = {
+      turn_index: 1,
+      topic_thread: '건강/의료',
+      discourse_role: 'opening',
+      prev_turn_gist: 'default_context',
+    }
+    const line = buildLabelLine(
+      { ...baseUtt, conversation_context: cc },
+      'sess1',
+      'reference_only',
+    )
+    expect(line.conversation_context).toEqual(cc)
+  })
+
+  it('conversation_context 미백필이면 null', async () => {
+    const buildLabelLine = await getBuildLabelLine()
+    const line = buildLabelLine({ ...baseUtt }, 'sess1', 'reference_only')
+    expect(line.conversation_context).toBeNull()
   })
 })
 

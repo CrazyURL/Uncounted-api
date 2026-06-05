@@ -95,7 +95,12 @@ interface UtteranceRow {
   emotion_arousal?: number | string | null
   emotion_dominance?: number | string | null
   dialog_act?: string | null
+  // 대화목적(speech_act) 백필 — heuristic_mvp 라벨. auto_labels.speech_act 소스.
+  dialog_act_confidence?: number | string | null
   dialog_intensity?: number | null
+  // 발화 단위 대화맥락 (turn_index/topic_thread/discourse_role/prev_turn_gist 4키 객체).
+  // JSONB 그대로 통과 (이미 마스킹/fallback 처리된 객체). null = 미백필.
+  conversation_context?: Record<string, unknown> | null
   label_source?: string | null
   label_confidence?: number | string | null
   auto_label_model_version?: string | null
@@ -766,7 +771,7 @@ function buildLabelLine(
   speakerLookup: SpeakerLookupMap = new Map(),
 ): Record<string, unknown> {
   const piiLabels = sanitizePiiLabels(u.pii_intervals)
-  const speechAct = pickSpeechAct(u.speech_act_events)
+  const speechAct = buildSpeechAct(u)
   const numericPatterns = sanitizeNumericPatterns(u.numeric_patterns)
   const labelConfidence = toNumOrNull(u.label_confidence)
   // PR-D: label_confidence > emotion_confidence > null. pure helper, DB write 0.
@@ -801,7 +806,9 @@ function buildLabelLine(
 
     utterance_form: u.utterance_form ?? null,
     numeric_patterns: numericPatterns,
-    conversation_context: null,
+    // 발화 단위 대화맥락 (turn_index/topic_thread/discourse_role/prev_turn_gist).
+    // DB JSONB 그대로 통과 (이미 마스킹/fallback 처리됨). 미백필 시 null.
+    conversation_context: u.conversation_context ?? null,
     emotion_detail: buildEmotionDetail(u),
     pii_labels: piiLabels,
     // Task 5: 화자중첩 메타 (null = 미산출). 바이어 필터: overlap.is_overlapping === false.
@@ -883,15 +890,28 @@ function sanitizeNumericPatterns(raw: unknown): Array<Record<string, unknown>> {
   return out
 }
 
-function pickSpeechAct(raw: unknown): Record<string, unknown> | null {
-  if (!Array.isArray(raw) || raw.length === 0) return null
-  const first = raw[0]
-  if (!first || typeof first !== 'object') return null
-  const obj = first as Record<string, unknown>
+/**
+ * auto_labels.speech_act (대화목적) — dialog_act 백필 컬럼에서 생성.
+ *
+ * SPEC §4.2.13: speech_act_events → {value, confidence, method}. 단 현재 백필은
+ * speech_act_events 가 비어 있고(JSONB []) dialog_act/dialog_act_confidence/label_source
+ * flat 컬럼에 들어 있으므로 그쪽에서 직접 매핑한다.
+ *
+ * - value: u.dialog_act (15-class 한국어 라벨, 예 진술/질문 — 모델명 아님, 정상 노출).
+ * - confidence: u.dialog_act_confidence (NUMERIC → number).
+ * - method: 안전선 #6/#12 — label_source 를 외부 5종 allowlist 로 정직 일반화.
+ *   현재 백필 source='heuristic_mvp' → 'heuristic_mvp' 노출 (supervised 위장 금지).
+ *
+ * dialog_act 미산출(null/empty)이면 null 반환 — 정직하게 null 노출.
+ */
+function buildSpeechAct(u: UtteranceRow): Record<string, unknown> | null {
+  const value =
+    typeof u.dialog_act === 'string' && u.dialog_act.length > 0 ? u.dialog_act : null
+  if (value === null) return null
   return {
-    value: typeof obj.value === 'string' ? obj.value : typeof obj.act === 'string' ? obj.act : null,
-    confidence: toNumOrNull(obj.confidence),
-    method: sanitizeExternalMethod(obj.method),
+    value,
+    confidence: toNumOrNull(u.dialog_act_confidence),
+    method: sanitizeExternalMethod(u.label_source),
   }
 }
 
