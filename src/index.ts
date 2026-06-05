@@ -45,6 +45,10 @@ import adminUtterancesRawTranscript from './routes/admin-utterances-raw-transcri
 import adminEmotionLabels from './routes/admin-emotion-labels.js'
 import calls from './routes/calls.js'
 import contracts from './routes/contracts.js'
+import userLearningOptout from './routes/user-learning-optout.js'
+import userAutomatedDecisionAppeal from './routes/user-automated-decision-appeal.js'
+import userProcessingResultReport from './routes/user-processing-result-report.js'
+import adminAppealsQueue from './routes/admin-appeals-queue.js'
 
 // package.json에서 버전 정보 읽기
 const __filename = fileURLToPath(import.meta.url)
@@ -144,6 +148,11 @@ app.route('/api/user', user)
 app.route('/api/upload', upload)
 app.route('/api/calls', calls)
 app.route('/api/contracts', contracts)
+// PIPC 2026 v1.3 정합 (§13 학습 거부 / §13.3 신고 / §14 자동결정 거부)
+app.route('/api/user/learning-optout', userLearningOptout)
+app.route('/api/user/automated-decision-appeal', userAutomatedDecisionAppeal)
+app.route('/api/user/processing-result-report', userProcessingResultReport)
+app.route('/api/admin', adminAppealsQueue)
 
 // ── 404 핸들러 ─────────────────────────────────────────────────────────
 
