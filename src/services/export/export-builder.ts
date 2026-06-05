@@ -38,6 +38,7 @@ import { computeLabelConfidenceTier } from '../../lib/export/labelConfidenceTier
 const AUDIO_DOWNLOAD_CONCURRENCY = 4
 
 import { validateExportSafety } from './safety-checks.js'
+import { validateDeliveryRecords } from './delivery-schema.js'
 import { LABEL_SCHEMA_JSON } from './label-schema.js'
 import type {
   AudioExportMode,
@@ -348,10 +349,18 @@ async function writeAllArtifacts(
     buildCallTxt(utterances),
   )
 
-  // utterances/
+  // utterances/ — JSON Schema 검증(하드게이트): 구조 위반 시 출하 차단.
+  const utteranceLines = utterances.map((u) => buildUtteranceLine(u, sid))
+  const schemaCheck = validateDeliveryRecords(utteranceLines)
+  if (!schemaCheck.valid) {
+    throw new Error(
+      `Delivery schema violation (${schemaCheck.errorCount} in ${schemaCheck.recordCount} records):\n  - ` +
+        schemaCheck.errors.slice(0, 10).join('\n  - '),
+    )
+  }
   await writeJsonl(
     path.join(stagingDir, 'utterances', `utterances_${sid}.jsonl`),
-    utterances.map((u) => buildUtteranceLine(u, sid)),
+    utteranceLines,
   )
 
   // labels/
