@@ -108,6 +108,13 @@ interface UtteranceRow {
   speech_act_events?: unknown
   numeric_patterns?: unknown
   utterance_form?: Record<string, unknown> | null
+  // Prosody/비유창성 메타 (DB utterances 실측 컬럼). null = 미산출. DB 그대로(숫자 메트릭, 모델명/PII 무관).
+  //   silence_before_sec: 직전 발화와의 침묵 갭(초). 첫 발화는 null(이전 발화 없음).
+  //   filler_word_count: 간투어(어/음/아) 수.
+  //   speech_rate_wpm: 발화 속도(WPM).
+  silence_before_sec?: number | string | null
+  filler_word_count?: number | string | null
+  speech_rate_wpm?: number | string | null
   // Task 5: 화자중첩(cross-talk) 메타. null = 미산출(평가 안 됨) → false 로 단정 금지.
   is_overlapping?: boolean | null
   overlap_count?: number | string | null
@@ -810,6 +817,8 @@ function buildLabelLine(
     // DB JSONB 그대로 통과 (이미 마스킹/fallback 처리됨). 미백필 시 null.
     conversation_context: u.conversation_context ?? null,
     emotion_detail: buildEmotionDetail(u),
+    // Prosody/비유창성 메타 (침묵 갭 / 간투어 / 발화속도). DB 그대로, null-safe(개별 필드 결측 시 null).
+    prosody: buildProsody(u),
     pii_labels: piiLabels,
     // Task 5: 화자중첩 메타 (null = 미산출). 바이어 필터: overlap.is_overlapping === false.
     overlap: buildOverlap(u),
@@ -843,6 +852,31 @@ function buildOverlap(u: UtteranceRow): Record<string, unknown> | null {
     total_sec: toNumOrNull(u.overlap_total_sec) ?? 0,
     ratio: toNumOrNull(u.overlap_ratio) ?? 0,
     intervals: sanitizeOverlapIntervals(u.overlap_intervals),
+  }
+}
+
+/**
+ * Prosody/비유창성 메타 객체 — DB utterances 실측 컬럼 묶음 노출.
+ *
+ * 바이어 요구 상호작용 라벨. 전부 숫자 메트릭(모델명/PII 무관, 안전선 무접촉).
+ *   - silence_before_sec: 직전 발화와의 침묵 갭(초). 첫 발화는 DB null → null 그대로(0 으로 단정 금지).
+ *   - filler_word_count: 간투어(어/음/아) 수.
+ *   - speech_rate_wpm: 발화 속도(WPM).
+ *
+ * 값은 DB 그대로(가공 불요). 개별 필드 결측 시 해당 필드만 null (null-safe).
+ * 세 필드 모두 결측이면 객체 자체를 null 반환 — 정직하게 null 노출.
+ */
+function buildProsody(u: UtteranceRow): Record<string, unknown> | null {
+  const silenceBeforeSec = toNumOrNull(u.silence_before_sec)
+  const fillerWordCount = toNumOrNull(u.filler_word_count)
+  const speechRateWpm = toNumOrNull(u.speech_rate_wpm)
+  if (silenceBeforeSec === null && fillerWordCount === null && speechRateWpm === null) {
+    return null
+  }
+  return {
+    silence_before_sec: silenceBeforeSec,
+    filler_word_count: fillerWordCount,
+    speech_rate_wpm: speechRateWpm,
   }
 }
 
@@ -1341,6 +1375,7 @@ export const _testInternals = {
   downloadAudioFilesToStaging,
   buildLabelLine,
   buildEmotionDetail,
+  buildProsody,
   maskTextByPiiIntervals,
   buildCallTxt,
   buildUtteranceLine,

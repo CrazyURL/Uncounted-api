@@ -424,6 +424,94 @@ describe('export-builder — buildEmotionDetail (V-A 차원감정)', () => {
   })
 })
 
+describe('export-builder — buildProsody (침묵/비유창성/발화속도)', () => {
+  async function internals() {
+    return await import('./export-builder.js').then((m) => m._testInternals)
+  }
+
+  const baseUtt = {
+    id: 'u1',
+    session_id: 'sess1',
+    sequence_order: 0,
+    speaker_id: 'SPEAKER_00',
+    start_sec: 0,
+    end_sec: 1.5,
+    transcript_text: '안녕하세요',
+  }
+
+  it('세 값이 모두 있으면 {silence_before_sec,filler_word_count,speech_rate_wpm} 실값 반환', async () => {
+    const { buildProsody } = await internals()
+    const prosody = buildProsody({
+      ...baseUtt,
+      silence_before_sec: 2.12,
+      filler_word_count: 0,
+      speech_rate_wpm: 61.5,
+    } as never)
+    expect(prosody).toEqual({
+      silence_before_sec: 2.12,
+      filler_word_count: 0,
+      speech_rate_wpm: 61.5,
+    })
+  })
+
+  it('supabase NUMERIC(string) 입력도 number 로 변환한다', async () => {
+    const { buildProsody } = await internals()
+    const prosody = buildProsody({
+      ...baseUtt,
+      silence_before_sec: '0.71',
+      filler_word_count: '1',
+      speech_rate_wpm: '63.6',
+    } as never) as Record<string, unknown>
+    expect(prosody.silence_before_sec).toBe(0.71)
+    expect(prosody.filler_word_count).toBe(1)
+    expect(prosody.speech_rate_wpm).toBe(63.6)
+    expect(typeof prosody.speech_rate_wpm).toBe('number')
+  })
+
+  it('첫 발화 silence_before_sec=null 은 필드만 null, 객체는 유지 (부분 결측 null-safe)', async () => {
+    const { buildProsody } = await internals()
+    const prosody = buildProsody({
+      ...baseUtt,
+      silence_before_sec: null,
+      filler_word_count: 0,
+      speech_rate_wpm: 61.5,
+    } as never)
+    expect(prosody).toEqual({
+      silence_before_sec: null,
+      filler_word_count: 0,
+      speech_rate_wpm: 61.5,
+    })
+  })
+
+  it('세 필드 모두 결측이면 prosody=null (정직한 미산출 노출)', async () => {
+    const { buildProsody } = await internals()
+    expect(buildProsody({ ...baseUtt } as never)).toBeNull()
+    expect(
+      buildProsody({ ...baseUtt, silence_before_sec: null, filler_word_count: null, speech_rate_wpm: null } as never),
+    ).toBeNull()
+  })
+
+  it('buildLabelLine.prosody 가 DB 실값으로 배선된다 (하드코딩 null 아님)', async () => {
+    const { buildLabelLine } = await internals()
+    const line = buildLabelLine(
+      { ...baseUtt, silence_before_sec: 2.12, filler_word_count: 0, speech_rate_wpm: 61.5 } as never,
+      'sess1',
+      'reference_only',
+    )
+    expect(line.prosody).toEqual({
+      silence_before_sec: 2.12,
+      filler_word_count: 0,
+      speech_rate_wpm: 61.5,
+    })
+  })
+
+  it('prosody 미산출 발화는 prosody=null', async () => {
+    const { buildLabelLine } = await internals()
+    const line = buildLabelLine({ ...baseUtt } as never, 'sess1', 'reference_only')
+    expect(line.prosody).toBeNull()
+  })
+})
+
 describe('export-builder — provenance sanitize (안전선 #6)', () => {
   async function internals() {
     return await import('./export-builder.js').then((m) => m._testInternals)

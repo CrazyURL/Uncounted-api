@@ -184,5 +184,23 @@ export const LABEL_SCHEMA_JSON = {
         { type: 'null' },
       ],
     },
+
+    // Prosody/비유창성 메타 (DB 실측 숫자 메트릭). null = 세 필드 모두 미산출.
+    // 개별 필드는 결측 시 null (예: 첫 발화 silence_before_sec=null).
+    prosody: {
+      oneOf: [
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['silence_before_sec', 'filler_word_count', 'speech_rate_wpm'],
+          properties: {
+            silence_before_sec: { type: ['number', 'null'] },
+            filler_word_count: { type: ['number', 'null'] },
+            speech_rate_wpm: { type: ['number', 'null'] },
+          },
+        },
+        { type: 'null' },
+      ],
+    },
   },
 } as const
