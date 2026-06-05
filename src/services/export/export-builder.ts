@@ -19,8 +19,15 @@ import { s3Client, S3_AUDIO_BUCKET } from '../../lib/s3.js'
 import {
   sanitizeExternalLabelOrigin,
   sanitizeExternalMethod,
-  sanitizeExternalSpeakerRole,
 } from '../../lib/export/transforms.js'
+import {
+  buildSpeakerLookup,
+  buildSpeakersSection,
+  lookupRoleCandidate,
+  type SessionSpeakerRow,
+  type SpeakerLookupMap,
+} from '../../lib/export/sessionSpeakers.js'
+import { buildRelationFrequency } from '../../lib/export/relationGeneralization.js'
 import { isExportEligible } from '../../lib/export/eligibility.js'
 import { isUtteranceDeliverable } from '../../lib/export/utteranceDeliverability.js'
 import { mapUtteranceRowToSyncInput } from '../../lib/export/utteranceToInternal.js'
@@ -83,6 +90,10 @@ interface UtteranceRow {
   labels?: Record<string, unknown> | null
   emotion?: string | null
   emotion_confidence?: number | string | null
+  // V-A 차원감정 (074+ 신규 컬럼). null = 미산출. valence/arousal/dominance 실값(DB 그대로).
+  emotion_valence?: number | string | null
+  emotion_arousal?: number | string | null
+  emotion_dominance?: number | string | null
   dialog_act?: string | null
   dialog_intensity?: number | null
   label_source?: string | null
@@ -126,7 +137,8 @@ export async function buildSessionExportZip(
     requestedMode === 'embedded' ? 'embedded' : 'reference_only'
   const includeAudio = audioExportMode === 'embedded'
 
-  const { session, utterances: loadedUtterances, lineageRun } = await loadSessionContext(sessionId)
+  const { session, utterances: loadedUtterances, lineageRun, sessionSpeakers, relationFrequency } =
+    await loadSessionContext(sessionId)
 
   // 기본은 로드된 전체 발화. 일반 납품 플로우에서는 발화 단위 품질 필터를 적용한다.
   let utterances = loadedUtterances
@@ -170,6 +182,8 @@ export async function buildSessionExportZip(
       includeRestricted,
       syncQualityReport,
       lineageRun,
+      sessionSpeakers,
+      relationFrequency,
     })
 
     // ZIP 빌드 직전 safety scan.
@@ -228,6 +242,10 @@ interface SessionContext {
   utterances: UtteranceRow[]
   // Task 8: 최신 처리 run provenance (없으면 null — 미처리/lineage 이전 세션)
   lineageRun: Record<string, unknown> | null
+  // 화자 메타(역할/성별/연령/관계). 없거나 조회 실패 시 빈 배열 — export 무중단.
+  sessionSpeakers: SessionSpeakerRow[]
+  // 관계(speaker_relation) K-익명성 게이트용 데이터셋 전체 빈도표. 조회 실패 시 빈 맵.
+  relationFrequency: ReadonlyMap<string, number>
 }
 
 // internal — testability 를 위해 export (외부 API 계약은 buildSessionExportZip 만).
@@ -275,6 +293,30 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
     // lineage optional — 미적용 환경에서도 export 정상
   }
 
+  // 화자 메타(session_speakers) — read-only. null-safe: 실패/부재 시 빈 배열, export 무중단.
+  // speaker_relation 도 select 하나 외부 노출은 sessionSpeakers 모듈이 안전선 #4 로 게이트.
+  let sessionSpeakers: SessionSpeakerRow[] = []
+  try {
+    const ss = await supabaseAdmin
+      .from('session_speakers')
+      .select(
+        'speaker_label,speaker_role,speaker_role_source,speaker_gender,' +
+          'speaker_voice_age_range,speaker_speech_age_range,speaker_relation,' +
+          'speaker_identity_inference,speaker_gender_estimate,speaker_age_group_estimate',
+      )
+      .eq('session_id', sessionId)
+    if (!ss.error && Array.isArray(ss.data)) {
+      sessionSpeakers = ss.data as unknown as SessionSpeakerRow[]
+    }
+  } catch {
+    // session_speakers optional — 미적용 환경에서도 export 정상
+  }
+
+  // 관계 K-익명성(K=5) 게이트용 데이터셋 전체 빈도표 — read-only.
+  // ★전체 테이블 집계라 PostgREST 1000행 cap 을 페이지네이션으로 넘긴다(단일 GET 시
+  //   1000행으로 잘려 빈도가 왜곡 → 잘못된 게이트 판정). 실패 시 빈 맵(보수적 null-게이트).
+  const relationFrequency = await loadRelationFrequency()
+
   // orphan utterance 필터 (export hardening, 디렉터 옵션 X 2026-05-29).
   //   sequence_order > session.utterance_count 인 행은 stale orphan 으로 drop.
   //   curated marker (pii_reviewed_at / pii_masked_at / quality_reviewed_by) 와 무관.
@@ -296,10 +338,37 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
           `(utterance_count=${count}, sample_ids=${JSON.stringify(summary.sampleUtteranceIds)})`,
       )
     }
-    return { session, utterances: outcome.kept, lineageRun }
+    return { session, utterances: outcome.kept, lineageRun, sessionSpeakers, relationFrequency }
   }
 
-  return { session, utterances: allUtterances, lineageRun }
+  return { session, utterances: allUtterances, lineageRun, sessionSpeakers, relationFrequency }
+}
+
+/**
+ * 데이터셋 전체 session_speakers.speaker_relation 빈도표 로드 (K-익명성 게이트용).
+ *
+ * PostgREST 는 응답을 1000행으로 cap 하므로 .range() 페이지네이션으로 전 행을 순회한다.
+ * (단일 select 시 1000행으로 잘려 관계 빈도가 과소집계 → 흔한값이 일반화/null 로
+ *  오게이트될 수 있다.) 조회 실패/부분 실패 시 그때까지 수집분으로 집계(보수적).
+ */
+async function loadRelationFrequency(): Promise<ReadonlyMap<string, number>> {
+  const PAGE = 1000
+  const rows: Array<{ speaker_relation?: string | null }> = []
+  try {
+    for (let from = 0; ; from += PAGE) {
+      const resp = await supabaseAdmin
+        .from('session_speakers')
+        .select('speaker_relation')
+        .not('speaker_relation', 'is', null)
+        .range(from, from + PAGE - 1)
+      if (resp.error || !Array.isArray(resp.data)) break
+      rows.push(...(resp.data as Array<{ speaker_relation?: string | null }>))
+      if (resp.data.length < PAGE) break
+    }
+  } catch {
+    // 빈도표 optional — 실패 시 그때까지 수집분(또는 빈 맵)으로 보수적 게이트.
+  }
+  return buildRelationFrequency(rows)
 }
 
 // ── 아티팩트 작성 ────────────────────────────────────────────────────────
@@ -314,6 +383,10 @@ interface WriteContext {
   syncQualityReport?: SyncQualityReport | null
   /** Task 8: 최신 처리 run provenance (없으면 null). call_*.json 에 동봉. */
   lineageRun?: Record<string, unknown> | null
+  /** 화자 메타(session_speakers). speaker_label 룩업 + call.json speakers[] 섹션 소스. */
+  sessionSpeakers?: SessionSpeakerRow[]
+  /** 관계 K-익명성(K=5) 게이트용 데이터셋 전체 빈도표. 미주입 시 빈 맵(보수적 게이트). */
+  relationFrequency?: ReadonlyMap<string, number>
 }
 
 async function writeAllArtifacts(
@@ -322,6 +395,10 @@ async function writeAllArtifacts(
 ): Promise<void> {
   const { session, utterances, audioExportMode, includeAudio, includeRestricted } = ctx
   const lineageRun = ctx.lineageRun ?? null
+  const sessionSpeakers = ctx.sessionSpeakers ?? []
+  const relationFrequency = ctx.relationFrequency ?? new Map<string, number>()
+  // speaker_label → 역할/성별/연령 룩업 (utterance/label 라인 배선용).
+  const speakerLookup = buildSpeakerLookup(sessionSpeakers)
   const sid = session.id
 
   await fs.mkdir(path.join(stagingDir, 'calls'), { recursive: true })
@@ -346,7 +423,7 @@ async function writeAllArtifacts(
   // calls/
   await writeJson(
     path.join(stagingDir, 'calls', `call_${sid}.json`),
-    buildCallJson(session, utterances, audioExportMode, lineageRun),
+    buildCallJson(session, utterances, audioExportMode, lineageRun, sessionSpeakers, relationFrequency),
   )
   await writeText(
     path.join(stagingDir, 'calls', `call_${sid}.txt`),
@@ -354,7 +431,7 @@ async function writeAllArtifacts(
   )
 
   // utterances/ — JSON Schema 검증(하드게이트): 구조 위반 시 출하 차단.
-  const utteranceLines = utterances.map((u) => buildUtteranceLine(u, sid))
+  const utteranceLines = utterances.map((u) => buildUtteranceLine(u, sid, speakerLookup))
   const schemaCheck = validateDeliveryRecords(utteranceLines)
   if (!schemaCheck.valid) {
     throw new Error(
@@ -370,7 +447,7 @@ async function writeAllArtifacts(
   // labels/
   await writeJsonl(
     path.join(stagingDir, 'labels', `labels_${sid}.jsonl`),
-    utterances.map((u) => buildLabelLine(u, sid, audioExportMode)),
+    utterances.map((u) => buildLabelLine(u, sid, audioExportMode, speakerLookup)),
   )
   await writeJson(
     path.join(stagingDir, 'labels', 'label_schema.json'),
@@ -484,6 +561,11 @@ function buildReadme(session: SessionRow): string {
     '- PII intervals 의 원문은 외부 ZIP 에 포함되지 않습니다.',
     '- numeric_patterns 는 마스킹된 토큰만 포함합니다.',
     '- 화자 역할은 후보값으로만 표기됩니다 (owner_candidate / counterparty_candidate / unknown).',
+    '- 화자 프로필(calls/call_*.json `speakers[]`): 성별/연령은 추정 객체(`*_estimate`)와',
+    '  disclaimer 로만 노출됩니다 (확정 단정 금지).',
+    '- 관계(`relation_candidate`)는 K-익명성(K=5) 게이트 + 일반화 tier 로만 노출됩니다:',
+    '  데이터셋 전체에서 흔한 관계(count>=5)는 원문, 희귀 관계는 상위 범주로 일반화,',
+    '  일반화 후에도 희귀하면 노출하지 않습니다. 모두 추정값(disclaimer 동반)입니다.',
     '',
   ]
   return lines.join('\n')
@@ -538,6 +620,8 @@ function buildCallJson(
   utterances: UtteranceRow[],
   audioExportMode: AudioExportMode,
   lineageRun: Record<string, unknown> | null = null,
+  sessionSpeakers: SessionSpeakerRow[] = [],
+  relationFrequency: ReadonlyMap<string, number> = new Map(),
 ): Record<string, unknown> {
   // PR-C: DB 값 우선 → utterances quality_grade 분포 fallback. DB write 0.
   const tier = computeSessionQualityTier({
@@ -553,6 +637,13 @@ function buildCallJson(
     session_quality_tier: tier.tier,
     tier_source: tier.source,
     utterance_count: utterances.length,
+    // 화자 프로필 (session_speakers). 안전선 #1/#4/#6 준수:
+    //   - 역할: predicted_role candidate 형 (self/other 단어 미노출)
+    //   - 성별/연령: *_estimate 객체 + disclaimer (확정 단정 금지)
+    //   - 관계(speaker_relation): K-익명성(K=5) 게이트 + 일반화 tier (SPEC §4.4 개정).
+    //     흔한값(count>=5)→원문, 희귀값→일반화, tier 도 희귀/미지/부재→null.
+    // 화자 메타 부재(미처리/IVR-only) 시 빈 배열 — 날조 금지.
+    speakers: buildSpeakersSection(sessionSpeakers, relationFrequency),
     // Task 8: 데이터 족보(provenance) — 안전선 #6 정화본만(sanitizeProvenance).
     // git SHA·gate_states·버전문자열(largev3 등 모델힌트)은 내부 lineage_runs 에만 보존,
     // 바이어 산출물엔 processed_at + 일반화 method 카테고리만. null=미처리(날조 금지).
@@ -642,7 +733,11 @@ function buildCallTxt(utterances: UtteranceRow[]): string {
 
 // ── utterances/ ──────────────────────────────────────────────────────────
 
-function buildUtteranceLine(u: UtteranceRow, sessionId: string): Record<string, unknown> {
+function buildUtteranceLine(
+  u: UtteranceRow,
+  sessionId: string,
+  speakerLookup: SpeakerLookupMap = new Map(),
+): Record<string, unknown> {
   return {
     utterance_id: u.id,
     session_id: sessionId,
@@ -652,8 +747,9 @@ function buildUtteranceLine(u: UtteranceRow, sessionId: string): Record<string, 
     duration_sec: toNum(u.duration_sec),
     // speaker_label: 익명 diarization 라벨 (예: SPEAKER_00). 그대로 노출.
     speaker_label: typeof u.speaker_id === 'string' ? u.speaker_id : 'UNKNOWN',
-    // speaker_role_candidate: 안전선 #1 후보값만 (확정값 X).
-    speaker_role_candidate: sanitizeExternalSpeakerRole(u.speaker_id),
+    // speaker_role_candidate: session_speakers 룩업 → 안전선 #1 후보값만 (확정값 X).
+    // 룩업 미스(IVR/미매핑) → unknown.
+    speaker_role_candidate: lookupRoleCandidate(speakerLookup, u.speaker_id),
     text: maskTextByPiiIntervals(u),
     // Task 5: 핵심 필터 1개만 코어 파일에 노출(상세는 labels/*.jsonl 의 overlap 객체).
     // null = 미산출(평가 안 됨) — false 로 단정하지 않는다.
@@ -667,6 +763,7 @@ function buildLabelLine(
   u: UtteranceRow,
   sessionId: string,
   audioExportMode: AudioExportMode,
+  speakerLookup: SpeakerLookupMap = new Map(),
 ): Record<string, unknown> {
   const piiLabels = sanitizePiiLabels(u.pii_intervals)
   const speechAct = pickSpeechAct(u.speech_act_events)
@@ -687,7 +784,8 @@ function buildLabelLine(
     text: maskTextByPiiIntervals(u),
 
     speaker_label: typeof u.speaker_id === 'string' ? u.speaker_id : 'UNKNOWN',
-    speaker_role_candidate: sanitizeExternalSpeakerRole(u.speaker_id),
+    // session_speakers 룩업 → 안전선 #1 후보값. 룩업 미스(IVR/미매핑) → unknown.
+    speaker_role_candidate: lookupRoleCandidate(speakerLookup, u.speaker_id),
     label_origin: sanitizeExternalLabelOrigin(u.label_source),
     label_version: sanitizeExternalMethod(u.auto_label_model_version),
     confidence_tier: tier.tier,
@@ -704,7 +802,7 @@ function buildLabelLine(
     utterance_form: u.utterance_form ?? null,
     numeric_patterns: numericPatterns,
     conversation_context: null,
-    emotion_detail: null,
+    emotion_detail: buildEmotionDetail(u),
     pii_labels: piiLabels,
     // Task 5: 화자중첩 메타 (null = 미산출). 바이어 필터: overlap.is_overlapping === false.
     overlap: buildOverlap(u),
@@ -819,6 +917,31 @@ function buildAutoEmotion(u: UtteranceRow): Record<string, unknown> | null {
     confidence: toNumOrNull(u.emotion_confidence),
     source: 'automatic',
     model_version: sanitizeExternalMethod(u.auto_label_model_version),
+  }
+}
+
+/**
+ * V-A 차원감정 상세 (emotion_detail). auto_labels.emotion(요약값)의 "상세판" 슬롯.
+ *
+ * flat 컬럼 emotion_valence / emotion_arousal / emotion_dominance 에서 직접 매핑.
+ * 세 값이 모두 존재(숫자 변환 성공)할 때만 객체 반환, 하나라도 결측이면 null
+ * (부분 노출로 인한 오해 방지 — 차원감정은 3축이 함께여야 의미).
+ *
+ * - valence/arousal/dominance: DB 값 그대로 (변환·정규화 X).
+ * - method: 안전선 #6 — raw 모델명(audeering/wav2vec 등) 절대 노출 금지.
+ *   전용 모델버전 컬럼이 없으므로 'automatic' 으로 일반화 노출.
+ */
+function buildEmotionDetail(u: UtteranceRow): Record<string, unknown> | null {
+  const valence = toNumOrNull(u.emotion_valence)
+  const arousal = toNumOrNull(u.emotion_arousal)
+  const dominance = toNumOrNull(u.emotion_dominance)
+  if (valence === null || arousal === null || dominance === null) return null
+  return {
+    valence,
+    arousal,
+    dominance,
+    // 안전선 #6: 모델명 비노출. V-A 회귀모델 → 일반화 method 카테고리.
+    method: sanitizeExternalMethod('automatic'),
   }
 }
 
@@ -1197,6 +1320,7 @@ export const _testInternals = {
   buildAudioManifest,
   downloadAudioFilesToStaging,
   buildLabelLine,
+  buildEmotionDetail,
   maskTextByPiiIntervals,
   buildCallTxt,
   buildUtteranceLine,

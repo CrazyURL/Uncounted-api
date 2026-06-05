@@ -122,7 +122,23 @@ export const LABEL_SCHEMA_JSON = {
     },
 
     conversation_context: { type: ['object', 'null'] },
-    emotion_detail: { type: ['object', 'null'] },
+    // V-A 차원감정 상세 (buildEmotionDetail). null = 미산출(3축 중 결측). 안전선 #6: method 는 외부 5종 allowlist.
+    emotion_detail: {
+      oneOf: [
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['valence', 'arousal', 'dominance', 'method'],
+          properties: {
+            valence: { type: 'number' },
+            arousal: { type: 'number' },
+            dominance: { type: 'number' },
+            method: { type: 'string', enum: [...ALLOWED_METHODS] },
+          },
+        },
+        { type: 'null' },
+      ],
+    },
 
     pii_labels: {
       type: 'array',
