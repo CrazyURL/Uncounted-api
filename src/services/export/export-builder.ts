@@ -380,10 +380,12 @@ async function writeAllArtifacts(
   await writeJson(path.join(metaDir, 'quality_report.json'), buildQualityReport(utterances))
   await writeJson(path.join(metaDir, 'label_report.json'), buildLabelReport(utterances))
   await writeJson(path.join(metaDir, 'pii_report.json'), buildPiiReport(utterances))
-  await writeJson(path.join(metaDir, 'consent_report.json'), buildConsentReport(session))
+  await writeJson(path.join(metaDir, 'consent_report.json'), await buildConsentReport(session))
   await writeJson(path.join(metaDir, 'audio_manifest.json'), buildAudioManifest(utterances, sid, audioExportMode))
   await writeJson(path.join(metaDir, 'number_pattern_report.json'), buildNumberPatternReport(utterances))
   await writeJson(path.join(metaDir, 'audio_metadata_report.json'), buildAudioMetadataReport(session))
+  // 패키지 루트: 약관·상업이용권리 문서(플랫폼 상수=value/enum 중 enum, 1개만 최상위).
+  await fs.writeFile(path.join(stagingDir, 'CONSENT_TERMS_AND_LICENSE.md'), CONSENT_TERMS_AND_LICENSE_MD, 'utf-8')
   await writeJson(path.join(metaDir, 'utterance_form_report.json'), buildUtteranceFormReport(utterances))
   await writeJson(path.join(metaDir, 'processing_summary.json'), buildProcessingSummary(audioExportMode, includeAudio, includeRestricted))
   // Sync Integrity Gate(D1) 리포트 — 게이트 활성 시에만 동봉(미활성 시 파일 미생성 → 기존 ZIP 구조 불변).
@@ -926,13 +928,69 @@ function buildPiiReport(utterances: UtteranceRow[]): Record<string, unknown> {
   }
 }
 
-function buildConsentReport(session: SessionRow): Record<string, unknown> {
+// 패키지 루트 약관·라이선스 문서(플랫폼 상수). 세션별 증거는 metadata/consent_report.json.
+const CONSENT_TERMS_AND_LICENSE_MD = `# Uncounted — Consent & Commercial License
+
+## Consent Model: Two-Party Explicit Opt-In
+이 데이터셋의 모든 녹음은 **양측 명시 opt-in** 동의로 수집되었습니다.
+- 각 통화 참여자는 개별 토큰 초대를 받아 *각자* 명시적으로 동의함.
+- 각 동의는 시각·IP·user-agent 감사기록과 함께 내부 보존됨.
+- **양측이 모두 동의한 세션만**(consent_status = both_agreed) 포함됨.
+
+세션별 동의 증거: metadata/consent_report.json
+
+## 통상 소싱보다 강한 동의
+광범위 ToS 수락·단측 동의·스크랩 소싱과 달리, 모든 발화가 **양측 명시 opt-in + 감사추적**을 갖습니다.
+
+## Commercial Use & License
+[법무 최종검토 보류] 본 데이터셋은 참여자가 동의 시점에 합의한 약관에 따라 제공됩니다.
+플랫폼은 위 모델대로 동의가 취득되었음을 보증합니다.
+
+⚠️ 상업적 AI 학습/파인튜닝/재판매 범위는 약관 문구의 최종 법무검토 대상입니다(추후 확정).
+
+## Privacy
+PII(이름·번호 등)는 텍스트([PII_*])와 오디오(beep)에서 마스킹됩니다.
+동의자 감사데이터(IP/user-agent)는 본 외부 패키지에 포함되지 않습니다.
+`
+
+async function buildConsentReport(session: SessionRow): Promise<Record<string, unknown>> {
+  const s = session as unknown as Record<string, unknown>
+  // 양측 동의 audit(consent_invitations). ⚠️ ip_address/user_agent 는 동의자 PII →
+  // 외부 ZIP 엔 *존재 여부*만(audit_present). 원문은 내부 보존(법적 증거).
+  let parties: unknown[] = []
+  try {
+    const inv = await supabaseAdmin
+      .from('consent_invitations')
+      .select('role, status, responded_at, ip_address, user_agent')
+      .eq('session_id', session.id)
+    if (Array.isArray(inv.data)) {
+      parties = inv.data.map((p) => {
+        const r = p as Record<string, unknown>
+        return {
+          role: r.role ?? null,
+          status: r.status ?? null,
+          agreed_at: r.responded_at ?? null,
+          audit_present: Boolean(r.ip_address || r.user_agent), // 원문 IP/UA 외부 미노출
+        }
+      })
+    }
+  } catch {
+    /* invitations 미존재/FK 상이 → 세션레벨 증거만 */
+  }
   return {
     session_id: session.id,
     consent_status: session.consent_status ?? null,
+    consented_at: (s.consented_at as string | null) ?? null,
+    consent_model: 'two_party_explicit_optin', // 양측 명시 opt-in(토큰 초대→각자 동의)
     review_status: session.review_status ?? null,
     session_dataset_eligible: session.session_dataset_eligible ?? null,
-    notes: ['안전선 #5 광의: consent_status=both_agreed + review_status=approved 필수.'],
+    parties, // 양측 audit (역할/동의시각/감사존재). 원문 IP/UA 외부 미노출(동의자 PII).
+    terms_ref: 'CONSENT_TERMS_AND_LICENSE.md', // 약관·상업이용권리 = 루트 문서
+    notes: [
+      '양측 명시 opt-in + 감사추적(시각/IP/UA 내부보존). 단측·묵시 동의 아님.',
+      '약관 전문·상업적 이용권리는 패키지 루트 CONSENT_TERMS_AND_LICENSE.md 참조.',
+      '안전선 #5: both_agreed + approved 만 export.',
+    ],
   }
 }
 
