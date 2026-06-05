@@ -2,7 +2,7 @@
 // AI 학습 데이터 활용 거부 (Opt-out) — 처리방침 v1.3 §13.1
 //
 // 거부 시 회사 자체 재학습 + 매수자 인도 양쪽에서 제외 (5영업일 SLA).
-// users.learning_opt_out / learning_opt_out_at 토글.
+// user_learning_optout 테이블 upsert. row 부재 = default false (활용 허용).
 
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
@@ -15,10 +15,10 @@ learningOptout.get('/', authMiddleware, async (c) => {
   const userId = c.get('userId') as string
 
   const { data, error } = await supabaseAdmin
-    .from('users')
+    .from('user_learning_optout')
     .select('learning_opt_out, learning_opt_out_at')
-    .eq('id', userId)
-    .single()
+    .eq('user_id', userId)
+    .maybeSingle()
 
   if (error) {
     console.error('[learning-optout] fetch failed:', error)
@@ -33,7 +33,7 @@ learningOptout.get('/', authMiddleware, async (c) => {
   })
 })
 
-// PUT /api/user/learning-optout — 토글
+// PUT /api/user/learning-optout — 토글 (upsert)
 learningOptout.put('/', authMiddleware, async (c) => {
   const userId = c.get('userId') as string
   const body = getBody<{ learning_opt_out?: boolean }>(c)
@@ -43,22 +43,29 @@ learningOptout.put('/', authMiddleware, async (c) => {
   }
 
   const learningOptOut = body.learning_opt_out
-  const updates = {
+  const nowIso = new Date().toISOString()
+  const upsertRow = {
+    user_id: userId,
     learning_opt_out: learningOptOut,
-    learning_opt_out_at: learningOptOut ? new Date().toISOString() : null,
+    learning_opt_out_at: learningOptOut ? nowIso : null,
+    updated_at: nowIso,
   }
 
   const { error } = await supabaseAdmin
-    .from('users')
-    .update(updates)
-    .eq('id', userId)
+    .from('user_learning_optout')
+    .upsert(upsertRow, { onConflict: 'user_id' })
 
   if (error) {
-    console.error('[learning-optout] update failed:', error)
+    console.error('[learning-optout] upsert failed:', error)
     return c.json({ error: 'update failed' }, 500)
   }
 
-  return c.json({ data: updates })
+  return c.json({
+    data: {
+      learning_opt_out: learningOptOut,
+      learning_opt_out_at: upsertRow.learning_opt_out_at,
+    },
+  })
 })
 
 export default learningOptout
