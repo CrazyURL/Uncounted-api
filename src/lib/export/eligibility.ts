@@ -45,7 +45,10 @@ interface EligibilityUserShape {
  *   2. review_status === 'approved'
  *   3. session_dataset_eligible !== false  (NULL/undefined 는 미평가로 간주 → 통과)
  *
- * user 인자는 선택. 미전달 시 #0 검사 건너뜀 (caller 가 user join 안 한 경우).
+ * user 인자는 선택. caller 가 user_learning_optout 테이블 row 를
+ * { learning_opt_out: boolean } 형태로 전달. 미전달 시 #0 검사 건너뜀.
+ * row 부재 사용자 = default false (활용 허용) — caller 가 미전달로 처리.
+ *
  * 단, 074 직후 DEFAULT false 상태에서는 #3 가 차단 단계로 작동.
  * 창 B 가 평가 후 true/false 세팅.
  */

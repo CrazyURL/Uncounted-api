@@ -1,24 +1,27 @@
 -- PR: PIPC 2026 가이드 §13(학습 거부권) + §14(자동화된 결정 거부) + §18(변경 이력) 정합
 -- Window: PIPC 2026 v1.3 정합 트랙
 -- Date: 2026-06-05
+-- Note: 우리 schema 에 자체 users 테이블 없음 — Supabase 내장 auth.users 만 사용.
+--       학습 거부 플래그는 별도 user_learning_optout 테이블에 보관.
+--       sessions.id / utterances.id 는 TEXT (UUID 아님).
 
 -- ============================================================
--- 1. users 테이블에 학습 거부 (Opt-out) 플래그
+-- 1. AI 학습 거부 (Opt-out) — 별도 테이블 (auth.users 참조)
 -- ============================================================
-ALTER TABLE users
-  ADD COLUMN IF NOT EXISTS learning_opt_out BOOLEAN NOT NULL DEFAULT FALSE,
-  ADD COLUMN IF NOT EXISTS learning_opt_out_at TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS user_learning_optout (
+  user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  learning_opt_out BOOLEAN NOT NULL DEFAULT FALSE,
+  learning_opt_out_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
-COMMENT ON COLUMN users.learning_opt_out IS
-  'AI 학습 데이터 활용 거부 플래그 (처리방침 v1.3 §13.1). '
-  'true 시 export-builder 가 본 사용자 데이터를 매수자 인도에서 제외하며 '
-  '회사 자체 재학습에서도 제외.';
+COMMENT ON TABLE user_learning_optout IS
+  '처리방침 v1.3 §13.1 AI 학습 데이터 활용 거부 (Opt-out). '
+  'row 부재 = default false (활용 허용). row 존재 + true = 거부.';
 
-COMMENT ON COLUMN users.learning_opt_out_at IS
-  'learning_opt_out=true 로 전환된 시각. NULL 가능 (한 번도 거부한 적 없는 경우).';
-
-CREATE INDEX IF NOT EXISTS idx_users_learning_opt_out
-  ON users(learning_opt_out)
+CREATE INDEX IF NOT EXISTS idx_user_learning_optout_true
+  ON user_learning_optout(user_id)
   WHERE learning_opt_out = TRUE;
 
 -- ============================================================
@@ -26,8 +29,8 @@ CREATE INDEX IF NOT EXISTS idx_users_learning_opt_out
 -- ============================================================
 CREATE TABLE IF NOT EXISTS automated_decision_appeals (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  session_id UUID REFERENCES sessions(id) ON DELETE SET NULL,
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
   appeal_type TEXT NOT NULL CHECK (appeal_type IN ('reject', 'explain')),
   decision_area TEXT NOT NULL CHECK (decision_area IN (
     'pii_masking',
@@ -41,7 +44,7 @@ CREATE TABLE IF NOT EXISTS automated_decision_appeals (
   )),
   admin_response TEXT,
   resolved_at TIMESTAMPTZ,
-  resolved_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  resolved_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -62,9 +65,9 @@ CREATE INDEX IF NOT EXISTS idx_appeals_status
 -- ============================================================
 CREATE TABLE IF NOT EXISTS processing_result_reports (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  utterance_id UUID REFERENCES utterances(id) ON DELETE SET NULL,
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  utterance_id TEXT REFERENCES utterances(id) ON DELETE SET NULL,
   report_type TEXT NOT NULL CHECK (report_type IN (
     'pii_not_masked', 'wrong_speaker', 'wrong_text', 'other'
   )),
@@ -74,7 +77,7 @@ CREATE TABLE IF NOT EXISTS processing_result_reports (
   )),
   admin_response TEXT,
   resolved_at TIMESTAMPTZ,
-  resolved_by UUID REFERENCES users(id) ON DELETE SET NULL,
+  resolved_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -103,7 +106,7 @@ CREATE TABLE IF NOT EXISTS privacy_policy_versions (
 
 CREATE TABLE IF NOT EXISTS user_privacy_policy_acceptances (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   policy_version TEXT NOT NULL REFERENCES privacy_policy_versions(version),
   accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE(user_id, policy_version)
