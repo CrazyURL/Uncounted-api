@@ -88,7 +88,39 @@ export const LABEL_SCHEMA_JSON = {
       type: 'object',
       additionalProperties: false,
       properties: {
-        emotion: { type: ['object', 'null'] },
+        // emotion(3-class 요약) + sub(세부감정 6대분류) 슬롯.
+        //   sub: { value(분노/슬픔/불안/상처/당황/기쁨), confidence } | null (미산출).
+        //   안전선 #6: sub 는 텍스트 라벨+숫자만 — 모델명 미노출.
+        emotion: {
+          oneOf: [
+            {
+              type: 'object',
+              additionalProperties: false,
+              required: ['value', 'confidence', 'source', 'model_version', 'sub'],
+              properties: {
+                value: { type: 'string' },
+                confidence: { type: ['number', 'null'] },
+                source: { type: 'string' },
+                model_version: { type: 'string', enum: [...ALLOWED_METHODS] },
+                sub: {
+                  oneOf: [
+                    {
+                      type: 'object',
+                      additionalProperties: false,
+                      required: ['value', 'confidence'],
+                      properties: {
+                        value: { type: 'string' },
+                        confidence: { type: ['number', 'null'] },
+                      },
+                    },
+                    { type: 'null' },
+                  ],
+                },
+              },
+            },
+            { type: 'null' },
+          ],
+        },
         speech_act: {
           type: ['object', 'null'],
           additionalProperties: false,

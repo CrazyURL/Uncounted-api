@@ -225,7 +225,58 @@ describe('export-builder — buildLabelLine auto_labels.emotion (flat 매핑)', 
       confidence: 0.87,
       source: 'automatic',
       model_version: 'supervised_model', // sanitizeExternalMethod(kcelectra_*) (안전선 #6)
+      sub: null, // 세부감정 미산출(emotion_category 없음) → null-safe
     })
+  })
+
+  it('세부감정(sub): emotion_category 있으면 auto_labels.emotion.sub 로 노출', async () => {
+    const buildLabelLine = await getBuildLabelLine()
+    const line = buildLabelLine(
+      {
+        ...baseUtt,
+        emotion: '부정',
+        emotion_confidence: 0.8,
+        emotion_category: '슬픔',
+        emotion_category_confidence: '0.730', // supabase NUMERIC → string
+      },
+      'sess1',
+      'reference_only',
+    )
+    const emotion = (line.auto_labels as Record<string, unknown>).emotion as Record<string, unknown>
+    expect(emotion.sub).toEqual({ value: '슬픔', confidence: 0.73 })
+  })
+
+  it('세부감정(sub) null-safe: emotion_category 미산출(현재 0%)이면 sub=null', async () => {
+    const buildLabelLine = await getBuildLabelLine()
+    const nullCat = buildLabelLine(
+      { ...baseUtt, emotion: '긍정', emotion_confidence: 0.9, emotion_category: null },
+      'sess1',
+      'reference_only',
+    )
+    const emptyCat = buildLabelLine(
+      { ...baseUtt, emotion: '긍정', emotion_confidence: 0.9, emotion_category: '' },
+      'sess1',
+      'reference_only',
+    )
+    const absent = buildLabelLine(
+      { ...baseUtt, emotion: '긍정', emotion_confidence: 0.9 },
+      'sess1',
+      'reference_only',
+    )
+    expect((nullCat.auto_labels as Record<string, unknown>).emotion).toMatchObject({ sub: null })
+    expect((emptyCat.auto_labels as Record<string, unknown>).emotion).toMatchObject({ sub: null })
+    expect((absent.auto_labels as Record<string, unknown>).emotion).toMatchObject({ sub: null })
+  })
+
+  it('세부감정(sub) confidence 미산출 → sub.value 유지, confidence=null', async () => {
+    const buildLabelLine = await getBuildLabelLine()
+    const line = buildLabelLine(
+      { ...baseUtt, emotion: '부정', emotion_category: '분노' },
+      'sess1',
+      'reference_only',
+    )
+    const emotion = (line.auto_labels as Record<string, unknown>).emotion as Record<string, unknown>
+    expect(emotion.sub).toEqual({ value: '분노', confidence: null })
   })
 
   it('안전선 #6: raw 내부 모델명(kcelectra)이 직렬화 결과에 노출되지 않는다', async () => {

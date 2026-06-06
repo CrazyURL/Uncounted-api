@@ -8,6 +8,7 @@
  */
 
 import { createWriteStream, promises as fs } from 'fs'
+import { randomBytes } from 'crypto'
 import os from 'os'
 import path from 'path'
 import type { Readable } from 'stream'
@@ -26,6 +27,7 @@ import {
   lookupRoleCandidate,
   type SessionSpeakerRow,
   type SpeakerLookupMap,
+  type SpeakerPersistentIdContext,
 } from '../../lib/export/sessionSpeakers.js'
 import { buildRelationFrequency } from '../../lib/export/relationGeneralization.js'
 import { isExportEligible } from '../../lib/export/eligibility.js'
@@ -62,6 +64,8 @@ interface SessionRow {
   id: string
   pid: string | null
   user_id?: string | null
+  // 화자 영속 가명 identity_key 소스 (counterparty 측). raw 미노출 — 해시 입력 전용.
+  peer_id?: string | null
   consent_status?: string | null
   review_status?: string | null
   session_dataset_eligible?: boolean | null
@@ -90,6 +94,10 @@ interface UtteranceRow {
   labels?: Record<string, unknown> | null
   emotion?: string | null
   emotion_confidence?: number | string | null
+  // 세부감정(6대분류) — 헤드 학습 후 채워짐. emotion_category=분노/슬픔/불안/상처/당황/기쁨 텍스트.
+  // null/미산출 시 auto_labels.emotion.sub=null (null-safe). DB 그대로(가공·정규화 X).
+  emotion_category?: string | null
+  emotion_category_confidence?: number | string | null
   // V-A 차원감정 (074+ 신규 컬럼). null = 미산출. valence/arousal/dominance 실값(DB 그대로).
   emotion_valence?: number | string | null
   emotion_arousal?: number | string | null
@@ -185,6 +193,11 @@ export async function buildSessionExportZip(
   const baseDir = outputDir ?? os.tmpdir()
   const stagingDir = await fs.mkdtemp(path.join(baseDir, `export-v2-${sessionId}-`))
 
+  // 화자 영속 가명 컨텍스트(미역산 솔트해시). 동의(both_agreed) 세션만 salt 생성 → 미동의 시 가명 null.
+  //   salt = export 1회당 랜덤(어디에도 저장 안 함 = 역산 불가). 단일 세션 경로라 세션당 1개.
+  //   identity_key: owner=user_id, counterparty=peer_id (raw 미노출, 해시 입력 전용).
+  const persistentIdCtx = buildPersistentIdContext(session)
+
   try {
     await writeAllArtifacts(stagingDir, {
       session,
@@ -196,6 +209,7 @@ export async function buildSessionExportZip(
       lineageRun,
       sessionSpeakers,
       relationFrequency,
+      persistentIdCtx,
     })
 
     // ZIP 빌드 직전 safety scan.
@@ -383,6 +397,33 @@ async function loadRelationFrequency(): Promise<ReadonlyMap<string, number>> {
   return buildRelationFrequency(rows)
 }
 
+// ── 화자 영속 가명(미역산 솔트해시) ───────────────────────────────────────
+
+/**
+ * 화자 영속 가명 컨텍스트 산출. 디렉터 승인안(2026-06-06).
+ *
+ * - 동의 게이트: session.consent_status === 'both_agreed' 일 때만 salt 생성.
+ *   (eligibility 게이트와 별개로 명시적 재확인 — includeRestricted 우회 시에도 미동의 가명 차단.)
+ * - salt: crypto.randomBytes(16) hex. export 1회당 1개, *어디에도 저장 안 함*(역산 불가 핵심).
+ * - identity_key: owner=user_id, counterparty=peer_id (raw — 해시 입력 전용, 외부 미노출).
+ *   둘 다 없으면 해당 역할 화자 가명은 null.
+ *
+ * 미동의이면 salt=null → 전 화자 speaker_persistent_id=null.
+ */
+function buildPersistentIdContext(session: SessionRow): SpeakerPersistentIdContext {
+  const consented = session.consent_status === 'both_agreed'
+  const salt = consented ? randomBytes(16).toString('hex') : null
+  const ownerKey = typeof session.user_id === 'string' && session.user_id.length > 0 ? session.user_id : null
+  const peerKey = typeof session.peer_id === 'string' && session.peer_id.length > 0 ? session.peer_id : null
+  return {
+    salt,
+    identityKeyByRole: {
+      owner_candidate: ownerKey,
+      counterparty_candidate: peerKey,
+    },
+  }
+}
+
 // ── 아티팩트 작성 ────────────────────────────────────────────────────────
 
 interface WriteContext {
@@ -399,6 +440,8 @@ interface WriteContext {
   sessionSpeakers?: SessionSpeakerRow[]
   /** 관계 K-익명성(K=5) 게이트용 데이터셋 전체 빈도표. 미주입 시 빈 맵(보수적 게이트). */
   relationFrequency?: ReadonlyMap<string, number>
+  /** 화자 영속 가명(미역산 솔트해시) 컨텍스트. 미동의/미주입 시 salt=null → 가명 null. */
+  persistentIdCtx?: SpeakerPersistentIdContext | null
 }
 
 async function writeAllArtifacts(
@@ -409,6 +452,7 @@ async function writeAllArtifacts(
   const lineageRun = ctx.lineageRun ?? null
   const sessionSpeakers = ctx.sessionSpeakers ?? []
   const relationFrequency = ctx.relationFrequency ?? new Map<string, number>()
+  const persistentIdCtx = ctx.persistentIdCtx ?? null
   // speaker_label → 역할/성별/연령 룩업 (utterance/label 라인 배선용).
   const speakerLookup = buildSpeakerLookup(sessionSpeakers)
   const sid = session.id
@@ -435,7 +479,7 @@ async function writeAllArtifacts(
   // calls/
   await writeJson(
     path.join(stagingDir, 'calls', `call_${sid}.json`),
-    buildCallJson(session, utterances, audioExportMode, lineageRun, sessionSpeakers, relationFrequency),
+    buildCallJson(session, utterances, audioExportMode, lineageRun, sessionSpeakers, relationFrequency, persistentIdCtx),
   )
   await writeText(
     path.join(stagingDir, 'calls', `call_${sid}.txt`),
@@ -578,6 +622,13 @@ function buildReadme(session: SessionRow): string {
     '- 관계(`relation_candidate`)는 K-익명성(K=5) 게이트 + 일반화 tier 로만 노출됩니다:',
     '  데이터셋 전체에서 흔한 관계(count>=5)는 원문, 희귀 관계는 상위 범주로 일반화,',
     '  일반화 후에도 희귀하면 노출하지 않습니다. 모두 추정값(disclaimer 동반)입니다.',
+    '- `speakers[].speaker_persistent_id`: 미역산(irreversible) 솔트해시 가명입니다.',
+    '  본 납품 데이터셋 *안에서만* 동일 인물의 cross-call 식별 용도이며, 제공자 내부',
+    '  신원(원본 ID)으로의 역추적은 불가능합니다(솔트 미저장). 납품분 간/타 데이터셋과',
+    '  교차 링크되지 않습니다. ⚠️ 재식별 시도 금지 — 동의(both_agreed) 세션만 부여되고,',
+    '  신원 부재 또는 미동의 시 값은 null 입니다.',
+    '- `auto_labels.emotion.sub`: 세부감정(6대분류: 분노/슬픔/불안/상처/당황/기쁨) 슬롯입니다.',
+    '  미산출 시 null (자동 추정값).',
     '',
   ]
   return lines.join('\n')
@@ -634,6 +685,7 @@ function buildCallJson(
   lineageRun: Record<string, unknown> | null = null,
   sessionSpeakers: SessionSpeakerRow[] = [],
   relationFrequency: ReadonlyMap<string, number> = new Map(),
+  persistentIdCtx: SpeakerPersistentIdContext | null = null,
 ): Record<string, unknown> {
   // PR-C: DB 값 우선 → utterances quality_grade 분포 fallback. DB write 0.
   const tier = computeSessionQualityTier({
@@ -655,7 +707,7 @@ function buildCallJson(
     //   - 관계(speaker_relation): K-익명성(K=5) 게이트 + 일반화 tier (SPEC §4.4 개정).
     //     흔한값(count>=5)→원문, 희귀값→일반화, tier 도 희귀/미지/부재→null.
     // 화자 메타 부재(미처리/IVR-only) 시 빈 배열 — 날조 금지.
-    speakers: buildSpeakersSection(sessionSpeakers, relationFrequency),
+    speakers: buildSpeakersSection(sessionSpeakers, relationFrequency, persistentIdCtx),
     // Task 8: 데이터 족보(provenance) — 안전선 #6 정화본만(sanitizeProvenance).
     // git SHA·gate_states·버전문자열(largev3 등 모델힌트)은 내부 lineage_runs 에만 보존,
     // 바이어 산출물엔 processed_at + 일반화 method 카테고리만. null=미처리(날조 금지).
@@ -960,17 +1012,29 @@ function buildSpeechAct(u: UtteranceRow): Record<string, unknown> | null {
  * - confidence: u.emotion_confidence (NUMERIC → number)
  * - source: 'automatic' — 자동 추정 marker (최상위 label_origin 과 구분)
  * - model_version: 안전선 #6 일반화 (raw 모델명 ZIP 노출 금지)
+ * - sub: 세부감정(6대분류) 슬롯. emotion_category(분노/슬픔/불안/상처/당황/기쁨)+confidence.
+ *   ★null-safe: emotion_category 미산출(현재 0%, 헤드 학습 후 채워짐)이면 sub=null.
+ *   안전선 #6: 텍스트 라벨(모델명 아님)+숫자 confidence 만 — model_version 미노출.
  *
  * emotion 미산출(null/empty) 이면 null 반환 → 정직하게 null 노출.
  */
 function buildAutoEmotion(u: UtteranceRow): Record<string, unknown> | null {
   const value = typeof u.emotion === 'string' && u.emotion.length > 0 ? u.emotion : null
   if (value === null) return null
+  const subValue =
+    typeof u.emotion_category === 'string' && u.emotion_category.length > 0
+      ? u.emotion_category
+      : null
   return {
     value,
     confidence: toNumOrNull(u.emotion_confidence),
     source: 'automatic',
     model_version: sanitizeExternalMethod(u.auto_label_model_version),
+    // 세부감정 슬롯. 미산출 시 sub:null (부분 노출 오해 방지 — value 없으면 객체 자체 null).
+    sub:
+      subValue === null
+        ? null
+        : { value: subValue, confidence: toNumOrNull(u.emotion_category_confidence) },
   }
 }
 

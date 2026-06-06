@@ -16,6 +16,8 @@
  *   - #6: 내부 모델명/버전은 method 일반화(sanitizeExternalMethod) 후에만 노출.
  */
 
+import { createHash } from 'crypto'
+
 import {
   mapSessionSpeakerRoleToCandidate,
   sanitizeExternalMethod,
@@ -111,12 +113,67 @@ export function lookupRoleCandidate(
  * 확정 컬럼(speaker_role/gender/voice_age)에서 candidate/estimate 형으로 파생한다.
  * 어느 경우든 disclaimer 를 붙여 안전선 #1(확정 단정 금지)을 준수한다.
  */
+/**
+ * 화자 영속 가명(speaker_persistent_id) 산출 컨텍스트.
+ *
+ * ★미역산(irreversible) 솔트해시 — 디렉터 승인안(2026-06-06).
+ * 목적: 납품 데이터셋 *안에서만* 동일인물 cross-call 식별. 내부신원과의 역추적은 완전 차단.
+ *   - salt: export 1회당 crypto.randomBytes 로 새로 생성, *어디에도 저장 안 함*(역산 불가 핵심).
+ *           같은 납품 ZIP 내 모든 세션이 같은 salt → 데이터셋 내 cross-call 링크 유지,
+ *           납품분 간/내부 DB 와는 링크 불가. salt 부재(null)면 가명 미산출.
+ *   - identityKeyByRole: 역할별 cross-session 신원 키 (raw 미노출 — 해시 입력으로만 사용).
+ *       owner(self) = sessions.user_id, counterparty(other) = sessions.peer_id.
+ *       해당 신원 부재 → 그 역할 화자의 speaker_persistent_id = null.
+ *   - consent 게이트: 동의(both_agreed) 세션만 salt 가 채워진다(builder 측 게이트). 미동의면
+ *       salt=null 로 전달 → 전 화자 가명 null.
+ */
+export interface SpeakerPersistentIdContext {
+  /** export 1회당 랜덤 솔트 (hex). null = 미동의/미적용 → 가명 미산출. */
+  salt: string | null
+  /** 역할별 cross-session 신원 키 (raw). 해시 입력 전용 — 외부 노출 금지. */
+  identityKeyByRole: {
+    owner_candidate: string | null
+    counterparty_candidate: string | null
+  }
+}
+
+/**
+ * speaker_persistent_id = sha256(identity_key + salt) 앞 16자 (hex).
+ *
+ * identity_key 또는 salt 가 없으면 null (미역산 가명 생성 불가 → 정직하게 null).
+ * raw identity_key 는 절대 외부로 나가지 않는다(해시 결과 16hex 만 반환).
+ */
+export function computeSpeakerPersistentId(
+  identityKey: string | null,
+  salt: string | null,
+): string | null {
+  if (!identityKey || !salt) return null
+  return createHash('sha256').update(identityKey + salt).digest('hex').slice(0, 16)
+}
+
 export function buildSpeakerExternal(
   row: SessionSpeakerRow,
   relationCounts: ReadonlyMap<string, number> = new Map(),
+  persistentIdCtx: SpeakerPersistentIdContext | null = null,
 ): Record<string, unknown> {
+  // 영속 가명: 역할(owner/counterparty)별 신원 키를 골라 salt 해시. 미동의/신원부재 → null.
+  // ⚠️ raw identity_key(user_id/peer_id)는 해시 입력으로만 — 절대 외부 노출 X.
+  const roleCandidate = mapSessionSpeakerRoleToCandidate(row.speaker_role)
+  const identityKey =
+    persistentIdCtx === null
+      ? null
+      : roleCandidate === 'owner_candidate'
+        ? persistentIdCtx.identityKeyByRole.owner_candidate
+        : roleCandidate === 'counterparty_candidate'
+          ? persistentIdCtx.identityKeyByRole.counterparty_candidate
+          : null
   const out: Record<string, unknown> = {
     speaker_label: nonEmptyStringOrNull(row.speaker_label),
+    // 미역산 솔트해시 가명 (데이터셋 내 cross-call 동일인물 식별 전용). null = 미동의/신원부재.
+    speaker_persistent_id: computeSpeakerPersistentId(
+      identityKey,
+      persistentIdCtx?.salt ?? null,
+    ),
     identity_inference: buildIdentityInference(row),
     gender_estimate: buildGenderEstimate(row),
     age_group_estimate: buildAgeGroupEstimate(row),
@@ -138,10 +195,11 @@ export function buildSpeakerExternal(
 export function buildSpeakersSection(
   rows: SessionSpeakerRow[],
   relationCounts: ReadonlyMap<string, number> = new Map(),
+  persistentIdCtx: SpeakerPersistentIdContext | null = null,
 ): Array<Record<string, unknown>> {
   return rows
     .filter((r) => typeof r.speaker_label === 'string' && r.speaker_label.length > 0)
-    .map((r) => buildSpeakerExternal(r, relationCounts))
+    .map((r) => buildSpeakerExternal(r, relationCounts, persistentIdCtx))
 }
 
 // ── 서브객체 빌더 ─────────────────────────────────────────────────────────

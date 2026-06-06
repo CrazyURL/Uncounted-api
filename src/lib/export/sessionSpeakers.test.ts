@@ -14,9 +14,11 @@ import {
   buildSpeakerLookup,
   buildSpeakersSection,
   buildSpeakerExternal,
+  computeSpeakerPersistentId,
   lookupRoleCandidate,
   EXPOSE_SPEAKER_RELATION,
   type SessionSpeakerRow,
+  type SpeakerPersistentIdContext,
 } from './sessionSpeakers.js'
 
 // 실DB(7b6cf9eb…) 형태를 모사한 행: estimate JSONB 는 null 스텁, 확정 컬럼만 채워짐.
@@ -216,5 +218,84 @@ describe('buildSpeakersSection', () => {
       { ...rowSelf, speaker_identity_inference: { method: 'pyannote-3.1', predicted_role: null } },
     ])
     expect(JSON.stringify(section).toLowerCase()).not.toMatch(/pyannote|whisperx|kcelectra/)
+  })
+})
+
+describe('speaker_persistent_id — 미역산 솔트해시 가명', () => {
+  const ownerKey = 'user-uuid-owner-aaaa'
+  const peerKey = 'peer-id-counterparty-bbbb'
+
+  const ctx = (salt: string | null): SpeakerPersistentIdContext => ({
+    salt,
+    identityKeyByRole: { owner_candidate: ownerKey, counterparty_candidate: peerKey },
+  })
+
+  const HEX16 = /^[0-9a-f]{16}$/
+
+  it('computeSpeakerPersistentId: 16자 hex 형식', () => {
+    const id = computeSpeakerPersistentId(ownerKey, 'deadbeef')
+    expect(id).toMatch(HEX16)
+  })
+
+  it('identity_key 또는 salt 부재 → null', () => {
+    expect(computeSpeakerPersistentId(null, 'deadbeef')).toBeNull()
+    expect(computeSpeakerPersistentId(ownerKey, null)).toBeNull()
+    expect(computeSpeakerPersistentId('', 'deadbeef')).toBeNull()
+  })
+
+  it('동일 세션 내 동일 화자(신원)는 동일 ID', () => {
+    const a = computeSpeakerPersistentId(ownerKey, 'fixedsalt')
+    const b = computeSpeakerPersistentId(ownerKey, 'fixedsalt')
+    expect(a).toBe(b)
+    expect(a).toMatch(HEX16)
+  })
+
+  it('★미역산: 다른 솔트면 다른 ID (같은 신원이라도)', () => {
+    const a = computeSpeakerPersistentId(ownerKey, 'saltAAAA')
+    const b = computeSpeakerPersistentId(ownerKey, 'saltBBBB')
+    expect(a).not.toBe(b)
+  })
+
+  it('buildSpeakerExternal: owner→user_id 해시, counterparty→peer_id 해시', () => {
+    const c = ctx('s1')
+    const own = buildSpeakerExternal(rowSelf, new Map(), c)
+    const oth = buildSpeakerExternal(rowOther, new Map(), c)
+    expect(own.speaker_persistent_id).toMatch(HEX16)
+    expect(oth.speaker_persistent_id).toMatch(HEX16)
+    // owner≠counterparty 신원 → 서로 다른 가명
+    expect(own.speaker_persistent_id).not.toBe(oth.speaker_persistent_id)
+    // 같은 화자(owner)는 같은 ID
+    expect(buildSpeakerExternal(rowSelf, new Map(), c).speaker_persistent_id).toBe(
+      own.speaker_persistent_id,
+    )
+  })
+
+  it('미동의(salt=null) → 전 화자 speaker_persistent_id=null', () => {
+    const c = ctx(null)
+    expect(buildSpeakerExternal(rowSelf, new Map(), c).speaker_persistent_id).toBeNull()
+    expect(buildSpeakerExternal(rowOther, new Map(), c).speaker_persistent_id).toBeNull()
+  })
+
+  it('컨텍스트 미주입(null) → speaker_persistent_id=null (기존 호출 무회귀)', () => {
+    expect(buildSpeakerExternal(rowSelf).speaker_persistent_id).toBeNull()
+    const section = buildSpeakersSection([rowSelf, rowOther])
+    expect(section.every((sp) => sp.speaker_persistent_id === null)).toBe(true)
+  })
+
+  it('신원 부재 역할(peer_id 없음) → counterparty 가명 null, owner 는 정상', () => {
+    const c: SpeakerPersistentIdContext = {
+      salt: 's1',
+      identityKeyByRole: { owner_candidate: ownerKey, counterparty_candidate: null },
+    }
+    expect(buildSpeakerExternal(rowSelf, new Map(), c).speaker_persistent_id).toMatch(HEX16)
+    expect(buildSpeakerExternal(rowOther, new Map(), c).speaker_persistent_id).toBeNull()
+  })
+
+  it('⚠️ raw identity_key(user_id/peer_id)는 출력에 미노출 (해시만)', () => {
+    const c = ctx('s1')
+    const section = buildSpeakersSection([rowSelf, rowOther], new Map(), c)
+    const json = JSON.stringify(section)
+    expect(json).not.toContain(ownerKey)
+    expect(json).not.toContain(peerKey)
   })
 })
