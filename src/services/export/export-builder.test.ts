@@ -268,6 +268,44 @@ describe('export-builder — buildLabelLine auto_labels.emotion (flat 매핑)', 
     expect((absent.auto_labels as Record<string, unknown>).emotion).toMatchObject({ sub: null })
   })
 
+  it('주제(topic): topic_category 있으면 auto_labels.topic 으로 노출, 미산출이면 null', async () => {
+    const buildLabelLine = await getBuildLabelLine()
+    const withTopic = buildLabelLine(
+      { ...baseUtt, topic_category: '여행', topic_category_confidence: '0.812' },
+      'sess1',
+      'reference_only',
+    )
+    expect((withTopic.auto_labels as Record<string, unknown>).topic).toEqual({
+      value: '여행',
+      confidence: 0.812,
+      source: 'automatic',
+    })
+    const noTopic = buildLabelLine({ ...baseUtt, topic_category: null }, 'sess1', 'reference_only')
+    const emptyTopic = buildLabelLine({ ...baseUtt, topic_category: '' }, 'sess1', 'reference_only')
+    const absentTopic = buildLabelLine({ ...baseUtt }, 'sess1', 'reference_only')
+    expect((noTopic.auto_labels as Record<string, unknown>).topic).toBeNull()
+    expect((emptyTopic.auto_labels as Record<string, unknown>).topic).toBeNull()
+    expect((absentTopic.auto_labels as Record<string, unknown>).topic).toBeNull()
+  })
+
+  it('방언(dialect): dialect 있으면 auto_labels.dialect 로 노출, 미산출이면 null', async () => {
+    const buildLabelLine = await getBuildLabelLine()
+    const withDialect = buildLabelLine(
+      { ...baseUtt, dialect: '경남', dialect_confidence: 0.67 },
+      'sess1',
+      'reference_only',
+    )
+    expect((withDialect.auto_labels as Record<string, unknown>).dialect).toEqual({
+      value: '경남',
+      confidence: 0.67,
+      source: 'automatic',
+    })
+    const noDialect = buildLabelLine({ ...baseUtt, dialect: null }, 'sess1', 'reference_only')
+    const absentDialect = buildLabelLine({ ...baseUtt }, 'sess1', 'reference_only')
+    expect((noDialect.auto_labels as Record<string, unknown>).dialect).toBeNull()
+    expect((absentDialect.auto_labels as Record<string, unknown>).dialect).toBeNull()
+  })
+
   it('세부감정(sub) confidence 미산출 → sub.value 유지, confidence=null', async () => {
     const buildLabelLine = await getBuildLabelLine()
     const line = buildLabelLine(

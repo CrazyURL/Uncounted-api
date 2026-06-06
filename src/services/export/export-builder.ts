@@ -98,6 +98,12 @@ interface UtteranceRow {
   // null/미산출 시 auto_labels.emotion.sub=null (null-safe). DB 그대로(가공·정규화 X).
   emotion_category?: string | null
   emotion_category_confidence?: number | string | null
+  // 주제(20분류) — 헤드 학습 후 채워짐. topic_category=가족/여행/건강… 텍스트. null=미산출.
+  topic_category?: string | null
+  topic_category_confidence?: number | string | null
+  // 방언 권역 — 헤드 학습 후 채워짐. dialect=수도권/강원/충청… 텍스트. null=미산출.
+  dialect?: string | null
+  dialect_confidence?: number | string | null
   // V-A 차원감정 (074+ 신규 컬럼). null = 미산출. valence/arousal/dominance 실값(DB 그대로).
   emotion_valence?: number | string | null
   emotion_arousal?: number | string | null
@@ -629,6 +635,10 @@ function buildReadme(session: SessionRow): string {
     '  신원 부재 또는 미동의 시 값은 null 입니다.',
     '- `auto_labels.emotion.sub`: 세부감정(6대분류: 분노/슬픔/불안/상처/당황/기쁨) 슬롯입니다.',
     '  미산출 시 null (자동 추정값).',
+    '- `auto_labels.topic`: 주제(20분류: 가족/여행/건강/교육 등) 슬롯입니다 (자동 추정값).',
+    '  미산출 시 null.',
+    '- `auto_labels.dialect`: 방언 권역(수도권/강원/충청/전라/경북/경남/제주) 슬롯입니다 (자동 추정값).',
+    '  미산출 시 null.',
     '',
   ]
   return lines.join('\n')
@@ -861,6 +871,9 @@ function buildLabelLine(
     auto_labels: {
       emotion: buildAutoEmotion(u),
       speech_act: speechAct,
+      // 주제(20분류)·방언(권역) 슬롯. 헤드 미학습 시 null (null-safe).
+      topic: buildTopic(u),
+      dialect: buildDialect(u),
     },
 
     utterance_form: u.utterance_form ?? null,
@@ -1035,6 +1048,46 @@ function buildAutoEmotion(u: UtteranceRow): Record<string, unknown> | null {
       subValue === null
         ? null
         : { value: subValue, confidence: toNumOrNull(u.emotion_category_confidence) },
+  }
+}
+
+/**
+ * 주제(topic) 자동 분류 라벨 — 20분류 헤드 산출. flat 컬럼 topic_category 기반.
+ *
+ * - value: u.topic_category (가족/여행/건강…). 미산출(null/empty)이면 객체 자체 null.
+ * - confidence: u.topic_category_confidence (NUMERIC → number)
+ * - source: 'automatic' — 자동 추정 marker.
+ * ★null-safe: 헤드 미학습(현재 미산출)이면 null 반환 → 정직하게 null 노출.
+ * 안전선 #6: 텍스트 라벨(모델명 아님)+숫자 confidence 만 노출.
+ */
+function buildTopic(u: UtteranceRow): Record<string, unknown> | null {
+  const value =
+    typeof u.topic_category === 'string' && u.topic_category.length > 0
+      ? u.topic_category
+      : null
+  if (value === null) return null
+  return {
+    value,
+    confidence: toNumOrNull(u.topic_category_confidence),
+    source: 'automatic',
+  }
+}
+
+/**
+ * 방언 권역(dialect) 자동 분류 라벨 — 권역 헤드 산출. flat 컬럼 dialect 기반.
+ *
+ * - value: u.dialect (수도권/강원/충청…). 미산출이면 객체 자체 null.
+ * - confidence: u.dialect_confidence (NUMERIC → number)
+ * - source: 'automatic'.
+ * ★null-safe: 헤드 미학습이면 null. 안전선 #6: 텍스트 라벨+숫자만.
+ */
+function buildDialect(u: UtteranceRow): Record<string, unknown> | null {
+  const value = typeof u.dialect === 'string' && u.dialect.length > 0 ? u.dialect : null
+  if (value === null) return null
+  return {
+    value,
+    confidence: toNumOrNull(u.dialect_confidence),
+    source: 'automatic',
   }
 }
 

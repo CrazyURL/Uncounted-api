@@ -130,6 +130,27 @@ export const LABEL_SCHEMA_JSON = {
             method: { type: 'string', enum: [...ALLOWED_METHODS] },
           },
         },
+        // 주제(20분류) 슬롯. { value(가족/여행/건강…), confidence, source } | null (헤드 미학습 시 null).
+        // 안전선 #6: 텍스트 라벨+숫자만 — 모델명 미노출.
+        topic: {
+          type: ['object', 'null'],
+          additionalProperties: false,
+          properties: {
+            value: { type: ['string', 'null'] },
+            confidence: { type: ['number', 'null'] },
+            source: { type: 'string' },
+          },
+        },
+        // 방언 권역 슬롯. { value(수도권/강원/충청…), confidence, source } | null (헤드 미학습 시 null).
+        dialect: {
+          type: ['object', 'null'],
+          additionalProperties: false,
+          properties: {
+            value: { type: ['string', 'null'] },
+            confidence: { type: ['number', 'null'] },
+            source: { type: 'string' },
+          },
+        },
       },
     },
 
