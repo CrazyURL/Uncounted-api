@@ -223,6 +223,8 @@ interface SegmentExportLine {
     segment_id: string
     segment_index: number
     topic: string | null
+    topic_confidence: number | null
+    topic_method: string | null
     start_ms: number | null
     end_ms: number | null
     utterances: SegmentUtteranceRef[]
@@ -701,7 +703,7 @@ async function _buildPackageInner(
   if (sessionIds.length > 0) {
     const { data: segRows } = await supabaseAdmin
       .from('session_segments')
-      .select('id, session_id, segment_index, topic, start_ms, end_ms')
+      .select('id, session_id, segment_index, topic, start_ms, end_ms, topic_confidence, topic_method')
       .in('session_id', sessionIds)
       .order('session_id')
       .order('segment_index')
@@ -728,6 +730,9 @@ async function _buildPackageInner(
         segment_id: seg.id as string,
         segment_index: seg.segment_index as number,
         topic: (seg.topic as string | null) ?? null,
+        // 주제 신뢰도 + 산출방식("model"=학습분류기 0.79 / "keyword"=fallback). 안전선 #6: 모델명 아님.
+        topic_confidence: (seg.topic_confidence as number | null) ?? null,
+        topic_method: (seg.topic_method as string | null) ?? null,
         start_ms: (seg.start_ms as number | null) ?? null,
         end_ms: (seg.end_ms as number | null) ?? null,
         utterances: segUtterances,
