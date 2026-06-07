@@ -766,10 +766,23 @@ function _coerceWords(raw: unknown): _MaskWord[] {
   return out
 }
 
+// transcript_text 에 char-level 로 이미 반영되는 CORE PII(파이프라인 PII_PATTERNS).
+// 확장 candidate 타입(numeric_sensitive_like 등)은 transcript_text 에 char-마스킹되지 않으므로 별도 보강 대상.
+const CORE_PII_TYPES: ReadonlySet<string> = new Set([
+  '이름', '전화번호', '주민등록번호', '카드번호', '계좌번호', '이메일',
+])
+
 /**
- * pii_intervals 시간과 겹치는 word 를 piiType 토큰으로 치환한 텍스트를 반환한다.
- * - transcript_words 가 없거나 pii_intervals 가 없으면 원본 텍스트를 그대로 반환.
- * - 시간 교차 판정: word 와 interval 이 조금이라도 겹치면(>0) 마스킹.
+ * 발화 텍스트를 PII 토큰으로 마스킹해 반환한다.
+ *
+ * 1순위: transcript_text 가 이미 [PII_*] 토큰으로 char-level 마스킹돼 있으면 그것을 정본으로 사용한다.
+ *   - 파이프라인이 CORE PII(이름·전화·주민·카드·계좌·이메일)를 char 단위로 transcript_text 에 반영하므로 정밀하다.
+ *   - word-시간겹침 재마스킹은 audio 구간폭(~1s)이 인접 word(~0.3s)를 싹쓸이해 과다마스킹/연속중복
+ *     ([PII_이름] [PII_이름] …)을 유발하므로 회피한다(실단어 보존).
+ *   - 단 transcript_text 가 char-마스킹하지 않는 '확장 candidate' 구간(numeric_sensitive_like 등)은
+ *     해당 word 표면을 transcript_text 에서 토큰으로 치환해 보강한다(누출 방지).
+ * 2순위(폴백): transcript_text 가 미마스킹이면 word-시간겹침으로 마스킹하되, 한 구간이 여러 word 에
+ *   걸쳐 생기는 연속 동일 토큰은 1개로 병합한다.
  */
 function maskTextByPiiIntervals(u: UtteranceRow): string {
   const text = typeof u.transcript_text === 'string' ? u.transcript_text : ''
@@ -777,8 +790,30 @@ function maskTextByPiiIntervals(u: UtteranceRow): string {
   const intervals = sanitizePiiLabels(u.pii_intervals)
   if (intervals.length === 0) return text
   const words = _coerceWords((u as Record<string, unknown>).transcript_words)
+
+  // 1순위: 이미 char-마스킹된 정본 텍스트 사용 + 확장 candidate 구간 표면 보강.
+  if (/\[PII_[^\]]+\]/.test(text) && words.length > 0) {
+    let out = text
+    for (const iv of intervals) {
+      if (CORE_PII_TYPES.has(String(iv.piiType))) continue // CORE 는 transcript_text 에 이미 반영
+      const s = iv.startSec as number
+      const e = iv.endSec as number
+      for (const w of words) {
+        const surf = (w.word || '').trim()
+        if (surf && w.start < e && w.end > s && out.includes(surf)) {
+          out = out.split(surf).join(_piiToken(iv.piiType as string))
+        }
+      }
+    }
+    // 연속 동일 PII 토큰 병합 — 인접 word 가 각각 검출돼 char-마스킹된 중복([PII_이름] [PII_이름] …)을
+    // 1개로 정리(뒤따르는 조사 접미는 보존). 누출과 무관한 표시 정리.
+    out = out.replace(/(\[PII_[^\]]+\])(?:\s+\1)+/g, '$1')
+    return out
+  }
+
   if (words.length === 0) return text
 
+  // 2순위(폴백): word-시간겹침 마스킹 + 연속 중복 토큰 병합.
   const masked = words.map((w) => {
     for (const iv of intervals) {
       const s = iv.startSec as number
@@ -789,7 +824,12 @@ function maskTextByPiiIntervals(u: UtteranceRow): string {
     }
     return w.word
   })
-  const joined = masked.join(' ').replace(/\s+/g, ' ').trim()
+  const deduped: string[] = []
+  for (const tok of masked) {
+    if (tok.startsWith('[PII_') && deduped.length > 0 && deduped[deduped.length - 1] === tok) continue
+    deduped.push(tok)
+  }
+  const joined = deduped.join(' ').replace(/\s+/g, ' ').trim()
   return joined || text
 }
 
