@@ -88,7 +88,39 @@ export const LABEL_SCHEMA_JSON = {
       type: 'object',
       additionalProperties: false,
       properties: {
-        emotion: { type: ['object', 'null'] },
+        // emotion(3-class 요약) + sub(세부감정 6대분류) 슬롯.
+        //   sub: { value(분노/슬픔/불안/상처/당황/기쁨), confidence } | null (미산출).
+        //   안전선 #6: sub 는 텍스트 라벨+숫자만 — 모델명 미노출.
+        emotion: {
+          oneOf: [
+            {
+              type: 'object',
+              additionalProperties: false,
+              required: ['value', 'confidence', 'source', 'model_version', 'sub'],
+              properties: {
+                value: { type: 'string' },
+                confidence: { type: ['number', 'null'] },
+                source: { type: 'string' },
+                model_version: { type: 'string', enum: [...ALLOWED_METHODS] },
+                sub: {
+                  oneOf: [
+                    {
+                      type: 'object',
+                      additionalProperties: false,
+                      required: ['value', 'confidence'],
+                      properties: {
+                        value: { type: 'string' },
+                        confidence: { type: ['number', 'null'] },
+                      },
+                    },
+                    { type: 'null' },
+                  ],
+                },
+              },
+            },
+            { type: 'null' },
+          ],
+        },
         speech_act: {
           type: ['object', 'null'],
           additionalProperties: false,
@@ -96,6 +128,27 @@ export const LABEL_SCHEMA_JSON = {
             value: { type: ['string', 'null'] },
             confidence: { type: ['number', 'null'] },
             method: { type: 'string', enum: [...ALLOWED_METHODS] },
+          },
+        },
+        // 주제(20분류) 슬롯. { value(가족/여행/건강…), confidence, source } | null (헤드 미학습 시 null).
+        // 안전선 #6: 텍스트 라벨+숫자만 — 모델명 미노출.
+        topic: {
+          type: ['object', 'null'],
+          additionalProperties: false,
+          properties: {
+            value: { type: ['string', 'null'] },
+            confidence: { type: ['number', 'null'] },
+            source: { type: 'string' },
+          },
+        },
+        // 방언 권역 슬롯. { value(수도권/강원/충청…), confidence, source } | null (헤드 미학습 시 null).
+        dialect: {
+          type: ['object', 'null'],
+          additionalProperties: false,
+          properties: {
+            value: { type: ['string', 'null'] },
+            confidence: { type: ['number', 'null'] },
+            source: { type: 'string' },
           },
         },
       },
@@ -122,7 +175,23 @@ export const LABEL_SCHEMA_JSON = {
     },
 
     conversation_context: { type: ['object', 'null'] },
-    emotion_detail: { type: ['object', 'null'] },
+    // V-A 차원감정 상세 (buildEmotionDetail). null = 미산출(3축 중 결측). 안전선 #6: method 는 외부 5종 allowlist.
+    emotion_detail: {
+      oneOf: [
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['valence', 'arousal', 'dominance', 'method'],
+          properties: {
+            valence: { type: 'number' },
+            arousal: { type: 'number' },
+            dominance: { type: 'number' },
+            method: { type: 'string', enum: [...ALLOWED_METHODS] },
+          },
+        },
+        { type: 'null' },
+      ],
+    },
 
     pii_labels: {
       type: 'array',
@@ -137,6 +206,54 @@ export const LABEL_SCHEMA_JSON = {
           piiType: { type: 'string' },
         },
       },
+    },
+
+    // Task 5: 화자중첩 메타 (null = 미산출 — false 단정 금지). buildOverlap 구조와 정합.
+    overlap: {
+      oneOf: [
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['is_overlapping', 'count', 'total_sec', 'ratio', 'intervals'],
+          properties: {
+            is_overlapping: { type: 'boolean' },
+            count: { type: 'number' },
+            total_sec: { type: 'number' },
+            ratio: { type: 'number' },
+            intervals: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['start_sec', 'end_sec'],
+                properties: {
+                  start_sec: { type: 'number' },
+                  end_sec: { type: 'number' },
+                },
+              },
+            },
+          },
+        },
+        { type: 'null' },
+      ],
+    },
+
+    // Prosody/비유창성 메타 (DB 실측 숫자 메트릭). null = 세 필드 모두 미산출.
+    // 개별 필드는 결측 시 null (예: 첫 발화 silence_before_sec=null).
+    prosody: {
+      oneOf: [
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['silence_before_sec', 'filler_word_count', 'speech_rate_wpm'],
+          properties: {
+            silence_before_sec: { type: ['number', 'null'] },
+            filler_word_count: { type: ['number', 'null'] },
+            speech_rate_wpm: { type: ['number', 'null'] },
+          },
+        },
+        { type: 'null' },
+      ],
     },
   },
 } as const

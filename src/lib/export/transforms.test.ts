@@ -3,6 +3,7 @@ import {
   sanitizeExternalMethod,
   sanitizeExternalLabelOrigin,
   sanitizeExternalSpeakerRole,
+  mapSessionSpeakerRoleToCandidate,
   dialogActToGroup,
 } from './transforms.js'
 
@@ -121,6 +122,38 @@ describe('sanitizeExternalSpeakerRole (안전선 #1 - 확정값 금지)', () => 
     const inputs = ['owner', 'counterparty', 'self', 'other', 'peer', 'unknown', '', null]
     for (const input of inputs) {
       const result = sanitizeExternalSpeakerRole(input)
+      expect(result).toMatch(/^(owner_candidate|counterparty_candidate|unknown)$/)
+    }
+  })
+})
+
+describe('mapSessionSpeakerRoleToCandidate (DB self/other → candidate, 안전선 #1)', () => {
+  it('maps heuristic self/other to candidate form', () => {
+    expect(mapSessionSpeakerRoleToCandidate('self')).toBe('owner_candidate')
+    expect(mapSessionSpeakerRoleToCandidate('other')).toBe('counterparty_candidate')
+  })
+
+  it('case-insensitive / trimmed', () => {
+    expect(mapSessionSpeakerRoleToCandidate(' SELF ')).toBe('owner_candidate')
+    expect(mapSessionSpeakerRoleToCandidate('Other')).toBe('counterparty_candidate')
+  })
+
+  it('owner/counterparty (이미 candidate 의미) 도 동일 candidate', () => {
+    expect(mapSessionSpeakerRoleToCandidate('owner')).toBe('owner_candidate')
+    expect(mapSessionSpeakerRoleToCandidate('counterparty')).toBe('counterparty_candidate')
+  })
+
+  it('null/peer/empty/비문자열 → unknown', () => {
+    expect(mapSessionSpeakerRoleToCandidate(null)).toBe('unknown')
+    expect(mapSessionSpeakerRoleToCandidate('peer')).toBe('unknown')
+    expect(mapSessionSpeakerRoleToCandidate('')).toBe('unknown')
+    expect(mapSessionSpeakerRoleToCandidate(42)).toBe('unknown')
+  })
+
+  it('NEVER emits raw self/other/owner/counterparty (only candidate / unknown)', () => {
+    const inputs = ['self', 'other', 'owner', 'counterparty', 'peer', null, '']
+    for (const input of inputs) {
+      const result = mapSessionSpeakerRoleToCandidate(input)
       expect(result).toMatch(/^(owner_candidate|counterparty_candidate|unknown)$/)
     }
   })

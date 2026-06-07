@@ -86,6 +86,29 @@ export function sanitizeExternalSpeakerRole(value: unknown): ExternalSpeakerRole
   return 'unknown'
 }
 
+/**
+ * session_speakers.speaker_role (heuristic, `self`/`other`) → 외부 candidate 형.
+ *
+ * 의미 매핑 (anchor user = 세션 업로더 = self = owner):
+ *   - `self`  → `owner_candidate`
+ *   - `other` → `counterparty_candidate`
+ *   - `owner`/`counterparty` (이미 candidate 의미) → 동일 candidate
+ *   - 그 외 (null/peer/empty 등) → `unknown`
+ *
+ * ★안전선 #1: 내부 확정 단어(self/other)는 절대 외부로 나가지 않는다.
+ * 본 함수는 DB 의 self/other 를 owner/counterparty 로 *번역*한 뒤
+ * {@link sanitizeExternalSpeakerRole} 가드(self/other→unknown)를 그대로 통과시킨다.
+ * 즉 self/other 가 직접 노출될 경로는 존재하지 않는다.
+ */
+export function mapSessionSpeakerRoleToCandidate(value: unknown): ExternalSpeakerRole {
+  if (typeof value !== 'string') return 'unknown'
+  const v = value.toLowerCase().trim()
+  // self/other → owner/counterparty 로 번역 후 안전선 가드 통과.
+  if (v === 'self') return sanitizeExternalSpeakerRole('owner')
+  if (v === 'other') return sanitizeExternalSpeakerRole('counterparty')
+  return sanitizeExternalSpeakerRole(value)
+}
+
 // ── 4. dialog_act → group 매핑 (SPEC §5.1.4 DIALOG_ACT_TO_GROUP_v1) ──────
 
 export type DialogActGroup =
