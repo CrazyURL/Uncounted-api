@@ -19,6 +19,7 @@ export type ExportEligibilityReason =
   | 'review_not_approved'
   | 'dataset_not_eligible'
   | 'locked_or_disputed_future'
+  | 'user_learning_opt_out'
 
 export interface ExportEligibilityResult {
   eligible: boolean
@@ -31,20 +32,40 @@ interface EligibilitySessionShape {
   session_dataset_eligible?: unknown
 }
 
+interface EligibilityUserShape {
+  learning_opt_out?: unknown
+}
+
 /**
  * 세션 export 적격성 판정.
  *
  * 검사 순서 (실패 시 즉시 reason 반환):
+ *   0. user.learning_opt_out !== true  (PIPC 2026 v1.3 §13.1 — 학습 거부 사용자 우선 차단)
  *   1. consent_status === 'both_agreed'
  *   2. review_status === 'approved'
  *   3. session_dataset_eligible !== false  (NULL/undefined 는 미평가로 간주 → 통과)
  *
+ * user 인자는 선택. caller 가 user_learning_optout 테이블 row 를
+ * { learning_opt_out: boolean } 형태로 전달. 미전달 시 #0 검사 건너뜀.
+ * row 부재 사용자 = default false (활용 허용) — caller 가 미전달로 처리.
+ *
  * 단, 074 직후 DEFAULT false 상태에서는 #3 가 차단 단계로 작동.
  * 창 B 가 평가 후 true/false 세팅.
  */
-export function isExportEligible(session: unknown): ExportEligibilityResult {
+export function isExportEligible(
+  session: unknown,
+  user?: unknown,
+): ExportEligibilityResult {
   if (!isObject(session)) {
     return { eligible: false, reason: 'consent_not_both_agreed' }
+  }
+
+  // PIPC v1.3 §13.1 — 학습 거부 사용자 데이터는 export 전면 차단
+  if (isObject(user)) {
+    const u = user as EligibilityUserShape
+    if (u.learning_opt_out === true) {
+      return { eligible: false, reason: 'user_learning_opt_out' }
+    }
   }
 
   const s = session as EligibilitySessionShape
