@@ -8,6 +8,7 @@
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, getBody } from '../lib/middleware.js'
+import { promoteToBothAgreed } from '../lib/consent/promoteToBothAgreed.js'
 
 const consent = new Hono()
 
@@ -182,52 +183,31 @@ consent.post('/agree/:token', async (c) => {
     return c.json({ data: invitation })
   }
 
-  const now = new Date().toISOString()
-  const { data: updated, error: updateErr } = await supabaseAdmin
-    .from('consent_invitations')
-    .update({
-      status: 'agreed',
-      responded_at: now,
-      ip_address: ip,
-      user_agent: userAgent,
-    })
-    .eq('id', invitation.id)
-    .select('*')
-    .single()
-
-  if (updateErr || !updated) {
-    console.error('[consent.agree.update] error:', updateErr)
-    return c.json({ error: 'Failed to record agreement' }, 500)
-  }
-
-  // ── sessions 일괄 promote (best-effort) ──────────────────────────
-  // 양측 동의 시점 = 받는 분이 동의를 누른 순간.
-  // 사업 로직상 보낸 분의 sessions row가 아직 서버에 없거나 user_only 상태가 아닐 수 있음(정상).
-  // → invitation.status='agreed'가 source of truth. promote는 가능한 것만 처리하고,
-  //   업로드가 뒤늦게 도착하는 경로는 업로드 측에서 invitation.status='agreed'를 보고 both_agreed로 기록한다.
+  // 정식 동의 흐름 — promoteToBothAgreed 공통 함수 사용 (DEV 토글과 동일 컬럼 보장).
   const sessionIds = Array.isArray((invitation as any).session_ids) && (invitation as any).session_ids.length > 0
     ? (invitation as any).session_ids as string[]
     : invitation.session_id
       ? [invitation.session_id]
       : []
 
-  if (sessionIds.length > 0) {
-    const { error: promoteErr, count } = await supabaseAdmin
-      .from('sessions')
-      .update({ consent_status: 'both_agreed', consented_at: now }, { count: 'exact' })
-      .in('id', sessionIds)
-      .eq('user_id', invitation.user_id)
-      .eq('consent_status', 'user_only')
+  const result = await promoteToBothAgreed({
+    supabaseAdmin,
+    userId: invitation.user_id ?? '',
+    sessionIds,
+    consentMethod: 'external',
+    consenterToken: invitation.token,
+    ipAddress: ip,
+    userAgent,
+    shareMethod: invitation.share_method,
+  })
 
-    if (promoteErr) {
-      // DB 에러는 로그만 — 동의 의사는 invitation에 이미 기록됨. 사용자 차단 금지.
-      console.error('[consent.agree.promote-sessions] error:', promoteErr)
-    } else {
-      console.log(`[consent.agree.promote-sessions] ${count ?? 0}/${sessionIds.length} promoted (0건은 업로드 전이라 정상)`)
-    }
-  }
+  const { data: refreshed } = await supabaseAdmin
+    .from('consent_invitations')
+    .select('*')
+    .eq('id', invitation.id)
+    .single()
 
-  return c.json({ data: updated })
+  return c.json({ data: refreshed ?? { ...invitation, status: 'agreed', responded_at: result.consentedAt } })
 })
 
 /**
@@ -629,40 +609,26 @@ consent.post('/dev-test/promote', authMiddleware, async (c) => {
     return c.json({ error: 'session_ids required' }, 400)
   }
 
-  // sessions consent_status 일괄 both_agreed 승격
-  const { error: sErr } = await supabaseAdmin
-    .from('sessions')
-    .update({ consent_status: 'both_agreed', consented_at: new Date().toISOString() })
-    .in('id', body.session_ids)
-    .eq('user_id', userId)
-  if (sErr) {
-    return c.json({ error: `sessions update failed: ${sErr.message}` }, 500)
-  }
-
-  // consent_invitations에 manual_dev_test marker 기록 (감사 추적)
-  // 스키마: token, status, consent_method, session_id, user_id, expires_at, created_at
-  // (consented_at/agreed_at 컬럼은 존재 X — created_at으로 시각 기록)
-  const now = new Date().toISOString()
-  const invitations = body.session_ids.map((sid) => ({
-    user_id: userId,
-    session_id: sid,
-    token: `dev-test-${sid}-${Date.now()}`,
-    consent_method: 'manual_dev_test' as const,
-    status: 'agreed' as const,
-    expires_at: null,
-    created_at: now,
-  }))
-  const { error: iErr } = await supabaseAdmin.from('consent_invitations').insert(invitations)
-  if (iErr) {
-    // 이미 invitation이 있으면 skip 가능 (best effort)
-    console.warn('[consent.dev-test.promote] invitation insert skipped:', iErr.message)
-  }
+  // DEV 토글 흐름 — 정식 동의와 동일하게 promoteToBothAgreed 공통 함수 사용.
+  // 정식과 다른 부분은 consent_method 마커 + ip/ua/share_method 의 dev-test 식별값뿐.
+  const result = await promoteToBothAgreed({
+    supabaseAdmin,
+    userId: userId as string,
+    sessionIds: body.session_ids,
+    consentMethod: 'manual_dev_test',
+    consenterToken: `dev-test-${userId}-${Date.now()}`,
+    ipAddress: 'dev-test',
+    userAgent: 'dev-test-toggle',
+    shareMethod: 'dev_test',
+  })
 
   return c.json({
     data: {
-      promoted: body.session_ids.length,
-      promoted_at: now,
+      promoted: result.sessionsPromoted,
+      requested: body.session_ids.length,
+      promoted_at: result.consentedAt,
       consent_method: 'manual_dev_test',
+      invitation_token: result.invitationToken,
     },
   })
 })
