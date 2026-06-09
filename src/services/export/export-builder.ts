@@ -137,7 +137,36 @@ interface UtteranceRow {
   overlap_intervals?: unknown
   review_status?: string | null
   upload_status?: string | null
+  // 세그먼트(주제 단위) FK. segments.jsonl 의 utterances 매칭 키 (session_segments.id).
+  segment_id?: string | null
   [key: string]: unknown
+}
+
+// session_segments 행 (세그먼트 단위 주제 라벨). topic 의 정본은 세그먼트 단위.
+interface SegmentRow {
+  id: string
+  session_id: string
+  segment_index: number
+  topic?: string | null
+  start_ms?: number | null
+  end_ms?: number | null
+  topic_confidence?: number | null
+  topic_method?: string | null
+}
+
+// segments.jsonl 의 session 당 1줄 객체 (packageBuilder.SegmentExportLine 미러).
+interface SegmentExportLine {
+  session_id: string
+  segments: Array<{
+    segment_id: string
+    segment_index: number
+    topic: string | null
+    topic_confidence: number | null
+    topic_method: string | null
+    start_ms: number | null
+    end_ms: number | null
+    utterances: Array<{ utterance_id: string; speaker_role: string | null }>
+  }>
 }
 
 // ── 메인 진입점 ──────────────────────────────────────────────────────────
@@ -163,7 +192,7 @@ export async function buildSessionExportZip(
     requestedMode === 'embedded' ? 'embedded' : 'reference_only'
   const includeAudio = audioExportMode === 'embedded'
 
-  const { session, utterances: loadedUtterances, lineageRun, sessionSpeakers, relationFrequency } =
+  const { session, utterances: loadedUtterances, lineageRun, sessionSpeakers, relationFrequency, segments } =
     await loadSessionContext(sessionId)
 
   // 기본은 로드된 전체 발화. 일반 납품 플로우에서는 발화 단위 품질 필터를 적용한다.
@@ -216,6 +245,7 @@ export async function buildSessionExportZip(
       sessionSpeakers,
       relationFrequency,
       persistentIdCtx,
+      segments,
     })
 
     // ZIP 빌드 직전 safety scan.
@@ -278,6 +308,8 @@ interface SessionContext {
   sessionSpeakers: SessionSpeakerRow[]
   // 관계(speaker_relation) K-익명성 게이트용 데이터셋 전체 빈도표. 조회 실패 시 빈 맵.
   relationFrequency: ReadonlyMap<string, number>
+  // 세그먼트 단위 주제 라벨(session_segments). 없거나 조회 실패 시 빈 배열 — export 무중단.
+  segments: SegmentRow[]
 }
 
 // internal — testability 를 위해 export (외부 API 계약은 buildSessionExportZip 만).
@@ -344,6 +376,22 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
     // session_speakers optional — 미적용 환경에서도 export 정상
   }
 
+  // 세그먼트 단위 주제 라벨(session_segments) — read-only. null-safe: 실패/부재 시 빈 배열.
+  // topic 의 정본은 세그먼트 단위(발화 단위 헤드 미배선). segment_index 순 정렬.
+  let segments: SegmentRow[] = []
+  try {
+    const seg = await supabaseAdmin
+      .from('session_segments')
+      .select('id, session_id, segment_index, topic, start_ms, end_ms, topic_confidence, topic_method')
+      .eq('session_id', sessionId)
+      .order('segment_index', { ascending: true })
+    if (!seg.error && Array.isArray(seg.data)) {
+      segments = seg.data as unknown as SegmentRow[]
+    }
+  } catch {
+    // session_segments optional — 미적용 환경에서도 export 정상
+  }
+
   // 관계 K-익명성(K=5) 게이트용 데이터셋 전체 빈도표 — read-only.
   // ★전체 테이블 집계라 PostgREST 1000행 cap 을 페이지네이션으로 넘긴다(단일 GET 시
   //   1000행으로 잘려 빈도가 왜곡 → 잘못된 게이트 판정). 실패 시 빈 맵(보수적 null-게이트).
@@ -370,10 +418,10 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
           `(utterance_count=${count}, sample_ids=${JSON.stringify(summary.sampleUtteranceIds)})`,
       )
     }
-    return { session, utterances: outcome.kept, lineageRun, sessionSpeakers, relationFrequency }
+    return { session, utterances: outcome.kept, lineageRun, sessionSpeakers, relationFrequency, segments }
   }
 
-  return { session, utterances: allUtterances, lineageRun, sessionSpeakers, relationFrequency }
+  return { session, utterances: allUtterances, lineageRun, sessionSpeakers, relationFrequency, segments }
 }
 
 /**
@@ -448,6 +496,8 @@ interface WriteContext {
   relationFrequency?: ReadonlyMap<string, number>
   /** 화자 영속 가명(미역산 솔트해시) 컨텍스트. 미동의/미주입 시 salt=null → 가명 null. */
   persistentIdCtx?: SpeakerPersistentIdContext | null
+  /** 세그먼트 단위 주제 라벨(session_segments). 미주입/0개 시 segments.jsonl 미생성. */
+  segments?: SegmentRow[]
 }
 
 async function writeAllArtifacts(
@@ -534,6 +584,13 @@ async function writeAllArtifacts(
   // Sync Integrity Gate(D1) 리포트 — 게이트 활성 시에만 동봉(미활성 시 파일 미생성 → 기존 ZIP 구조 불변).
   if (ctx.syncQualityReport) {
     await writeJson(path.join(metaDir, 'sync_quality_report.json'), ctx.syncQualityReport)
+  }
+
+  // metadata/segments.jsonl — 세그먼트 단위 주제 라벨(topic 정본) + 화자 역할(packageBuilder 미러).
+  // 세그먼트 0개(미산출/구세션)면 파일 미생성 → 기존 ZIP 구조 불변.
+  const segmentLine = buildSegmentLine(session, ctx.segments ?? [], utterances, speakerLookup)
+  if (segmentLine !== null) {
+    await writeJsonl(path.join(metaDir, 'segments.jsonl'), [segmentLine])
   }
 
   // audio/ — embedded 모드만 실제 WAV 동봉. reference_only 는 audio_manifest 참조만.
@@ -1156,6 +1213,51 @@ function buildEmotionDetail(u: UtteranceRow): Record<string, unknown> | null {
   }
 }
 
+// ── segments (세그먼트 단위 주제) ─────────────────────────────────────────
+
+/**
+ * metadata/segments.jsonl 의 session 당 1줄 객체 구성 (packageBuilder STAGE 16 미러).
+ *
+ * session_segments(주제 정본) 를 segment_index 순으로 펼치고, 각 세그먼트에 그 세그먼트에
+ * 속한 발화(utterances.segment_id === session_segments.id)의 utterance_id + speaker_role 을 붙인다.
+ *
+ * - topic: 텍스트 라벨(가족/여행/교통…). null-safe.
+ * - topic_method: "model"/"keyword" — 산출방식 enum. 안전선 #6: 모델명 아님(안전).
+ * - speaker_role: export-builder 표준대로 session_speakers 룩업 후보값(lookupRoleCandidate).
+ *   utterances 에 raw speaker_role 컬럼이 없으므로 speaker_label 룩업으로 도출(안전선 #1 후보형).
+ *
+ * 세그먼트 0개면 null 반환 → 호출부에서 파일 미생성.
+ */
+function buildSegmentLine(
+  session: SessionRow,
+  segments: SegmentRow[],
+  utterances: UtteranceRow[],
+  speakerLookup: SpeakerLookupMap,
+): SegmentExportLine | null {
+  if (!Array.isArray(segments) || segments.length === 0) return null
+  const line: SegmentExportLine = { session_id: session.id, segments: [] }
+  for (const seg of segments) {
+    const segUtterances = utterances
+      .filter((u) => u.segment_id === seg.id)
+      .map((u) => ({
+        utterance_id: u.id,
+        speaker_role: lookupRoleCandidate(speakerLookup, u.speaker_id),
+      }))
+    line.segments.push({
+      segment_id: seg.id,
+      segment_index: seg.segment_index,
+      topic: seg.topic ?? null,
+      // 주제 신뢰도 + 산출방식("model"=학습분류기 / "keyword"=fallback). 안전선 #6: 모델명 아님.
+      topic_confidence: toNumOrNull(seg.topic_confidence),
+      topic_method: seg.topic_method ?? null,
+      start_ms: toNumOrNull(seg.start_ms),
+      end_ms: toNumOrNull(seg.end_ms),
+      utterances: segUtterances,
+    })
+  }
+  return line
+}
+
 // ── metadata 리포트 ──────────────────────────────────────────────────────
 
 function buildDatasetSummary(session: SessionRow, utterances: UtteranceRow[]): Record<string, unknown> {
@@ -1539,6 +1641,7 @@ export const _testInternals = {
   buildCallJson,
   buildDatasetSummary,
   buildDatasetQualityReport,
+  buildSegmentLine,
   sanitizeVersionString,
   sanitizeModelVersions,
 }
