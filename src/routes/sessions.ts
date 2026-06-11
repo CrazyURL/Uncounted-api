@@ -78,6 +78,50 @@ sessions.get('/pending-upload', async (c) => {
 })
 
 /**
+ * GET /sessions/processing-stats
+ * 사용자 데이터셋 파이프라인 진행 카운트 — 홈 화면 진척 카드용.
+ * 앱 로컬 STT 상태가 아닌 실제 서버 처리 상태(raw_audio_url/stt_status/diarize_status)를 노출.
+ * 주의: '/:id'보다 먼저 등록되어야 'processing-stats'가 id로 오인되지 않는다.
+ */
+sessions.get('/processing-stats', async (c) => {
+  const userId = c.get('userId') as string
+
+  try {
+    // head:true → count만 반환(데이터 0행). 각 쿼리는 독립 빌더.
+    const q = () =>
+      supabaseAdmin
+        .from('sessions')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+
+    const [total, bothAgreed, rawUploaded, sttDone, diarizeDone] = await Promise.all([
+      q(),
+      q().eq('consent_status', 'both_agreed'),
+      q().eq('consent_status', 'both_agreed').not('raw_audio_url', 'is', null),
+      q().eq('consent_status', 'both_agreed').eq('stt_status', 'done'),
+      q().eq('consent_status', 'both_agreed').eq('diarize_status', 'done'),
+    ])
+
+    for (const r of [total, bothAgreed, rawUploaded, sttDone, diarizeDone]) {
+      if (r.error) throw new Error(r.error.message)
+    }
+
+    return c.json({
+      data: {
+        total: total.count ?? 0,
+        bothAgreed: bothAgreed.count ?? 0,
+        rawUploaded: rawUploaded.count ?? 0,
+        sttDone: sttDone.count ?? 0,
+        diarizeDone: diarizeDone.count ?? 0,
+      },
+    })
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unknown error'
+    return c.json({ error: msg }, 500)
+  }
+})
+
+/**
  * GET /sessions/:id
  * 세션 상세 조회
  */
