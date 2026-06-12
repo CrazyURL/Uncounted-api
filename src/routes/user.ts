@@ -22,6 +22,9 @@ const DEFAULT_CONSENT = {
   consent_withdrawn_updated_at: null,
   withdrawal_notified_at: null,
   sku_consents: {} as Record<string, boolean>,
+  // 신규 통화 자동 업로드 동의 (mig 083). false=스냅샷(가입 시점 보유분만), true=가입 후 신규도 자동.
+  new_upload_consent: false,
+  new_upload_consent_at: null,
 }
 
 // ── GET /api/user/consent ────────────────────────────────────────────────
@@ -32,7 +35,7 @@ user.get('/consent', async (c) => {
 
   const { data, error } = await supabaseAdmin
     .from('users_profile')
-    .select('collect_consent, collect_consent_updated_at, third_party_consent, third_party_consent_updated_at, consent_withdrawn, consent_withdrawn_updated_at, withdrawal_notified_at, sku_consents')
+    .select('collect_consent, collect_consent_updated_at, third_party_consent, third_party_consent_updated_at, consent_withdrawn, consent_withdrawn_updated_at, withdrawal_notified_at, sku_consents, new_upload_consent, new_upload_consent_at')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -59,12 +62,14 @@ user.put('/consent', async (c) => {
     consent_withdrawn_updated_at?: string | null
     withdrawal_notified_at?: string | null
     sku_consents?: Record<string, boolean>
+    new_upload_consent?: boolean
+    new_upload_consent_at?: string | null
   }
 
   // 기존 행 조회 (merge를 위해 기존 값도 함께 읽음)
   const { data: existing, error: selectError } = await supabaseAdmin
     .from('users_profile')
-    .select('pid, collect_consent, collect_consent_updated_at, third_party_consent, third_party_consent_updated_at, consent_withdrawn, consent_withdrawn_updated_at, withdrawal_notified_at, sku_consents')
+    .select('pid, collect_consent, collect_consent_updated_at, third_party_consent, third_party_consent_updated_at, consent_withdrawn, consent_withdrawn_updated_at, withdrawal_notified_at, sku_consents, new_upload_consent, new_upload_consent_at')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -83,6 +88,8 @@ user.put('/consent', async (c) => {
     consent_withdrawn_updated_at: body.consent_withdrawn_updated_at ?? existing?.consent_withdrawn_updated_at ?? null,
     withdrawal_notified_at: body.withdrawal_notified_at ?? existing?.withdrawal_notified_at ?? null,
     sku_consents: body.sku_consents ?? existing?.sku_consents ?? {},
+    new_upload_consent: body.new_upload_consent ?? existing?.new_upload_consent ?? false,
+    new_upload_consent_at: body.new_upload_consent_at ?? existing?.new_upload_consent_at ?? null,
     updated_at: new Date().toISOString(),
   }
 
