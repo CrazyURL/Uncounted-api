@@ -5,6 +5,7 @@ import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, getBody } from '../lib/middleware.js'
 import { decryptData } from '../lib/crypto.js'
+import { computeSessionId } from '../lib/sessionId.js'
 import {
   uploadObject,
   objectExists,
@@ -520,6 +521,142 @@ storage.post('/raw-audio', async (c) => {
     ).catch(() => {/* trigger 실패는 polling fallback 에 의지 */})
 
     return c.json({ storagePath, sizeBytes: bytes.byteLength })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * POST /storage/raw-audio-ingest
+ * 네이티브 백그라운드 단독 인제스트 — 앱(WebView)이 죽어 있어도 통화 종료 즉시 업로드.
+ * 세션 생성 + 동의 게이트(new_upload_consent) + raw 업로드를 한 번에 처리.
+ *
+ * Body (multipart/form-data):
+ *   - audioFile: 음성 binary (≤500MB)
+ *   - meta:      AES-256-GCM 암호화 JSON { deviceId, path, date?, duration?, ext }
+ *                sessionId 는 서버가 deviceId+path 로 산출(앱 sessionId.ts 와 동일 HMAC).
+ *
+ * 게이트: users_profile.new_upload_consent=true 필수(아니면 403). 신규 통화는 both_agreed(테스트 게이트).
+ * 멱등: 동일 sessionId 가 이미 raw_audio_url 보유 시 skip.
+ */
+storage.post('/raw-audio-ingest', async (c) => {
+  const userId = c.get('userId') as string
+
+  try {
+    const form = await c.req.formData()
+    const audioFile = form.get('audioFile') as File | null
+    const metaRaw = form.get('meta') as string | null
+    if (!audioFile || !metaRaw) return c.json({ error: 'Missing audioFile or meta' }, 400)
+
+    const meta = decryptData(metaRaw) as {
+      deviceId: string
+      path: string
+      date?: string
+      duration?: number
+      ext: string
+    }
+    const { deviceId, path, ext } = meta
+    if (!deviceId || !path || !ext) return c.json({ error: 'Missing deviceId/path/ext in meta' }, 400)
+
+    // 서버가 sessionId 산출 (앱과 동일 HMAC — 키는 서버 env 에만)
+    const sessionId = computeSessionId(deviceId, path)
+    if (!sessionId) return c.json({ error: 'SESSION_HMAC_KEY not configured' }, 500)
+
+    const ALLOWED_EXTS = ['m4a', 'wav', 'mp3', 'ogg', 'flac', 'webm', 'mp4']
+    const normalizedExt = ext.toLowerCase().replace(/^\./, '')
+    if (!ALLOWED_EXTS.includes(normalizedExt)) {
+      return c.json({ error: `Unsupported ext: ${normalizedExt}` }, 400)
+    }
+    const MAX_RAW_SIZE = 500 * 1024 * 1024
+    if (audioFile.size > MAX_RAW_SIZE) return c.json({ error: 'Raw audio file too large: max 500MB' }, 413)
+    if (audioFile.size === 0) return c.json({ error: 'Empty audio file' }, 400)
+
+    // 동의 게이트 — 사용자가 신규 통화 자동 업로드를 승인했을 때만 (없으면 거부)
+    const { data: profile } = await supabaseAdmin
+      .from('users_profile')
+      .select('new_upload_consent')
+      .eq('user_id', userId)
+      .maybeSingle()
+    if (!profile?.new_upload_consent) {
+      return c.json({ error: 'new_upload_consent required — ingest not permitted' }, 403)
+    }
+
+    // 세션 upsert. 이미 raw_audio_url 있으면 멱등 skip.
+    const { data: existing } = await supabaseAdmin
+      .from('sessions')
+      .select('id, raw_audio_url, consent_status')
+      .eq('id', sessionId)
+      .eq('user_id', userId)
+      .maybeSingle()
+
+    if (existing?.raw_audio_url) {
+      return c.json({ sessionId, storagePath: existing.raw_audio_url, skipped: true })
+    }
+
+    if (!existing) {
+      const estDuration = Math.max(1, Math.round(meta.duration ?? audioFile.size / (16 * 1024)))
+      const { error: insErr } = await supabaseAdmin.from('sessions').insert({
+        id: sessionId,
+        user_id: userId,
+        date: meta.date ?? new Date().toISOString().slice(0, 10),
+        duration: estDuration,
+        title: path.split('/').pop() ?? 'recording',
+        // 테스트 게이트: new_upload_consent=true 이므로 both_agreed (운영은 상대 동의 경로)
+        consent_status: 'both_agreed',
+        consented_at: new Date().toISOString(),
+        is_public: true,
+        visibility_status: 'PUBLIC_CONSENTED',
+      })
+      if (insErr) return c.json({ error: insErr.message }, 500)
+    } else if (existing.consent_status === 'locked' || existing.consent_status === 'user_only') {
+      await supabaseAdmin
+        .from('sessions')
+        .update({
+          consent_status: 'both_agreed',
+          consented_at: new Date().toISOString(),
+          is_public: true,
+          visibility_status: 'PUBLIC_CONSENTED',
+        })
+        .eq('id', sessionId)
+        .eq('user_id', userId)
+    }
+
+    const storagePath = `raw-audio/${userId}/${sessionId}.${normalizedExt}`
+    if (await objectExists(S3_AUDIO_BUCKET, storagePath)) {
+      await deleteObjects(S3_AUDIO_BUCKET, [storagePath])
+    }
+    const contentType =
+      normalizedExt === 'm4a' || normalizedExt === 'mp4'
+        ? 'audio/mp4'
+        : normalizedExt === 'wav'
+          ? 'audio/wav'
+          : normalizedExt === 'mp3'
+            ? 'audio/mpeg'
+            : 'application/octet-stream'
+
+    const bytes = new Uint8Array(await audioFile.arrayBuffer())
+    await uploadObject(S3_AUDIO_BUCKET, storagePath, bytes, contentType)
+
+    const { error: dbError } = await supabaseAdmin
+      .from('sessions')
+      .update({
+        raw_audio_url: storagePath,
+        raw_audio_size: bytes.byteLength,
+        raw_audio_uploaded_at: new Date().toISOString(),
+      })
+      .eq('id', sessionId)
+      .eq('user_id', userId)
+
+    if (dbError) {
+      try { await deleteObjects(S3_AUDIO_BUCKET, [storagePath]) } catch (_) { /* lifecycle 청소 */ }
+      return c.json({ error: dbError.message }, 500)
+    }
+
+    void import('../services/gpu-worker.js')
+      .then((m) => m.triggerWorker(`raw-audio-ingest sessionId=${sessionId}`))
+      .catch(() => { /* polling fallback */ })
+
+    return c.json({ sessionId, storagePath, sizeBytes: bytes.byteLength })
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
