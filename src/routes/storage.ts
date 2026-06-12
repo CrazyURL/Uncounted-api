@@ -6,6 +6,7 @@ import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, getBody } from '../lib/middleware.js'
 import { decryptData } from '../lib/crypto.js'
 import { computeSessionId } from '../lib/sessionId.js'
+import { isIvrNumber } from '../lib/ivr.js'
 import {
   uploadObject,
   objectExists,
@@ -554,9 +555,16 @@ storage.post('/raw-audio-ingest', async (c) => {
       date?: string
       duration?: number
       ext: string
+      number?: string
     }
     const { deviceId, path, ext } = meta
     if (!deviceId || !path || !ext) return c.json({ error: 'Missing deviceId/path/ext in meta' }, 400)
+
+    // 동의 없는 자동 업로드(ingest)는 IVR(대표번호)만 허용 — 개인 통화는 양측 동의 필요.
+    // 상대 번호가 대표번호(15XX/16XX/18XX·080)가 아니면 거부.
+    if (!isIvrNumber(meta.number)) {
+      return c.json({ error: 'non-IVR call requires mutual consent — ingest not permitted' }, 403)
+    }
 
     // 서버가 sessionId 산출 (앱과 동일 HMAC — 키는 서버 env 에만)
     const sessionId = computeSessionId(deviceId, path)
