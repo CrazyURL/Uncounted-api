@@ -62,6 +62,7 @@ sessions.get('/pending-upload', async (c) => {
       .eq('user_id', userId)
       .eq('consent_status', 'both_agreed')
       .is('raw_audio_url', null)
+      .eq('raw_source_lost', false) // 소스 분실(기기 원본 삭제) 세션은 재시도 제외 (mig 084)
       .order('date', { ascending: true })
       .limit(50)
 
@@ -71,6 +72,34 @@ sessions.get('/pending-upload', async (c) => {
       sessions: data ?? [],
       count: data?.length ?? 0,
     })
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unknown error'
+    return c.json({ error: msg }, 500)
+  }
+})
+
+/**
+ * POST /sessions/raw-source-lost
+ * 기기에서 원본 파일이 삭제돼 업로드 불가한 세션을 raw_source_lost=true 로 마킹.
+ * 디바이스가 파일 부재(filemissing)를 확인하면 호출 → 영구 재시도 제외(durable).
+ * body: { ids: string[] } (최대 500건)
+ */
+sessions.post('/raw-source-lost', async (c) => {
+  const userId = c.get('userId') as string
+  const body = getBody(c) as { ids?: string[] }
+  const ids = Array.isArray(body.ids) ? body.ids.slice(0, 500) : []
+  if (ids.length === 0) return c.json({ data: { updated: 0 } })
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('sessions')
+      .update({ raw_source_lost: true })
+      .eq('user_id', userId) // user-scoped — 타 사용자 세션 변경 차단
+      .in('id', ids)
+      .select('id')
+
+    if (error) return c.json({ error: error.message }, 500)
+    return c.json({ data: { updated: data?.length ?? 0 } })
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
     return c.json({ error: msg }, 500)
