@@ -8,7 +8,7 @@
 import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, getBody } from '../lib/middleware.js'
-import { promoteToBothAgreed } from '../lib/consent/promoteToBothAgreed.js'
+import { promoteToBothAgreed, type ConsentScope } from '../lib/consent/promoteToBothAgreed.js'
 
 const consent = new Hono()
 
@@ -151,6 +151,11 @@ consent.post('/agree/:token', async (c) => {
   const ip = clientIp(c.req.header('x-forwarded-for') ?? c.req.header('x-real-ip'))
   const userAgent = c.req.header('user-agent') ?? null
 
+  // 받는 분이 peer.html 에서 고른 동의 범위 (plain body — bodyDecryptMiddleware 가 raw 통과).
+  // 미전달/이상값은 'ongoing'(과거+앞으로 모두, 기존 페이지 의미) 로 안전 기본.
+  const body = getBody<{ scope?: string }>(c)
+  const consentScope: ConsentScope = body?.scope === 'snapshot' ? 'snapshot' : 'ongoing'
+
   // 현재 상태 조회
   const { data: row, error: selectErr } = await supabaseAdmin
     .from('consent_invitations')
@@ -199,6 +204,7 @@ consent.post('/agree/:token', async (c) => {
     ipAddress: ip,
     userAgent,
     shareMethod: invitation.share_method,
+    consentScope,
   })
 
   const { data: refreshed } = await supabaseAdmin
