@@ -13,7 +13,10 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 
-export type ConsentMethod = 'external' | 'manual_dev_test'
+// 'web' = peer.html 외부 동의 (DB check 허용값, mig 047). 'manual_dev_test' = DEV 토글.
+// (이전 'external' 은 consent_invitations_consent_method_check 위반 → invitation upsert 가
+//  silently 실패해 status='agreed'/consent_scope 가 영영 기록 안 되던 버그를 정정.)
+export type ConsentMethod = 'web' | 'manual_dev_test'
 
 /** 상대방(counterparty)이 고른 동의 범위 (mig 085). ongoing=지금까지+앞으로 / snapshot=지금까지만 */
 export type ConsentScope = 'ongoing' | 'snapshot'

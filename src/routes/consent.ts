@@ -199,7 +199,7 @@ consent.post('/agree/:token', async (c) => {
     supabaseAdmin,
     userId: invitation.user_id ?? '',
     sessionIds,
-    consentMethod: 'external',
+    consentMethod: 'web',
     consenterToken: invitation.token,
     ipAddress: ip,
     userAgent,
