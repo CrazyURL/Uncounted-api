@@ -15,6 +15,9 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 
 export type ConsentMethod = 'external' | 'manual_dev_test'
 
+/** 상대방(counterparty)이 고른 동의 범위 (mig 085). ongoing=지금까지+앞으로 / snapshot=지금까지만 */
+export type ConsentScope = 'ongoing' | 'snapshot'
+
 export interface PromoteToBothAgreedParams {
   supabaseAdmin: SupabaseClient
   userId: string
@@ -25,6 +28,8 @@ export interface PromoteToBothAgreedParams {
   ipAddress?: string | null
   userAgent?: string | null
   shareMethod?: string | null
+  /** 받는 분이 peer.html 에서 고른 범위. 미전달 시 'ongoing'(과거+앞으로 모두). */
+  consentScope?: ConsentScope
 }
 
 export interface PromoteToBothAgreedResult {
@@ -54,6 +59,7 @@ export async function promoteToBothAgreed(
     ipAddress = null,
     userAgent = null,
     shareMethod = null,
+    consentScope = 'ongoing',
   } = params
 
   const now = new Date().toISOString()
@@ -96,6 +102,7 @@ export async function promoteToBothAgreed(
     user_agent: userAgent,
     share_method: shareMethod,
     consent_method: consentMethod,
+    consent_scope: consentScope,
     expires_at: null,
   }
 
