@@ -42,6 +42,7 @@ import {
   sanitizeExternalLabelOrigin,
   sanitizeExternalSpeakerRole,
   dialogActToGroup,
+  normalizeDialogActGroup,
   type ExternalMethod,
   type ExternalSpeakerRole,
   type DialogActGroup,
@@ -71,6 +72,8 @@ export interface InternalUtterance {
   label_source?: string | null
   auto_label_model_version?: string | null
   dialog_act?: string | null
+  /** supervised head 산출 9-group(있으면 dialog_act 매핑보다 우선). */
+  dialog_act_group?: string | null
 }
 
 // ── 2. baseline / extension 네임스페이스 타입 ──────────────────────────────
@@ -291,7 +294,8 @@ export function toBaselineUtterance(
     text: typeof u.text_masked === 'string' ? u.text_masked : null,
     label_origin: sanitizeExternalLabelOrigin(u.label_source),
     label_version: sanitizeExternalMethod(u.auto_label_model_version),
-    dialog_act_group: dialogActToGroup(u.dialog_act),
+    // supervised head 산출(9-group) 우선, 부재 시 heuristic dialog_act(15종)→그룹 매핑 폴백.
+    dialog_act_group: normalizeDialogActGroup(u.dialog_act_group) ?? dialogActToGroup(u.dialog_act),
     uncounted_extensions: { ...extensions },
   }
 
