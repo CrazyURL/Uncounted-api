@@ -148,3 +148,18 @@ export function dialogActToGroup(value: unknown): DialogActGroup | null {
   const trimmed = value.trim()
   return DIALOG_ACT_TO_GROUP_V1[trimmed] ?? null
 }
+
+// 이미 9-group 인 값(supervised head 산출 utterances.dialog_act_group)의 정합 검증.
+// DB CHECK 가 9-group 정본만 허용하나, export 경계에서 방어적으로 한 번 더 검증한다.
+const DIALOG_ACT_GROUP_SET: ReadonlySet<string> = new Set<DialogActGroup>([
+  '정보', '질문/확인', '요청/제안', '감사/사과', '사회적', '응답', '지시', '감정 표현', '기타',
+])
+
+/**
+ * 9-group 정본값이면 그대로 반환, 아니면 null. (supervised dialog_act_group 노출용)
+ */
+export function normalizeDialogActGroup(value: unknown): DialogActGroup | null {
+  if (typeof value !== 'string') return null
+  const t = value.trim()
+  return DIALOG_ACT_GROUP_SET.has(t) ? (t as DialogActGroup) : null
+}

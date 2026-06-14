@@ -27,6 +27,7 @@ export interface UtteranceRowLike {
   label_source?: string | null
   auto_label_model_version?: string | null
   dialog_act?: string | null
+  dialog_act_group?: string | null
   pii_intervals?: unknown
 }
 
@@ -69,6 +70,7 @@ export function mapUtteranceRowToInternal(
     label_source: u.label_source ?? null,
     auto_label_model_version: u.auto_label_model_version ?? null,
     dialog_act: u.dialog_act ?? null,
+    dialog_act_group: u.dialog_act_group ?? null,
   }
 }
 

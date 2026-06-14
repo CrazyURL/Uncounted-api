@@ -376,6 +376,34 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
     // session_speakers optional — 미적용 환경에서도 export 정상
   }
 
+  // ★관계 정본 = peer 단위(사용자×상대 1개). sessions.peer_id → peers.relationship 을
+  //   counterparty(other) 화자의 speaker_relation 에 주입한다(cross-call 누적 관계).
+  //   단일 통화에 관계 단서가 없어도 그 상대와의 누적 통화로 특정된 관계를 표시한다.
+  //   peer 미확정(UNKNOWN/부재)이면 기존 per-call speaker_relation 보존(폴백). null-safe.
+  try {
+    const peerId =
+      typeof session.peer_id === 'string' && session.peer_id.length > 0 ? session.peer_id : null
+    if (peerId && sessionSpeakers.length > 0) {
+      const pr = await supabaseAdmin
+        .from('peers')
+        .select('relationship')
+        .eq('id', peerId)
+        .maybeSingle()
+      const rawRel = (pr.data as { relationship?: string | null } | null)?.relationship
+      const peerRel =
+        !pr.error && typeof rawRel === 'string' && rawRel.trim().length > 0 && rawRel !== 'UNKNOWN'
+          ? rawRel.trim()
+          : null
+      if (peerRel !== null) {
+        sessionSpeakers = sessionSpeakers.map((ss) =>
+          ss.speaker_role === 'other' ? { ...ss, speaker_relation: peerRel } : ss,
+        )
+      }
+    }
+  } catch {
+    // peer 관계 optional — 실패 시 per-call speaker_relation 그대로(무중단).
+  }
+
   // 세그먼트 단위 주제 라벨(session_segments) — read-only. null-safe: 실패/부재 시 빈 배열.
   // topic 의 정본은 세그먼트 단위(발화 단위 헤드 미배선). segment_index 순 정렬.
   let segments: SegmentRow[] = []
