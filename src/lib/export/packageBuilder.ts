@@ -17,6 +17,7 @@ import {
   isOrphanFilterEnabled,
   summarizeDroppedOrphans,
 } from './orphanFilter.js'
+import { mapSessionSpeakerRoleToCandidate, sanitizeExternalMethod } from './transforms.js'
 
 // ZIP 빌드 동안 S3 다운로드를 batch로 병렬 처리할 동시 다운로드 수.
 // 각 batch는 fully Buffer로 다운로드 후 S3 연결을 즉시 닫는다.
@@ -151,6 +152,30 @@ export interface SpeakerDemographic {
   regionGroup?: string
 }
 
+/**
+ * 발화 화자 라벨 파생 — session_speakers heuristic role 에서 산출.
+ * `utterances.is_user` 는 워커가 전부 false 로 하드코딩하는 버그가 있어 권위 출처로 못 씀
+ * → `session_speakers.speaker_role`(self/other) 를 단일 출처로 사용.
+ *
+ *  - speakerIdInt: AI-Hub 표준 정수 (self→0=owner / other→1=상대 / 그 외→null).
+ *    ★owner vs 나머지 이진 — 3+화자는 모든 peer 가 1 로 collapse(per-speaker 는 raw speaker_id).
+ *  - isUser: self→true / other→false / null (demographics 분리 + 내부용).
+ *  - roleCandidate: 안전선 #1 후보형 (owner_candidate/counterparty_candidate/unknown).
+ *  - method: 산출방식 마커 (heuristic_mvp 등). 0/1 이 단정 아닌 best-estimate 임을 명시.
+ */
+function deriveSpeakerLabels(
+  role: string | null | undefined,
+  source: string | null | undefined,
+): { isUser: boolean | null; speakerIdInt: number | null; roleCandidate: string; method: string } {
+  const r = role === 'self' ? 'self' : role === 'other' ? 'other' : null
+  return {
+    isUser: r === 'self' ? true : r === 'other' ? false : null,
+    speakerIdInt: r === 'self' ? 0 : r === 'other' ? 1 : null,
+    roleCandidate: mapSessionSpeakerRoleToCandidate(role ?? null),
+    method: sanitizeExternalMethod(source ?? null),
+  }
+}
+
 export interface UtteranceMetaLine {
   utterance_id: string
   session_id: string
@@ -160,8 +185,16 @@ export interface UtteranceMetaLine {
   is_user?: boolean | null
   /** 기존 — pyannote 출력 (SPEAKER_00, SPEAKER_01) — 보존 */
   speaker_id?: string | null
-  /** v2.0 — AI-Hub 표준 정수 (0=user, 1=peer). is_user에서 파생. */
+  /**
+   * AI-Hub 표준 정수 (0=owner, 1=상대). session_speakers heuristic role 파생 — best-estimate.
+   * ★다자(3+) 통화는 owner(0) vs 나머지(1) 이진이라 모든 peer 가 1 로 합쳐짐.
+   *   per-speaker 구분은 raw `speaker_id`(SPEAKER_00/01/02) 사용.
+   */
   speaker_id_int?: number | null
+  /** speaker_id_int 의 역할 후보형 (owner_candidate/counterparty_candidate/unknown). 안전선 #1. */
+  speaker_role_candidate?: string | null
+  /** speaker_id_int 산출 방식 마커 (heuristic_mvp 등). 0/1 이 단정 아닌 best-estimate 임을 명시. */
+  speaker_label_method?: string | null
   duration_sec: number
   /** v2.0 — AI-Hub 표준 ms 단위 (duration_sec * 1000). */
   duration_ms?: number
@@ -352,6 +385,23 @@ async function _buildPackageInner(
   if (lockedBUsError) throw new Error(lockedBUsError.message)
 
   const lockedSessionIds = [...new Set((lockedBUs ?? []).map((bu) => bu.session_id as string).filter(Boolean))]
+
+  // 화자 역할 맵 (session_speaker_id → role): utterances.is_user 가 DB 전부 false(워커 하드코딩
+  // 버그) 라 speaker_id_int 산출에 못 씀 → session_speakers 의 heuristic role 을 권위 출처로 사용.
+  // null-safe: 조회 실패/부재 시 빈 맵 → 해당 발화는 speaker_id_int=null(unknown), export 무중단.
+  const sessionSpeakerById = new Map<string, { role: string | null; source: string | null }>()
+  if (lockedSessionIds.length > 0) {
+    const { data: ssRows } = await supabaseAdmin
+      .from('session_speakers')
+      .select('id, speaker_role, speaker_role_source')
+      .in('session_id', lockedSessionIds)
+    for (const r of (ssRows ?? []) as Record<string, unknown>[]) {
+      sessionSpeakerById.set(r.id as string, {
+        role: (r.speaker_role as string | null) ?? null,
+        source: (r.speaker_role_source as string | null) ?? null,
+      })
+    }
+  }
 
   if (lockedSessionIds.length > 0) {
     // 2b. utterances 테이블에서 approved 발화 조회 (v3) — 페이지네이션으로 전체 수집
@@ -559,7 +609,12 @@ async function _buildPackageInner(
     //  - 상대방 발화(is_user=false)는 speaker_id별 익명 화자로 분리 (demographics 없음)
     //  - 이전: pseudoId 기준 모든 발화 합산 → owner+상대 발화 시간이 owner 통계로 흘러
     //          speaker_demographics와 utterance 합산 길이 불일치 발생
-    const isUser = (utt.is_user as boolean | null) ?? null
+    // is_user(DB 전부 false 버그) 대신 session_speakers heuristic role 파생 (deriveSpeakerLabels).
+    const ss = sessionSpeakerById.get(utt.session_speaker_id as string)
+    const { isUser, speakerIdInt, roleCandidate, method: speakerMethod } = deriveSpeakerLabels(
+      ss?.role,
+      ss?.source,
+    )
     const speakerId = (utt.speaker_id as string | null) ?? null
     const demo = userDemoMap.get(utt.user_id as string)
 
@@ -585,17 +640,18 @@ async function _buildPackageInner(
     const uttLabels = requiresLabels ? (utt.labels as Record<string, unknown> | null) : undefined
     const startSecVal = utt.start_sec != null ? Number(utt.start_sec) : null
     const endSecVal = utt.end_sec != null ? Number(utt.end_sec) : null
-    const isUserVal = (utt.is_user as boolean | null) ?? null
     metaLines.push({
       utterance_id: uttId,
       session_id: sessionId,
       pseudo_id: pseudoId,
       chunk_index: (utt.chunk_index as number) ?? null,
       sequence_in_chunk: (utt.sequence_in_chunk as number) ?? null,
-      is_user: isUserVal,
+      is_user: isUser,
       speaker_id: (utt.speaker_id as string) ?? null,
-      // v2.0 (Day 3, 2026-05-01): AI-Hub 표준 정수 + ms 단위
-      speaker_id_int: isUserVal === true ? 0 : isUserVal === false ? 1 : null,
+      // AI-Hub 표준 정수 (0=owner/1=상대) — session_speakers role 파생 best-estimate (is_user 버그 우회).
+      speaker_id_int: speakerIdInt,
+      speaker_role_candidate: roleCandidate,
+      speaker_label_method: speakerMethod,
       duration_sec: durationSec,
       duration_ms: Math.round(durationSec * 1000),
       start_sec: startSecVal,
@@ -707,11 +763,14 @@ async function _buildPackageInner(
       .in('session_id', sessionIds)
       .order('session_id')
       .order('segment_index')
+    // utterances 에 raw speaker_role 컬럼이 없으므로 session_speaker_id → session_speakers role
+    // 룩업 후 candidate 형으로 도출 (안전선 #1: self/other 원문 미노출).
     const speakerRoleByUtteranceId = new Map<string, string | null>()
     for (const u of utterances) {
+      const ss = sessionSpeakerById.get(u.session_speaker_id as string)
       speakerRoleByUtteranceId.set(
         u.utterance_id as string,
-        (u.speaker_role as string | null) ?? null,
+        mapSessionSpeakerRoleToCandidate(ss?.role ?? null),
       )
     }
     for (const seg of (segRows ?? []) as Record<string, unknown>[]) {
@@ -1258,4 +1317,5 @@ async function downloadStreamFromS3(
 export const _testInternals = {
   buildLabelsSummary,
   buildDialogActSummary,
+  deriveSpeakerLabels,
 }

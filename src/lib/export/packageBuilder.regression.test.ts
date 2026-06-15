@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { _testInternals } from './packageBuilder.js'
 
-const { buildLabelsSummary, buildDialogActSummary } = _testInternals
+const { buildLabelsSummary, buildDialogActSummary, deriveSpeakerLabels } = _testInternals
 
 // ─────────────────────────────────────────────────────────────────────
 // Bug 2 회귀 — label_source "admin" / "auto" 등이 'none'으로 잘못 흡수되던 문제
@@ -189,5 +189,59 @@ describe('Bug 4: speakerCount distinct 집계 로직', () => {
     // 새 fix (speaker_id 기준): 2명
     const newCount = new Set(metaLines.map((m) => m.speaker_id).filter(Boolean)).size
     expect(newCount).toBe(2)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// is_user 전부 false 버그 회귀 — speaker_id_int 를 session_speakers role 에서 파생
+//   (deriveSpeakerLabels). 워커가 is_user 를 전부 false 로 하드코딩해도, role 이
+//   self 면 owner(0)/is_user=true 로 나와야 한다.
+// ─────────────────────────────────────────────────────────────────────
+
+describe('deriveSpeakerLabels — speaker_id_int/is_user 를 session_speakers role 에서 파생', () => {
+  it('role=self → owner: speaker_id_int=0, is_user=true, owner_candidate', () => {
+    const r = deriveSpeakerLabels('self', 'heuristic')
+    expect(r.speakerIdInt).toBe(0)
+    expect(r.isUser).toBe(true)
+    expect(r.roleCandidate).toBe('owner_candidate')
+    expect(r.method).toBe('heuristic_mvp')
+  })
+
+  it('role=other → 상대: speaker_id_int=1, is_user=false, counterparty_candidate', () => {
+    const r = deriveSpeakerLabels('other', 'heuristic')
+    expect(r.speakerIdInt).toBe(1)
+    expect(r.isUser).toBe(false)
+    expect(r.roleCandidate).toBe('counterparty_candidate')
+    expect(r.method).toBe('heuristic_mvp')
+  })
+
+  it('role=null(FK 미연결) → speaker_id_int=null, is_user=null, unknown', () => {
+    const r = deriveSpeakerLabels(null, null)
+    expect(r.speakerIdInt).toBe(null)
+    expect(r.isUser).toBe(null)
+    expect(r.roleCandidate).toBe('unknown')
+    expect(r.method).toBe('not_available')
+  })
+
+  it('★회귀 가드: role 만이 출처다 — is_user 입력과 무관하게 role=self 면 0', () => {
+    // 핵심 버그: utterances.is_user 가 DB 전부 false 여도, deriveSpeakerLabels 는
+    // is_user 를 입력으로 받지 않고 session_speakers role 만 본다 → self 면 0(owner).
+    // 즉 is_user 버그가 speaker_id_int 를 오염시킬 경로가 코드상 존재하지 않는다.
+    expect(deriveSpeakerLabels('self', 'heuristic').speakerIdInt).toBe(0)
+    // (이전 코드는 isUserVal===false?1 이라 전부 1 로 collapse 했다.)
+  })
+
+  it('안전선 #1: self/other 원문은 출력에 노출되지 않는다 (candidate 형만)', () => {
+    const out = JSON.stringify([
+      deriveSpeakerLabels('self', 'heuristic'),
+      deriveSpeakerLabels('other', 'heuristic'),
+    ])
+    expect(out.toLowerCase()).not.toMatch(/"self"|"other"/)
+  })
+
+  it('알 수 없는 source → method=not_available (method allowlist 가드)', () => {
+    expect(deriveSpeakerLabels('self', 'wespeaker_v9_internal').method).toBe('automatic')
+    expect(deriveSpeakerLabels('self', 'kcelectra_secret').method).toBe('supervised_model')
+    expect(deriveSpeakerLabels('self', 'garbage').method).toBe('not_available')
   })
 })
