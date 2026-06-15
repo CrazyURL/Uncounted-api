@@ -23,6 +23,30 @@ import { authMiddleware, adminMiddleware, getBody } from '../lib/middleware.js'
 
 const adminReviewPanelV2 = new Hono()
 
+// session_speakers heuristic role 로 is_user 를 보정한다.
+// DB utterances.is_user 는 워커 하드코딩 버그로 전부 false (uncounted-api PR #82 참조) → 검수
+// 패널이 모든 발화를 '상대'로 표시하던 문제. role(self→true / other→false / 그 외→null)로 정정.
+async function applyRoleDerivedIsUser<
+  T extends { session_speaker_id?: string | null; is_user?: boolean | null },
+>(rows: T[], sessionIds: string[]): Promise<T[]> {
+  if (rows.length === 0) return rows
+  const roleById = new Map<string, string | null>()
+  const ids = [...new Set(sessionIds.filter(Boolean))]
+  if (ids.length > 0) {
+    const { data: ssRows } = await supabaseAdmin
+      .from('session_speakers')
+      .select('id, speaker_role')
+      .in('session_id', ids)
+    for (const r of (ssRows ?? []) as Record<string, unknown>[]) {
+      roleById.set(r.id as string, (r.speaker_role as string | null) ?? null)
+    }
+  }
+  return rows.map((r) => {
+    const role = r.session_speaker_id ? roleById.get(r.session_speaker_id) ?? null : null
+    return { ...r, is_user: role === 'self' ? true : role === 'other' ? false : null }
+  })
+}
+
 adminReviewPanelV2.use('/*', authMiddleware)
 adminReviewPanelV2.use('/*', adminMiddleware)
 
@@ -201,7 +225,7 @@ adminReviewPanelV2.get('/review-queue/utterances', async (c) => {
   let query = supabaseAdmin
     .from('utterances')
     .select(
-      'id, session_id, sequence_order, start_sec, end_sec, duration_sec, speaker_id, is_user, transcript_text, quality_grade, quality_score, emotion, emotion_confidence, dialog_act, pii_intervals, review_priority_score, review_priority_tier, dataset_tier',
+      'id, session_id, sequence_order, start_sec, end_sec, duration_sec, speaker_id, session_speaker_id, is_user, transcript_text, quality_grade, quality_score, emotion, emotion_confidence, dialog_act, pii_intervals, review_priority_score, review_priority_tier, dataset_tier',
       { count: 'exact' },
     )
     .order('review_priority_score', { ascending: false, nullsFirst: false })
@@ -232,9 +256,14 @@ adminReviewPanelV2.get('/review-queue/utterances', async (c) => {
     items = items.filter((r) => !reviewedIds.has(r.id))
   }
 
+  const withRole = await applyRoleDerivedIsUser(
+    items,
+    items.map((r) => r.session_id as string),
+  )
+
   return c.json({
-    data: items,
-    meta: { total: count ?? items.length, limit, offset, tier },
+    data: withRole,
+    meta: { total: count ?? withRole.length, limit, offset, tier },
   })
 })
 
@@ -346,7 +375,7 @@ adminReviewPanelV2.get('/review-queue/utterance-context', async (c) => {
   const { data: rows, error: e2 } = await supabaseAdmin
     .from('utterances')
     .select(
-      'id, sequence_order, transcript_text, is_user, speaker_id, start_sec, end_sec, review_priority_tier, review_priority_score, emotion, quality_grade',
+      'id, sequence_order, transcript_text, is_user, speaker_id, session_speaker_id, start_sec, end_sec, review_priority_tier, review_priority_score, emotion, quality_grade',
     )
     .eq('session_id', target.session_id)
     .gte('sequence_order', targetSeq - n)
@@ -357,7 +386,8 @@ adminReviewPanelV2.get('/review-queue/utterance-context', async (c) => {
     return c.json({ error: e2.message }, 500)
   }
 
-  const items = (rows ?? []).map((r) => ({
+  const withRole = await applyRoleDerivedIsUser(rows ?? [], [target.session_id as string])
+  const items = withRole.map((r) => ({
     ...r,
     is_target: r.id === utteranceId,
   }))
