@@ -105,6 +105,52 @@ export function applySelfDeclaredGender(
   )
 }
 
+const SELF_DECLARED_DEMO_DISCLAIMER =
+  'Self-declared by the data owner; not model-inferred.'
+
+/** users_profile 자기신고 5필드(한국어 카테고리값). */
+export interface SelfDeclaredProfile {
+  gender?: string | null
+  age_band?: string | null
+  region_group?: string | null
+  accent_group?: string | null
+  primary_language?: string | null
+}
+
+/**
+ * users_profile 자기신고 → owner_demographics 블록(metadata/owner_demographics.json).
+ *
+ * - 값 있는 필드만 포함(미설정 필드 생략). gender 만 영문(male/female) 정규화,
+ *   region/dialect/language 는 한국어 카테고리 원문(예: 수도권/경상도/한국어(ko-KR)).
+ * - age_band = 실(자기신고) 연령대. 화자 estimate 의 voice/speech 연령(모델 추정)과 별개.
+ * - 전 필드 부재 → null(파일 미생성).
+ * - per-speaker `*_estimate`(추정값+disclaimer)와 분리된 '자기신고' 출처 블록 —
+ *   provenance 정직성(estimate 아님) + export K-게이트 비대상(owner 본인 동의 데이터).
+ */
+export function buildSelfDeclaredDemographics(
+  profile: SelfDeclaredProfile | null | undefined,
+): Record<string, unknown> | null {
+  if (!profile) return null
+  const block: Record<string, unknown> = {}
+  const genderEn = koGenderToEn(profile.gender)
+  if (genderEn) block.gender = genderEn
+  const age = nonEmptyStringOrNull(profile.age_band)
+  if (age) block.age_band = age
+  const region = nonEmptyStringOrNull(profile.region_group)
+  if (region) block.region = region
+  const dialect = nonEmptyStringOrNull(profile.accent_group)
+  if (dialect) block.dialect = dialect
+  const language = nonEmptyStringOrNull(profile.primary_language)
+  if (language) block.primary_language = language
+  if (Object.keys(block).length === 0) return null
+  return {
+    speaker_role_candidate: 'owner_candidate',
+    source: 'self_declared',
+    disclaimer: SELF_DECLARED_DEMO_DISCLAIMER,
+    ...block,
+  }
+}
+
 // ── 룩업맵 ────────────────────────────────────────────────────────────────
 
 /**

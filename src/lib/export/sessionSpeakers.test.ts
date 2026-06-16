@@ -12,6 +12,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   applySelfDeclaredGender,
+  buildSelfDeclaredDemographics,
   buildSpeakerLookup,
   buildSpeakersSection,
   buildSpeakerExternal,
@@ -361,5 +362,50 @@ describe('applySelfDeclaredGender (self 성별 = users_profile 자기신고)', (
       method: 'not_available',
       confidence: null,
     })
+  })
+})
+
+describe('buildSelfDeclaredDemographics (owner_demographics 블록)', () => {
+  const fullProfile = {
+    gender: '남성',
+    age_band: '30대',
+    region_group: '수도권',
+    accent_group: '경상도',
+    primary_language: '한국어(ko-KR)',
+  }
+
+  it('5종 전부 + source/disclaimer/owner_candidate (gender 영문 정규화)', () => {
+    expect(buildSelfDeclaredDemographics(fullProfile)).toEqual({
+      speaker_role_candidate: 'owner_candidate',
+      source: 'self_declared',
+      disclaimer: 'Self-declared by the data owner; not model-inferred.',
+      gender: 'male',
+      age_band: '30대',
+      region: '수도권',
+      dialect: '경상도',
+      primary_language: '한국어(ko-KR)',
+    })
+  })
+
+  it('값 있는 필드만 포함(미설정 생략)', () => {
+    const b = buildSelfDeclaredDemographics({ gender: '여성', region_group: '영남' })!
+    expect(b.gender).toBe('female')
+    expect(b.region).toBe('영남')
+    expect('age_band' in b).toBe(false)
+    expect('dialect' in b).toBe(false)
+    expect('primary_language' in b).toBe(false)
+  })
+
+  it('논바이너리 gender → 생략, 사투리 카테고리값(강원도)은 한국어 원문 보존(호칭부재라 안전)', () => {
+    const b = buildSelfDeclaredDemographics({ gender: '논바이너리', accent_group: '강원도' })!
+    expect('gender' in b).toBe(false)
+    expect(b.dialect).toBe('강원도')
+  })
+
+  it('전 필드 부재/null/응답안함 → null(파일 미생성)', () => {
+    expect(buildSelfDeclaredDemographics(null)).toBeNull()
+    expect(buildSelfDeclaredDemographics(undefined)).toBeNull()
+    expect(buildSelfDeclaredDemographics({})).toBeNull()
+    expect(buildSelfDeclaredDemographics({ gender: '응답안함', age_band: null })).toBeNull()
   })
 })
