@@ -140,7 +140,7 @@ adminReviews.get('/reviews', async (c) => {
   let query = supabaseAdmin
     .from('sessions')
     .select(
-      'id, user_id, pid, session_seq, date, duration, consent_status, consented_at, ' +
+      'id, user_id, pid, peer_id, session_seq, date, duration, consent_status, consented_at, ' +
         'gpu_upload_status, gpu_uploaded_at, gpu_last_error, gpu_retry_count, raw_audio_url, ' +
         'stt_status, stt_at, diarize_status, diarize_at, ' +
         'gpu_pii_status, gpu_pii_at, auto_label_status, label_at, quality_status, quality_at, review_status, utterance_count',
@@ -399,6 +399,32 @@ adminReviews.get('/reviews', async (c) => {
       const pid = r.pid as string | null
       if (pid) sessionPidMap.set(r.id as string, pid)
     }
+
+    // ★관계 정본 = peer(연락처) 단위 1개. sessions.peer_id → peers.relationship 을 counterparty(other)
+    //   화자에 표시(export-builder 와 동일 정본). per-call session_speakers.speaker_relation 은 통화마다
+    //   흔들리므로 통일값으로 대체, peer 미확정(UNKNOWN/부재) 시 per-call 폴백. 배치 1쿼리(PK 인덱스)로
+    //   성능 격리 — 화면 로드마다 무거운 조인/연산 없이 인덱스 lookup 만.
+    const peerIdBySession = new Map<string, string>()
+    for (const r of rows) {
+      const peerId = r.peer_id as string | null
+      if (peerId) peerIdBySession.set(r.id as string, peerId)
+    }
+    const peerRelByPid = new Map<string, string>()
+    const uniquePeerIds = [...new Set(peerIdBySession.values())]
+    if (uniquePeerIds.length > 0) {
+      const { data: peerRows } = await supabaseAdmin
+        .from('peers')
+        .select('id, relationship')
+        .in('id', uniquePeerIds)
+      for (const p of peerRows ?? []) {
+        const pr = p as Record<string, unknown>
+        const rel = pr.relationship as string | null
+        if (typeof rel === 'string' && rel.trim().length > 0 && rel !== 'UNKNOWN') {
+          peerRelByPid.set(pr.id as string, rel.trim())
+        }
+      }
+    }
+
     const uniquePids = [...new Set(sessionPidMap.values())]
     const profileByPid = new Map<string, { accent_group: string | null; region_group: string | null; gender: string | null; age_band: string | null }>()
     if (uniquePids.length > 0) {
@@ -439,7 +465,10 @@ adminReviews.get('/reviews', async (c) => {
         speaker_gender: audioGender ?? (spRoleVal === 'self' ? (profile?.gender ?? null) : null),
         speaker_voice_age_range: audioVoiceAge ?? (spRoleVal === 'self' ? (profile?.age_band ?? null) : null),
         speaker_speech_age_range: spRow.speaker_speech_age_range as string | null,
-        speaker_relation: spRow.speaker_relation as string | null,
+        // other(상대) = peer 통일값 우선, 없으면 per-call 폴백. self = per-call(보통 null).
+        speaker_relation:
+          (spRoleVal === 'other' ? peerRelByPid.get(peerIdBySession.get(sid) ?? '') : undefined) ??
+          (spRow.speaker_relation as string | null),
         speaker_accent_group: profile?.accent_group ?? null,
         speaker_region_group: profile?.region_group ?? null,
         utterance_count: utteranceCountBySpeaker.get(speakerKey) ?? 0,
