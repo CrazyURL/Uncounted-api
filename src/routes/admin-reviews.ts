@@ -63,6 +63,14 @@ function deriveGrade(score: number | null): 'A' | 'B' | 'C' | null {
   return 'C'
 }
 
+// users_profile.gender(한국어 남성/여성) → session_speakers.speaker_gender 포맷(영문 male/female).
+// self 화자는 librosa 추정 대신 이 확정값을 쓰되, 화면이 기대하는 영문 포맷으로 맞춘다.
+function koGenderToEn(g: string | null | undefined): string | null {
+  if (g === '남성') return 'male'
+  if (g === '여성') return 'female'
+  return null
+}
+
 // ── GET /api/admin/reviews ──────────────────────────────────────────
 adminReviews.get('/reviews', async (c) => {
   const url = new URL(c.req.url)
@@ -462,8 +470,12 @@ adminReviews.get('/reviews', async (c) => {
       arr.push({
         speaker_label: spLabelVal,
         speaker_role: spRoleVal,
-        speaker_gender: audioGender ?? (spRoleVal === 'self' ? (profile?.gender ?? null) : null),
-        speaker_voice_age_range: audioVoiceAge ?? (spRoleVal === 'self' ? (profile?.age_band ?? null) : null),
+        // self(본인) = users_profile 확정값 우선(librosa 오판 역전), 없으면 audio 폴백.
+        //   gender 는 영문 포맷 변환. other(상대)는 audio(librosa) — peer 통합/내용교정은 GPU 트랙.
+        speaker_gender:
+          spRoleVal === 'self' ? (koGenderToEn(profile?.gender) ?? audioGender ?? null) : audioGender,
+        speaker_voice_age_range:
+          spRoleVal === 'self' ? (profile?.age_band ?? audioVoiceAge ?? null) : audioVoiceAge,
         speaker_speech_age_range: spRow.speaker_speech_age_range as string | null,
         // other(상대) = peer 통일값 우선, 없으면 per-call 폴백. self = per-call(보통 null).
         speaker_relation:

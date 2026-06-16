@@ -194,6 +194,108 @@ user.put('/consent', async (c) => {
   return c.json({ data: consentFields })
 })
 
+// ── 온보딩 인구통계 프로필 (확정 라벨 소스) ─────────────────────────────────
+// 앱 온보딩 9필드를 users_profile 에 저장/조회. self(본인) 화자는 librosa 분석 대신
+// 이 확정값을 demographics 라벨로 쓴다(admin/export 가 직접 읽음 → 단일 출처).
+
+const GENDER_VALUES = new Set(['남성', '여성', '논바이너리', '응답안함'])
+
+function pickProfileField(
+  bodyVal: unknown,
+  existingVal: string | null | undefined,
+  validator?: (v: string) => boolean,
+): string | null {
+  if (bodyVal === undefined) return existingVal ?? null // 미전송 → 기존값 유지(partial)
+  if (bodyVal === null) return null // 명시적 비움
+  if (typeof bodyVal !== 'string') return existingVal ?? null
+  const t = bodyVal.trim()
+  if (!t) return existingVal ?? null
+  if (validator && !validator(t)) return existingVal ?? null
+  return t.slice(0, 50)
+}
+
+// GET /api/user/profile — 온보딩 demographics 조회
+user.get('/profile', async (c) => {
+  const userId = c.get('userId') as string
+  const { data, error } = await supabaseAdmin
+    .from('users_profile')
+    .select('age_band, gender, region_group, accent_group, primary_language')
+    .eq('user_id', userId)
+    .maybeSingle()
+  if (error) {
+    console.error('[user/profile GET] DB error:', error)
+    return c.json({ error: 'DB error' }, 500)
+  }
+  return c.json({
+    data: data ?? { age_band: null, gender: null, region_group: null, accent_group: null, primary_language: null },
+  })
+})
+
+// PUT /api/user/profile — 온보딩 demographics 저장. body 필드만 갱신(partial),
+// 행 없으면 INSERT(pid=userId). gender 는 enum 엄격 검증(self 성별 정합의 핵심).
+user.put('/profile', async (c) => {
+  const userId = c.get('userId') as string
+  const body = getBody(c) as {
+    age_band?: string | null
+    gender?: string | null
+    region_group?: string | null
+    accent_group?: string | null
+    primary_language?: string | null
+  }
+
+  if (body.gender != null && !GENDER_VALUES.has(String(body.gender).trim())) {
+    return c.json({ error: 'invalid gender (남성|여성|논바이너리|응답안함)' }, 400)
+  }
+
+  const { data: existing, error: selectError } = await supabaseAdmin
+    .from('users_profile')
+    .select('pid, age_band, gender, region_group, accent_group, primary_language')
+    .eq('user_id', userId)
+    .maybeSingle()
+  if (selectError) {
+    console.error('[user/profile PUT] SELECT error:', selectError)
+    return c.json({ error: 'DB error' }, 500)
+  }
+
+  const fields = {
+    age_band: pickProfileField(body.age_band, existing?.age_band),
+    gender: pickProfileField(body.gender, existing?.gender, (v) => GENDER_VALUES.has(v)),
+    region_group: pickProfileField(body.region_group, existing?.region_group),
+    accent_group: pickProfileField(body.accent_group, existing?.accent_group),
+    primary_language: pickProfileField(body.primary_language, existing?.primary_language),
+    updated_at: new Date().toISOString(),
+  }
+
+  if (existing) {
+    const { error: updateError } = await supabaseAdmin
+      .from('users_profile')
+      .update(fields)
+      .eq('user_id', userId)
+    if (updateError) {
+      console.error('[user/profile PUT] UPDATE error:', updateError)
+      return c.json({ error: 'DB error' }, 500)
+    }
+  } else {
+    const { error: insertError } = await supabaseAdmin
+      .from('users_profile')
+      .insert({ pid: userId, user_id: userId, ...fields, created_at: new Date().toISOString() })
+    if (insertError) {
+      console.error('[user/profile PUT] INSERT error:', insertError)
+      return c.json({ error: 'DB error' }, 500)
+    }
+  }
+
+  return c.json({
+    data: {
+      age_band: fields.age_band,
+      gender: fields.gender,
+      region_group: fields.region_group,
+      accent_group: fields.accent_group,
+      primary_language: fields.primary_language,
+    },
+  })
+})
+
 // ── GET /api/user/voice-profile ─────────────────────────────────────────────
 // 서버 저장된 목소리 등록 프로필 조회. 없으면 null 반환.
 
