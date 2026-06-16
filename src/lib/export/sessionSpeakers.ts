@@ -70,6 +70,41 @@ export interface SpeakerLookupEntry {
 
 export type SpeakerLookupMap = Map<string, SpeakerLookupEntry>
 
+// ── self 화자 성별 = 자기신고(users_profile) 주입 ─────────────────────────
+
+/**
+ * users_profile.gender(한국어 남성/여성) → export gender_estimate 포맷(영문 male/female).
+ * 논바이너리/응답안함/미설정 → null(영문 estimate 스키마에 매핑 없음 → librosa 폴백 유지).
+ */
+export function koGenderToEn(g: string | null | undefined): 'male' | 'female' | null {
+  if (g === '남성') return 'male'
+  if (g === '여성') return 'female'
+  return null
+}
+
+/**
+ * self(본인) 화자 성별을 users_profile 자기신고값으로 덮어쓴다(librosa F0 phone-band 오판 역전).
+ * 자기신고를 speaker_gender_estimate JSONB(value/confidence/method='self_declared')로 주입 →
+ * buildGenderEstimate 가 librosa speaker_gender 보다 이를 우선 채택. other 화자는 무변경.
+ * profileGenderKo 가 남성/여성이 아니면(미설정/논바이너리/응답안함) 원본 그대로(폴백).
+ * 불변(immutable): 새 배열·새 행 반환.
+ */
+export function applySelfDeclaredGender(
+  rows: SessionSpeakerRow[],
+  profileGenderKo: string | null | undefined,
+): SessionSpeakerRow[] {
+  const en = koGenderToEn(profileGenderKo)
+  if (!en) return rows
+  return rows.map((r) =>
+    r.speaker_role === 'self'
+      ? {
+          ...r,
+          speaker_gender_estimate: { value: en, confidence: 1, method: 'self_declared' },
+        }
+      : r,
+  )
+}
+
 // ── 룩업맵 ────────────────────────────────────────────────────────────────
 
 /**

@@ -13,6 +13,7 @@ describe('sanitizeExternalMethod (안전선 #6 - 내부 모델명 노출 금지)
     expect(sanitizeExternalMethod('supervised_model')).toBe('supervised_model')
     expect(sanitizeExternalMethod('rule_based_mvp')).toBe('rule_based_mvp')
     expect(sanitizeExternalMethod('heuristic_mvp')).toBe('heuristic_mvp')
+    expect(sanitizeExternalMethod('self_declared')).toBe('self_declared')
     expect(sanitizeExternalMethod('not_available')).toBe('not_available')
   })
 

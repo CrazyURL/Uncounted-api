@@ -11,10 +11,12 @@
 
 import { describe, it, expect } from 'vitest'
 import {
+  applySelfDeclaredGender,
   buildSpeakerLookup,
   buildSpeakersSection,
   buildSpeakerExternal,
   computeSpeakerPersistentId,
+  koGenderToEn,
   lookupRoleCandidate,
   EXPOSE_SPEAKER_RELATION,
   type SessionSpeakerRow,
@@ -297,5 +299,67 @@ describe('speaker_persistent_id — 미역산 솔트해시 가명', () => {
     const json = JSON.stringify(section)
     expect(json).not.toContain(ownerKey)
     expect(json).not.toContain(peerKey)
+  })
+})
+
+describe('koGenderToEn (한국어 자기신고 → 영문 estimate 포맷)', () => {
+  it('남성→male, 여성→female', () => {
+    expect(koGenderToEn('남성')).toBe('male')
+    expect(koGenderToEn('여성')).toBe('female')
+  })
+  it('논바이너리/응답안함/null/undefined → null (영문 매핑 없음 → 폴백)', () => {
+    expect(koGenderToEn('논바이너리')).toBeNull()
+    expect(koGenderToEn('응답안함')).toBeNull()
+    expect(koGenderToEn(null)).toBeNull()
+    expect(koGenderToEn(undefined)).toBeNull()
+  })
+})
+
+describe('applySelfDeclaredGender (self 성별 = users_profile 자기신고)', () => {
+  it('self 행만 자기신고 gender_estimate 주입, other 화자는 무변경', () => {
+    const out = applySelfDeclaredGender([rowSelf, rowOther], '남성')
+    const self = out.find((r) => r.speaker_role === 'self')!
+    const other = out.find((r) => r.speaker_role === 'other')!
+    expect(self.speaker_gender_estimate).toEqual({
+      value: 'male',
+      confidence: 1,
+      method: 'self_declared',
+    })
+    // other 는 librosa 모델값 그대로(estimate null 스텁 보존)
+    expect(other.speaker_gender).toBe('male')
+    expect(other.speaker_gender_estimate).toEqual(rowOther.speaker_gender_estimate)
+  })
+
+  // Red-Green: 주입 전 self 는 librosa 오판 female → 주입 후 자기신고 male
+  it('buildSpeakerExternal: self gender_estimate female(librosa)→male(자기신고), method=self_declared', () => {
+    const before = buildSpeakerExternal(rowSelf)
+    expect((before.gender_estimate as Record<string, unknown>).value).toBe('female') // Red
+
+    const [selfAfter] = applySelfDeclaredGender([rowSelf], '남성')
+    const est = buildSpeakerExternal(selfAfter).gender_estimate as Record<string, unknown>
+    expect(est.value).toBe('male') // Green
+    expect(est.method).toBe('self_declared')
+    expect(est.confidence).toBe(1)
+  })
+
+  it('남성·여성 외(논바이너리/null/undefined) → 원본 그대로(librosa 폴백)', () => {
+    expect(applySelfDeclaredGender([rowSelf], '논바이너리')).toEqual([rowSelf])
+    expect(applySelfDeclaredGender([rowSelf], null)).toEqual([rowSelf])
+    expect(applySelfDeclaredGender([rowSelf], undefined)).toEqual([rowSelf])
+    const [s] = applySelfDeclaredGender([rowSelf], null)
+    expect((buildSpeakerExternal(s).gender_estimate as Record<string, unknown>).value).toBe(
+      'female',
+    )
+  })
+
+  it('불변성: 원본 배열·행 미변경', () => {
+    const input = [rowSelf, rowOther]
+    const out = applySelfDeclaredGender(input, '남성')
+    expect(out).not.toBe(input)
+    expect(rowSelf.speaker_gender_estimate).toEqual({
+      value: null,
+      method: 'not_available',
+      confidence: null,
+    })
   })
 })

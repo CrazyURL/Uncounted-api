@@ -22,6 +22,7 @@ import {
   sanitizeExternalMethod,
 } from '../../lib/export/transforms.js'
 import {
+  applySelfDeclaredGender,
   buildSpeakerLookup,
   buildSpeakersSection,
   lookupRoleCandidate,
@@ -402,6 +403,28 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
     }
   } catch {
     // peer 관계 optional — 실패 시 per-call speaker_relation 그대로(무중단).
+  }
+
+  // ★self(본인) 화자 성별 = users_profile 자기신고값(librosa F0 phone-band 오판 역전).
+  //   admin(#85)과 정합 — self 만 적용, other 화자는 librosa 모델값 보존.
+  //   region/방언/언어/실연령은 본 단계 비포함(deliverable 스키마·quasi-id 안전선 결정 대기).
+  //   null-safe: 실패/프로필부재/남성·여성 외 값이면 무변경.
+  try {
+    const ownerId =
+      typeof session.user_id === 'string' && session.user_id.length > 0 ? session.user_id : null
+    if (ownerId && sessionSpeakers.length > 0) {
+      const up = await supabaseAdmin
+        .from('users_profile')
+        .select('gender')
+        .eq('user_id', ownerId)
+        .maybeSingle()
+      if (!up.error) {
+        const profileGender = (up.data as { gender?: string | null } | null)?.gender
+        sessionSpeakers = applySelfDeclaredGender(sessionSpeakers, profileGender)
+      }
+    }
+  } catch {
+    // self 프로필 optional — 실패 시 librosa speaker_gender 그대로(무중단).
   }
 
   // 세그먼트 단위 주제 라벨(session_segments) — read-only. null-safe: 실패/부재 시 빈 배열.
