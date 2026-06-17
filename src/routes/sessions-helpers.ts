@@ -105,7 +105,10 @@ export function sessionToRow(s: any) {
     consented_at: s.consentedAt ?? null,
     verified_speaker: s.verifiedSpeaker ?? false,
     user_id: s.userId ?? null,
-    peer_id: s.peerId ?? null,
+    // ★peer_id 는 서버 전용(sessions.title 파싱 backfill 로만 설정)이라 클라 세션 싱크
+    //   페이로드에서 제외한다. 포함하면 앱이 peerId 없이 upsert 할 때 s.peerId ?? null = null
+    //   로 backfill 값이 통째 wipe 된다(2026-06 peer_id wipe incident). upsert 에서 빠지면
+    //   신규 행은 DB default(null), 기존 행은 backfill 값 보존.
     label_status: s.labelStatus ?? null,
     label_source: s.labelSource ?? null,
     label_confidence: s.labelConfidence ?? null,

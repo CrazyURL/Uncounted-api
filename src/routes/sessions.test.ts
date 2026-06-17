@@ -43,6 +43,14 @@ describe('sessionToRow — consentedAt 매핑', () => {
     const row = sessionToRow(input)
     expect(row.consented_at).toBeNull()
   })
+
+  // 회귀 가드: peer_id 는 서버 전용(title-parse backfill)이라 클라 싱크 페이로드에 절대
+  // 포함되면 안 됨(포함 시 upsert 가 backfill peer_id 를 null 로 wipe — 2026-06 incident).
+  it('peer_id 를 출력에 포함하지 않는다 (서버 backfill 보존)', () => {
+    const input = { id: 'x', title: 't', date: '2026-01-01', duration: 10, peerId: 'p1' }
+    const row = sessionToRow(input)
+    expect('peer_id' in row).toBe(false)
+  })
 })
 
 describe('sessionFromRow — consented_at 매핑', () => {
