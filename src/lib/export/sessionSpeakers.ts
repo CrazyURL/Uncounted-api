@@ -70,36 +70,47 @@ export interface SpeakerLookupEntry {
 
 export type SpeakerLookupMap = Map<string, SpeakerLookupEntry>
 
-// ── self 화자 성별 = 자기신고(users_profile) 주입 ─────────────────────────
+// ── self 화자 성별/demographics = 자기신고(users_profile) 주입 ───────────────
+
+/** 온보딩 필수 성별 3값(남성/여성/논바이너리)만 인정 — 응답안함/미설정/잡값 → null. 한국어 원문 유지. */
+export function declaredGenderKo(
+  g: string | null | undefined,
+): '남성' | '여성' | '논바이너리' | null {
+  return g === '남성' || g === '여성' || g === '논바이너리' ? g : null
+}
 
 /**
- * users_profile.gender(한국어 남성/여성) → export gender_estimate 포맷(영문 male/female).
- * 논바이너리/응답안함/미설정 → null(영문 estimate 스키마에 매핑 없음 → librosa 폴백 유지).
+ * 자기신고 성별 → per-speaker gender_estimate 값(영문 vocab — librosa male/female 와 동질 필드).
+ * 남성→male / 여성→female / 논바이너리→non_binary / 그 외(응답안함·미설정)→null(미override).
+ * ★논바이너리를 librosa 이진값으로 덮어쓰지 않는다(non_binary 명시) — 권위값은 owner_demographics.
  */
-export function koGenderToEn(g: string | null | undefined): 'male' | 'female' | null {
+export function declaredGenderToEstimate(
+  g: string | null | undefined,
+): 'male' | 'female' | 'non_binary' | null {
   if (g === '남성') return 'male'
   if (g === '여성') return 'female'
+  if (g === '논바이너리') return 'non_binary'
   return null
 }
 
 /**
- * self(본인) 화자 성별을 users_profile 자기신고값으로 덮어쓴다(librosa F0 phone-band 오판 역전).
+ * self(본인) 화자 gender_estimate 를 자기신고값으로 덮어쓴다(librosa F0 phone-band 오판 역전).
  * 자기신고를 speaker_gender_estimate JSONB(value/confidence/method='self_declared')로 주입 →
  * buildGenderEstimate 가 librosa speaker_gender 보다 이를 우선 채택. other 화자는 무변경.
- * profileGenderKo 가 남성/여성이 아니면(미설정/논바이너리/응답안함) 원본 그대로(폴백).
+ * 남성→male/여성→female/논바이너리→non_binary, 그 외(응답안함·미설정) → 원본 그대로(폴백).
  * 불변(immutable): 새 배열·새 행 반환.
  */
 export function applySelfDeclaredGender(
   rows: SessionSpeakerRow[],
   profileGenderKo: string | null | undefined,
 ): SessionSpeakerRow[] {
-  const en = koGenderToEn(profileGenderKo)
-  if (!en) return rows
+  const v = declaredGenderToEstimate(profileGenderKo)
+  if (!v) return rows
   return rows.map((r) =>
     r.speaker_role === 'self'
       ? {
           ...r,
-          speaker_gender_estimate: { value: en, confidence: 1, method: 'self_declared' },
+          speaker_gender_estimate: { value: v, confidence: 1, method: 'self_declared' },
         }
       : r,
   )
@@ -118,22 +129,26 @@ export interface SelfDeclaredProfile {
 }
 
 /**
- * users_profile 자기신고 → owner_demographics 블록(metadata/owner_demographics.json).
+ * users_profile 자기신고 → owner demographics canonical 블록.
  *
- * - 값 있는 필드만 포함(미설정 필드 생략). gender 만 영문(male/female) 정규화,
- *   region/dialect/language 는 한국어 카테고리 원문(예: 수도권/경상도/한국어(ko-KR)).
+ * ★두 납품경로 공유(동일 스키마·한국어값 보장):
+ *   - export-builder(단건): metadata/owner_demographics.json
+ *   - packageBuilder(다세션): speaker_demographics[].declared_demographics
+ * - gender = 한국어 원문 3값(남성/여성/논바이너리). 응답안함/미설정 생략. ★영문 정규화 안 함
+ *   (논바이너리 보존 + packageBuilder 한국어와 일관).
+ * - region/dialect/language = 한국어 카테고리 원문(예: 수도권/경상도/한국어(ko-KR)).
  * - age_band = 실(자기신고) 연령대. 화자 estimate 의 voice/speech 연령(모델 추정)과 별개.
- * - 전 필드 부재 → null(파일 미생성).
+ * - 전 필드 부재 → null(블록 미생성).
  * - per-speaker `*_estimate`(추정값+disclaimer)와 분리된 '자기신고' 출처 블록 —
  *   provenance 정직성(estimate 아님) + export K-게이트 비대상(owner 본인 동의 데이터).
  */
-export function buildSelfDeclaredDemographics(
+export function buildOwnerDemographics(
   profile: SelfDeclaredProfile | null | undefined,
 ): Record<string, unknown> | null {
   if (!profile) return null
   const block: Record<string, unknown> = {}
-  const genderEn = koGenderToEn(profile.gender)
-  if (genderEn) block.gender = genderEn
+  const gender = declaredGenderKo(profile.gender)
+  if (gender) block.gender = gender
   const age = nonEmptyStringOrNull(profile.age_band)
   if (age) block.age_band = age
   const region = nonEmptyStringOrNull(profile.region_group)

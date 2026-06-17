@@ -18,6 +18,7 @@ import {
   summarizeDroppedOrphans,
 } from './orphanFilter.js'
 import { mapSessionSpeakerRoleToCandidate, sanitizeExternalMethod } from './transforms.js'
+import { buildOwnerDemographics, type SelfDeclaredProfile } from './sessionSpeakers.js'
 
 // ZIP 빌드 동안 S3 다운로드를 batch로 병렬 처리할 동시 다운로드 수.
 // 각 batch는 fully Buffer로 다운로드 후 S3 연결을 즉시 닫는다.
@@ -147,9 +148,12 @@ export interface SpeakerDemographic {
   pseudoId: string
   utteranceCount: number
   totalDurationSec: number
-  ageBand?: string
-  gender?: string
-  regionGroup?: string
+  /**
+   * owner(self) 화자 자기신고 demographics 블록 — export-builder 의
+   * metadata/owner_demographics.json 과 동일 canonical 블록(buildOwnerDemographics, 한국어 gender).
+   * 비-owner(상대) 또는 프로필부재 → null.
+   */
+  declared_demographics: Record<string, unknown> | null
 }
 
 /**
@@ -524,15 +528,26 @@ async function _buildPackageInner(
   const userIds = [...new Set(utterances.map((u) => u.user_id as string).filter(Boolean))]
   const { data: profileRows } = await supabaseAdmin
     .from('users_profile')
-    .select('user_id, age_band, gender, region_group')
+    .select('user_id, age_band, gender, region_group, accent_group, primary_language')
     .in('user_id', userIds)
 
-  const userDemoMap = new Map<string, { ageBand?: string; gender?: string; regionGroup?: string }>()
+  const userDemoMap = new Map<
+    string,
+    {
+      ageBand?: string
+      gender?: string
+      regionGroup?: string
+      accentGroup?: string
+      primaryLanguage?: string
+    }
+  >()
   for (const row of (profileRows ?? []) as Record<string, unknown>[]) {
     userDemoMap.set(row.user_id as string, {
       ageBand: (row.age_band as string) ?? undefined,
       gender: (row.gender as string) ?? undefined,
       regionGroup: (row.region_group as string) ?? undefined,
+      accentGroup: (row.accent_group as string) ?? undefined,
+      primaryLanguage: (row.primary_language as string) ?? undefined,
     })
   }
 
@@ -572,7 +587,10 @@ async function _buildPackageInner(
   const packageDirName = `${skuId}_${today}_${sanitizedClient}`
 
   // Gather speaker demographics
-  const speakerMap = new Map<string, { count: number; durationSec: number; ageBand?: string; gender?: string; regionGroup?: string }>()
+  const speakerMap = new Map<
+    string,
+    { count: number; durationSec: number; profile?: SelfDeclaredProfile }
+  >()
   const metaLines: UtteranceMetaLine[] = []
   let totalDurationSec = 0
   const gradeDistribution = { A: 0, B: 0, C: 0 }
@@ -626,10 +644,19 @@ async function _buildPackageInner(
     speakerMap.set(speakerKey, {
       count: existing.count + 1,
       durationSec: existing.durationSec + durationSec,
-      // demographics는 owner 발화에만 부여 (상대방은 미수집 정보)
-      ageBand: existing.ageBand ?? (isUser !== false ? demo?.ageBand : undefined),
-      gender: existing.gender ?? (isUser !== false ? demo?.gender : undefined),
-      regionGroup: existing.regionGroup ?? (isUser !== false ? demo?.regionGroup : undefined),
+      // demographics는 owner(self) 발화에만 부여 (상대방은 미수집 정보 → 블록 null).
+      // users_profile 5필드(camelCase) → 자기신고 프로필(snake_case) → buildOwnerDemographics.
+      profile:
+        existing.profile ??
+        (isUser !== false && demo
+          ? {
+              gender: demo.gender ?? null,
+              age_band: demo.ageBand ?? null,
+              region_group: demo.regionGroup ?? null,
+              accent_group: demo.accentGroup ?? null,
+              primary_language: demo.primaryLanguage ?? null,
+            }
+          : undefined),
     })
 
     // Fill metrics from quality metrics table if not on item itself
@@ -874,9 +901,8 @@ async function _buildPackageInner(
       pseudoId,
       utteranceCount: stats.count,
       totalDurationSec: Math.round(stats.durationSec * 100) / 100,
-      ageBand: stats.ageBand,
-      gender: stats.gender,
-      regionGroup: stats.regionGroup,
+      // ★export-builder owner_demographics.json 와 동일 블록(공유 헬퍼). owner 만, 상대=null.
+      declared_demographics: stats.profile ? buildOwnerDemographics(stats.profile) : null,
     }),
   )
 

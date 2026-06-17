@@ -23,7 +23,7 @@ import {
 } from '../../lib/export/transforms.js'
 import {
   applySelfDeclaredGender,
-  buildSelfDeclaredDemographics,
+  buildOwnerDemographics,
   buildSpeakerLookup,
   buildSpeakersSection,
   lookupRoleCandidate,
@@ -430,7 +430,7 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
       if (!up.error && up.data) {
         const profile = up.data as SelfDeclaredProfile
         sessionSpeakers = applySelfDeclaredGender(sessionSpeakers, profile.gender)
-        selfDeclaredDemographics = buildSelfDeclaredDemographics(profile)
+        selfDeclaredDemographics = buildOwnerDemographics(profile)
       }
     }
   } catch {

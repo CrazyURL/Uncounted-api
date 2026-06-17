@@ -12,12 +12,13 @@
 import { describe, it, expect } from 'vitest'
 import {
   applySelfDeclaredGender,
-  buildSelfDeclaredDemographics,
+  buildOwnerDemographics,
   buildSpeakerLookup,
   buildSpeakersSection,
   buildSpeakerExternal,
   computeSpeakerPersistentId,
-  koGenderToEn,
+  declaredGenderKo,
+  declaredGenderToEstimate,
   lookupRoleCandidate,
   EXPOSE_SPEAKER_RELATION,
   type SessionSpeakerRow,
@@ -303,20 +304,25 @@ describe('speaker_persistent_id — 미역산 솔트해시 가명', () => {
   })
 })
 
-describe('koGenderToEn (한국어 자기신고 → 영문 estimate 포맷)', () => {
-  it('남성→male, 여성→female', () => {
-    expect(koGenderToEn('남성')).toBe('male')
-    expect(koGenderToEn('여성')).toBe('female')
+describe('declaredGenderKo / declaredGenderToEstimate', () => {
+  it('declaredGenderKo: 3값(남성/여성/논바이너리) 한국어 보존, 그 외 null', () => {
+    expect(declaredGenderKo('남성')).toBe('남성')
+    expect(declaredGenderKo('여성')).toBe('여성')
+    expect(declaredGenderKo('논바이너리')).toBe('논바이너리')
+    expect(declaredGenderKo('응답안함')).toBeNull()
+    expect(declaredGenderKo(null)).toBeNull()
+    expect(declaredGenderKo(undefined)).toBeNull()
   })
-  it('논바이너리/응답안함/null/undefined → null (영문 매핑 없음 → 폴백)', () => {
-    expect(koGenderToEn('논바이너리')).toBeNull()
-    expect(koGenderToEn('응답안함')).toBeNull()
-    expect(koGenderToEn(null)).toBeNull()
-    expect(koGenderToEn(undefined)).toBeNull()
+  it('declaredGenderToEstimate: 남성→male/여성→female/논바이너리→non_binary, 그 외 null', () => {
+    expect(declaredGenderToEstimate('남성')).toBe('male')
+    expect(declaredGenderToEstimate('여성')).toBe('female')
+    expect(declaredGenderToEstimate('논바이너리')).toBe('non_binary')
+    expect(declaredGenderToEstimate('응답안함')).toBeNull()
+    expect(declaredGenderToEstimate(null)).toBeNull()
   })
 })
 
-describe('applySelfDeclaredGender (self 성별 = users_profile 자기신고)', () => {
+describe('applySelfDeclaredGender (self gender_estimate = 자기신고)', () => {
   it('self 행만 자기신고 gender_estimate 주입, other 화자는 무변경', () => {
     const out = applySelfDeclaredGender([rowSelf, rowOther], '남성')
     const self = out.find((r) => r.speaker_role === 'self')!
@@ -343,8 +349,20 @@ describe('applySelfDeclaredGender (self 성별 = users_profile 자기신고)', (
     expect(est.confidence).toBe(1)
   })
 
-  it('남성·여성 외(논바이너리/null/undefined) → 원본 그대로(librosa 폴백)', () => {
-    expect(applySelfDeclaredGender([rowSelf], '논바이너리')).toEqual([rowSelf])
+  it('논바이너리 → non_binary (librosa 이진값 덮어쓰기 금지)', () => {
+    const [s] = applySelfDeclaredGender([rowSelf], '논바이너리')
+    expect(s.speaker_gender_estimate).toEqual({
+      value: 'non_binary',
+      confidence: 1,
+      method: 'self_declared',
+    })
+    expect((buildSpeakerExternal(s).gender_estimate as Record<string, unknown>).value).toBe(
+      'non_binary',
+    )
+  })
+
+  it('응답안함/null/undefined → 원본 그대로(librosa 폴백)', () => {
+    expect(applySelfDeclaredGender([rowSelf], '응답안함')).toEqual([rowSelf])
     expect(applySelfDeclaredGender([rowSelf], null)).toEqual([rowSelf])
     expect(applySelfDeclaredGender([rowSelf], undefined)).toEqual([rowSelf])
     const [s] = applySelfDeclaredGender([rowSelf], null)
@@ -365,7 +383,7 @@ describe('applySelfDeclaredGender (self 성별 = users_profile 자기신고)', (
   })
 })
 
-describe('buildSelfDeclaredDemographics (owner_demographics 블록)', () => {
+describe('buildOwnerDemographics (owner demographics canonical 블록, 한국어)', () => {
   const fullProfile = {
     gender: '남성',
     age_band: '30대',
@@ -374,12 +392,12 @@ describe('buildSelfDeclaredDemographics (owner_demographics 블록)', () => {
     primary_language: '한국어(ko-KR)',
   }
 
-  it('5종 전부 + source/disclaimer/owner_candidate (gender 영문 정규화)', () => {
-    expect(buildSelfDeclaredDemographics(fullProfile)).toEqual({
+  it('5종 전부 + source/disclaimer/owner_candidate (gender 한국어 원문)', () => {
+    expect(buildOwnerDemographics(fullProfile)).toEqual({
       speaker_role_candidate: 'owner_candidate',
       source: 'self_declared',
       disclaimer: 'Self-declared by the data owner; not model-inferred.',
-      gender: 'male',
+      gender: '남성',
       age_band: '30대',
       region: '수도권',
       dialect: '경상도',
@@ -388,24 +406,27 @@ describe('buildSelfDeclaredDemographics (owner_demographics 블록)', () => {
   })
 
   it('값 있는 필드만 포함(미설정 생략)', () => {
-    const b = buildSelfDeclaredDemographics({ gender: '여성', region_group: '영남' })!
-    expect(b.gender).toBe('female')
+    const b = buildOwnerDemographics({ gender: '여성', region_group: '영남' })!
+    expect(b.gender).toBe('여성')
     expect(b.region).toBe('영남')
     expect('age_band' in b).toBe(false)
     expect('dialect' in b).toBe(false)
     expect('primary_language' in b).toBe(false)
   })
 
-  it('논바이너리 gender → 생략, 사투리 카테고리값(강원도)은 한국어 원문 보존(호칭부재라 안전)', () => {
-    const b = buildSelfDeclaredDemographics({ gender: '논바이너리', accent_group: '강원도' })!
-    expect('gender' in b).toBe(false)
+  it('★논바이너리 gender 보존(생략 안 함) + 사투리 한국어 원문', () => {
+    const b = buildOwnerDemographics({ gender: '논바이너리', accent_group: '강원도' })!
+    expect(b.gender).toBe('논바이너리')
     expect(b.dialect).toBe('강원도')
   })
 
-  it('전 필드 부재/null/응답안함 → null(파일 미생성)', () => {
-    expect(buildSelfDeclaredDemographics(null)).toBeNull()
-    expect(buildSelfDeclaredDemographics(undefined)).toBeNull()
-    expect(buildSelfDeclaredDemographics({})).toBeNull()
-    expect(buildSelfDeclaredDemographics({ gender: '응답안함', age_band: null })).toBeNull()
+  it('응답안함 gender → 생략(다른 필드 있으면 블록 유지) / 전 필드 부재 → null', () => {
+    expect(buildOwnerDemographics(null)).toBeNull()
+    expect(buildOwnerDemographics(undefined)).toBeNull()
+    expect(buildOwnerDemographics({})).toBeNull()
+    expect(buildOwnerDemographics({ gender: '응답안함', age_band: null })).toBeNull()
+    const b = buildOwnerDemographics({ gender: '응답안함', region_group: '수도권' })!
+    expect('gender' in b).toBe(false)
+    expect(b.region).toBe('수도권')
   })
 })
