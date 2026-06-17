@@ -7,6 +7,8 @@
  *         → self/other/peer/그 외 → unknown (확정 표현 금지).
  *   - #6: 내부 모델명 (aihub_*, kcelectra_*, whisperx_* 등) 외부 노출 X.
  *         → automatic / supervised_model / rule_based_mvp / heuristic_mvp / not_available 5종.
+ *         (+ self_declared: 모델/휴리스틱이 아닌 사용자 자기신고 출처 — self 화자 성별 등.
+ *          모델명이 아니라 일반 출처 범주이므로 #6 누출 위험 없음.)
  *
  * 본 함수들은 DB 저장 X — export-builder 가 ZIP 빌드 직전에만 호출.
  */
@@ -18,6 +20,7 @@ export type ExternalMethod =
   | 'supervised_model'
   | 'rule_based_mvp'
   | 'heuristic_mvp'
+  | 'self_declared'
   | 'not_available'
 
 const METHOD_PATTERNS: Array<[RegExp, ExternalMethod]> = [
@@ -45,6 +48,9 @@ const METHOD_PATTERNS: Array<[RegExp, ExternalMethod]> = [
   // heuristic_mvp
   [/^heuristic_mvp$/i, 'heuristic_mvp'],
   [/^heuristic(?:_v\d+)?$/i, 'heuristic_mvp'],
+
+  // self_declared — 사용자 자기신고(모델/휴리스틱 아님). self 화자 demographics 출처.
+  [/^self_declared$/i, 'self_declared'],
 
   // not_available — explicit pass-through
   [/^not_available$/i, 'not_available'],

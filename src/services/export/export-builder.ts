@@ -22,9 +22,12 @@ import {
   sanitizeExternalMethod,
 } from '../../lib/export/transforms.js'
 import {
+  applySelfDeclaredGender,
+  buildOwnerDemographics,
   buildSpeakerLookup,
   buildSpeakersSection,
   lookupRoleCandidate,
+  type SelfDeclaredProfile,
   type SessionSpeakerRow,
   type SpeakerLookupMap,
   type SpeakerPersistentIdContext,
@@ -192,7 +195,7 @@ export async function buildSessionExportZip(
     requestedMode === 'embedded' ? 'embedded' : 'reference_only'
   const includeAudio = audioExportMode === 'embedded'
 
-  const { session, utterances: loadedUtterances, lineageRun, sessionSpeakers, relationFrequency, segments } =
+  const { session, utterances: loadedUtterances, lineageRun, sessionSpeakers, relationFrequency, segments, selfDeclaredDemographics } =
     await loadSessionContext(sessionId)
 
   // 기본은 로드된 전체 발화. 일반 납품 플로우에서는 발화 단위 품질 필터를 적용한다.
@@ -246,6 +249,7 @@ export async function buildSessionExportZip(
       relationFrequency,
       persistentIdCtx,
       segments,
+      selfDeclaredDemographics,
     })
 
     // ZIP 빌드 직전 safety scan.
@@ -310,6 +314,8 @@ interface SessionContext {
   relationFrequency: ReadonlyMap<string, number>
   // 세그먼트 단위 주제 라벨(session_segments). 없거나 조회 실패 시 빈 배열 — export 무중단.
   segments: SegmentRow[]
+  // self(본인) 자기신고 demographics 블록(metadata/owner_demographics.json). 프로필부재 시 null.
+  selfDeclaredDemographics: Record<string, unknown> | null
 }
 
 // internal — testability 를 위해 export (외부 API 계약은 buildSessionExportZip 만).
@@ -404,6 +410,33 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
     // peer 관계 optional — 실패 시 per-call speaker_relation 그대로(무중단).
   }
 
+  // ★self(본인) demographics = users_profile 자기신고값. 2갈래:
+  //   (a) 성별: self 화자 gender_estimate override(librosa F0 phone-band 오판 역전, admin #85 정합).
+  //       self 만 적용, other 화자는 librosa 모델값 보존.
+  //   (b) 5종 블록(성별/실연령/지역/방언/언어): metadata/owner_demographics.json 으로 별도 동봉
+  //       — per-speaker estimate(추정값)와 분리된 '자기신고' 출처. owner 본인 동의 데이터라
+  //       K-게이트 비대상. PR-A 미스윕 경로(metadata/)라 fail-closed 위험 없음.
+  //   null-safe: 실패/프로필부재면 무변경 + owner_demographics 미생성.
+  let selfDeclaredDemographics: Record<string, unknown> | null = null
+  try {
+    const ownerId =
+      typeof session.user_id === 'string' && session.user_id.length > 0 ? session.user_id : null
+    if (ownerId) {
+      const up = await supabaseAdmin
+        .from('users_profile')
+        .select('gender, age_band, region_group, accent_group, primary_language')
+        .eq('user_id', ownerId)
+        .maybeSingle()
+      if (!up.error && up.data) {
+        const profile = up.data as SelfDeclaredProfile
+        sessionSpeakers = applySelfDeclaredGender(sessionSpeakers, profile.gender)
+        selfDeclaredDemographics = buildOwnerDemographics(profile)
+      }
+    }
+  } catch {
+    // self 프로필 optional — 실패 시 librosa 그대로 + owner_demographics 미생성(무중단).
+  }
+
   // 세그먼트 단위 주제 라벨(session_segments) — read-only. null-safe: 실패/부재 시 빈 배열.
   // topic 의 정본은 세그먼트 단위(발화 단위 헤드 미배선). segment_index 순 정렬.
   let segments: SegmentRow[] = []
@@ -446,10 +479,10 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
           `(utterance_count=${count}, sample_ids=${JSON.stringify(summary.sampleUtteranceIds)})`,
       )
     }
-    return { session, utterances: outcome.kept, lineageRun, sessionSpeakers, relationFrequency, segments }
+    return { session, utterances: outcome.kept, lineageRun, sessionSpeakers, relationFrequency, segments, selfDeclaredDemographics }
   }
 
-  return { session, utterances: allUtterances, lineageRun, sessionSpeakers, relationFrequency, segments }
+  return { session, utterances: allUtterances, lineageRun, sessionSpeakers, relationFrequency, segments, selfDeclaredDemographics }
 }
 
 /**
@@ -526,6 +559,8 @@ interface WriteContext {
   persistentIdCtx?: SpeakerPersistentIdContext | null
   /** 세그먼트 단위 주제 라벨(session_segments). 미주입/0개 시 segments.jsonl 미생성. */
   segments?: SegmentRow[]
+  /** self(본인) 자기신고 demographics. 있으면 metadata/owner_demographics.json 동봉. */
+  selfDeclaredDemographics?: Record<string, unknown> | null
 }
 
 async function writeAllArtifacts(
@@ -612,6 +647,13 @@ async function writeAllArtifacts(
   // Sync Integrity Gate(D1) 리포트 — 게이트 활성 시에만 동봉(미활성 시 파일 미생성 → 기존 ZIP 구조 불변).
   if (ctx.syncQualityReport) {
     await writeJson(path.join(metaDir, 'sync_quality_report.json'), ctx.syncQualityReport)
+  }
+
+  // metadata/owner_demographics.json — self(본인) 자기신고 demographics(성별/실연령/지역/방언/언어).
+  // 프로필부재(null)면 파일 미생성 → 기존 ZIP 구조 불변. PR-A 스윕 비대상 경로(metadata/)라
+  // 한국어 카테고리값(강원도/전라도 등)도 fail-closed 위험 없음.
+  if (ctx.selfDeclaredDemographics) {
+    await writeJson(path.join(metaDir, 'owner_demographics.json'), ctx.selfDeclaredDemographics)
   }
 
   // metadata/segments.jsonl — 세그먼트 단위 주제 라벨(topic 정본) + 화자 역할(packageBuilder 미러).
@@ -710,6 +752,10 @@ function buildReadme(session: SessionRow): string {
     '- 화자 역할은 후보값으로만 표기됩니다 (owner_candidate / counterparty_candidate / unknown).',
     '- 화자 프로필(calls/call_*.json `speakers[]`): 성별/연령은 추정 객체(`*_estimate`)와',
     '  disclaimer 로만 노출됩니다 (확정 단정 금지).',
+    '- `metadata/owner_demographics.json`: owner(본인) 화자의 *자기신고* demographics',
+    '  (성별·연령대·지역·방언·언어)입니다. `speakers[].*_estimate`(모델 추정)와 달리 사용자가',
+    '  직접 신고한 값으로 `source: self_declared` 로 표기됩니다. 프로필 미설정 시 파일이',
+    '  생성되지 않습니다.',
     '- 관계(`relation_candidate`)는 K-익명성(K=5) 게이트 + 일반화 tier 로만 노출됩니다:',
     '  데이터셋 전체에서 흔한 관계(count>=5)는 원문, 희귀 관계는 상위 범주로 일반화,',
     '  일반화 후에도 희귀하면 노출하지 않습니다. 모두 추정값(disclaimer 동반)입니다.',
