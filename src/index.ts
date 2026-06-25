@@ -43,6 +43,7 @@ import adminPiiCandidates from './routes/admin-pii-candidates.js'
 import adminPiiAnnotations from './routes/admin-pii-annotations.js'
 import adminUtterancesRawTranscript from './routes/admin-utterances-raw-transcript.js'
 import adminEmotionLabels from './routes/admin-emotion-labels.js'
+import adminPeers from './routes/admin-peers.js'
 import calls from './routes/calls.js'
 import contracts from './routes/contracts.js'
 import userLearningOptout from './routes/user-learning-optout.js'
@@ -124,6 +125,7 @@ app.route('/api/admin', adminLedger)
 app.route('/api/admin', adminUtterances)
 app.route('/api/admin', adminRewards)
 app.route('/api/admin', adminReviews)
+app.route('/api/admin', adminPeers)
 app.route('/api/admin', adminDeliveries)
 app.route('/api/admin', adminDashboard)
 app.route('/api/admin/analytics', adminAnalytics)
