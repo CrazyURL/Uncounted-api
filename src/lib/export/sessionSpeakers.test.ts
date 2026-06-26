@@ -11,6 +11,7 @@
 
 import { describe, it, expect } from 'vitest'
 import {
+  applyPeerDemographics,
   applySelfDeclaredGender,
   buildOwnerDemographics,
   buildSpeakerLookup,
@@ -428,5 +429,67 @@ describe('buildOwnerDemographics (owner demographics canonical 블록, 한국어
     const b = buildOwnerDemographics({ gender: '응답안함', region_group: '수도권' })!
     expect('gender' in b).toBe(false)
     expect(b.region).toBe('수도권')
+  })
+})
+
+describe('applyPeerDemographics (counterparty peer override + 순환오염 플래그)', () => {
+  it('human_locked gender → other 화자 estimate(source=human_locked, acoustic flag 없음)', () => {
+    const out = applyPeerDemographics([rowSelf, rowOther], {
+      gender: 'male',
+      gender_source: 'human_locked',
+      attr_category: '가족',
+    })
+    const other = out.find((r) => r.speaker_role === 'other')!
+    expect(other.speaker_gender_estimate).toEqual({
+      value: 'male',
+      confidence: 1,
+      source: 'human_locked',
+    })
+    expect(other.attr_category).toBe('가족')
+    // self 행 무관
+    const self = out.find((r) => r.speaker_role === 'self')!
+    expect(self.attr_category).toBeUndefined()
+  })
+
+  it('★relation_derived gender → acoustic_reliability:low + buildSpeakerExternal disclaimer(순환오염)', () => {
+    const [outOther] = applyPeerDemographics([rowOther], {
+      gender: 'female',
+      gender_source: 'relation_derived',
+    })
+    expect((outOther.speaker_gender_estimate as Record<string, unknown>).acoustic_reliability).toBe('low')
+    const ext = buildSpeakerExternal(outOther)
+    const ge = ext.gender_estimate as Record<string, unknown>
+    expect(ge.value).toBe('female')
+    expect(ge.source).toBe('relation_derived')
+    expect(ge.acoustic_reliability).toBe('low')
+    expect(String(ge.disclaimer)).toContain('acoustic')
+    expect(ext.attr_category).toBeUndefined()
+  })
+
+  it('voice/speech age override → age_group_estimate', () => {
+    const [o] = applyPeerDemographics([rowOther], {
+      voice_age_range: '40대',
+      speech_age_range: '30대',
+      gender_source: 'human_locked',
+    })
+    const ext = buildSpeakerExternal(o)
+    const age = ext.age_group_estimate as Record<string, unknown>
+    expect(age.voice_age_range).toBe('40대')
+    expect(age.speech_age_range).toBe('30대')
+    expect(age.source).toBe('human_locked')
+  })
+
+  it('peer 값 전무(스코어러 미적재) → 무변경(librosa 폴백 graceful)', () => {
+    const input = [rowSelf, rowOther]
+    expect(applyPeerDemographics(input, { gender: null, attr_category: null })).toBe(input)
+    expect(applyPeerDemographics(input, {})).toBe(input)
+    expect(applyPeerDemographics(input, null)).toBe(input)
+  })
+
+  it('attr_category 만 있어도 other 에 노출(gender 없으면 estimate 미override → librosa 유지)', () => {
+    const [o] = applyPeerDemographics([rowOther], { attr_category: '업무' })
+    expect(o.attr_category).toBe('업무')
+    // gender 미주입 → 기존 estimate 보존
+    expect(o.speaker_gender_estimate).toEqual(rowOther.speaker_gender_estimate)
   })
 })

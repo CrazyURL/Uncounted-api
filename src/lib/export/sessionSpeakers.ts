@@ -116,6 +116,59 @@ export function applySelfDeclaredGender(
   )
 }
 
+/** peers 속성(잠금 레이어 087) — counterparty 화자 override 소스. */
+export interface PeerAttributes {
+  gender?: string | null
+  gender_source?: string | null // stated | relation_derived | human_locked
+  voice_age_range?: string | null
+  speech_age_range?: string | null
+  attr_category?: string | null // 가족 | 업무
+}
+
+/**
+ * counterparty(other) 화자 demographics 를 peers(잠금 레이어) 값으로 override.
+ * applySelfDeclaredGender(self) 의 peer 버전 — 'other' 행에만 주입(self 무관).
+ * - gender: speaker_gender_estimate{value, source:gender_source, (relation_derived→acoustic_reliability:'low')}.
+ *   ★relation_derived 성별은 음향 성별학습 부적합(순환오염) — buildGenderEstimate 가 disclaimer 표기.
+ * - voice/speech_age: speaker_age_group_estimate override(librosa per-call 대신 peer 단위).
+ * - attr_category: 화자 객체에 노출.
+ * peer 값이 전부 없으면(스코어러 미적재) 무변경 → librosa 폴백 유지(graceful). 불변.
+ */
+export function applyPeerDemographics(
+  rows: SessionSpeakerRow[],
+  peer: PeerAttributes | null | undefined,
+): SessionSpeakerRow[] {
+  if (!peer) return rows
+  const gender = nonEmptyStringOrNull(peer.gender)
+  const genderSource = nonEmptyStringOrNull(peer.gender_source)
+  const voiceAge = nonEmptyStringOrNull(peer.voice_age_range)
+  const speechAge = nonEmptyStringOrNull(peer.speech_age_range)
+  const attrCategory = nonEmptyStringOrNull(peer.attr_category)
+  if (!gender && !voiceAge && !speechAge && !attrCategory) return rows // graceful: 무변경
+
+  return rows.map((r) => {
+    if (r.speaker_role !== 'other') return r
+    const next: SessionSpeakerRow = { ...r }
+    if (gender) {
+      next.speaker_gender_estimate = {
+        value: gender,
+        confidence: genderSource === 'human_locked' ? 1 : null,
+        source: genderSource ?? null,
+        ...(genderSource === 'relation_derived' ? { acoustic_reliability: 'low' } : {}),
+      }
+    }
+    if (voiceAge || speechAge) {
+      next.speaker_age_group_estimate = {
+        voice_age_range: voiceAge,
+        speech_age_range: speechAge,
+        ...(genderSource ? { source: genderSource } : {}),
+      }
+    }
+    if (attrCategory) next.attr_category = attrCategory
+    return next
+  })
+}
+
 const SELF_DECLARED_DEMO_DISCLAIMER =
   'Self-declared by the data owner; not model-inferred.'
 
@@ -279,6 +332,9 @@ export function buildSpeakerExternal(
     // 흔한값(count>=5)→원문, 희귀값→일반화 tier, tier 도 희귀/관계부재/미지값→null.
     out.relation_candidate = resolveRelationCandidate(row.speaker_relation, relationCounts)
   }
+  // peer 속성 카테고리(가족/업무) — applyPeerDemographics 가 'other' 행에 주입한 경우만.
+  const attrCategory = nonEmptyStringOrNull(row.attr_category)
+  if (attrCategory) out.attr_category = attrCategory
   return out
 }
 
@@ -327,12 +383,23 @@ function buildGenderEstimate(row: SessionSpeakerRow): Record<string, unknown> {
   const jsonbValue = nonEmptyStringOrNull(jsonb?.value)
   // estimate JSONB value 가 채워져 있으면 그것을, 아니면 확정 speaker_gender 에서 파생.
   const value = jsonbValue ?? nonEmptyStringOrNull(row.speaker_gender)
-  return {
+  const out: Record<string, unknown> = {
     value: value ?? 'unknown', // 확정 단어 아님 — disclaimer 로 추정값 명시.
     confidence: numOrNull(jsonb?.confidence),
     method: sanitizeExternalMethod(jsonb?.method),
     disclaimer: SPEAKER_ESTIMATE_DISCLAIMER,
   }
+  // 출처(provenance) — stated/relation_derived/human_locked/self_declared 등 clean 카테고리(모델명 X).
+  const source = nonEmptyStringOrNull(jsonb?.source)
+  if (source) out.source = source
+  // ★순환오염 방지(GPU): relation_derived(텍스트·관계 파생) 성별은 음향 성별학습에 부적합.
+  //   바이어가 음향으로 성별 학습 시 우리 텍스트파생 라벨로 오염되는 것 차단.
+  if (jsonb?.acoustic_reliability === 'low') {
+    out.acoustic_reliability = 'low'
+    out.disclaimer =
+      'Text/relation-derived gender; NOT suitable for acoustic gender-model training (circular contamination).'
+  }
+  return out
 }
 
 function buildAgeGroupEstimate(row: SessionSpeakerRow): Record<string, unknown> {
@@ -342,13 +409,16 @@ function buildAgeGroupEstimate(row: SessionSpeakerRow): Record<string, unknown> 
   const speechAge =
     nonEmptyStringOrNull(jsonb?.speech_age_range) ??
     nonEmptyStringOrNull(row.speaker_speech_age_range)
-  return {
+  const out: Record<string, unknown> = {
     voice_age_range: voiceAge, // null = 미산출(날조 금지).
     speech_age_range: speechAge,
     confidence: numOrNull(jsonb?.confidence),
     method: sanitizeExternalMethod(jsonb?.method),
     disclaimer: SPEAKER_ESTIMATE_DISCLAIMER,
   }
+  const source = nonEmptyStringOrNull(jsonb?.source)
+  if (source) out.source = source
+  return out
 }
 
 // ── 헬퍼 ──────────────────────────────────────────────────────────────────

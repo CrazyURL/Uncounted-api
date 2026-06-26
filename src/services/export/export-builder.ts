@@ -22,9 +22,11 @@ import {
   sanitizeExternalMethod,
 } from '../../lib/export/transforms.js'
 import {
+  applyPeerDemographics,
   applySelfDeclaredGender,
   buildOwnerDemographics,
   buildSpeakerLookup,
+  type PeerAttributes,
   buildSpeakersSection,
   lookupRoleCandidate,
   type SelfDeclaredProfile,
@@ -392,12 +394,13 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
     if (peerId && sessionSpeakers.length > 0) {
       const pr = await supabaseAdmin
         .from('peers')
-        .select('relationship')
+        .select('relationship, gender, gender_source, voice_age_range, speech_age_range, attr_category')
         .eq('id', peerId)
         .maybeSingle()
-      const rawRel = (pr.data as { relationship?: string | null } | null)?.relationship
+      const peerRow = pr.error ? null : (pr.data as Record<string, unknown> | null)
+      const rawRel = (peerRow as { relationship?: string | null } | null)?.relationship
       const peerRel =
-        !pr.error && typeof rawRel === 'string' && rawRel.trim().length > 0 && rawRel !== 'UNKNOWN'
+        typeof rawRel === 'string' && rawRel.trim().length > 0 && rawRel !== 'UNKNOWN'
           ? rawRel.trim()
           : null
       if (peerRel !== null) {
@@ -405,6 +408,9 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
           ss.speaker_role === 'other' ? { ...ss, speaker_relation: peerRel } : ss,
         )
       }
+      // peer 속성 잠금 레이어(087) → counterparty demographics override(+ gender provenance·acoustic flag).
+      //   gender/age 미적재(스코어러 전 또는 업무=성별무가치 null)면 무변경 → librosa 폴백(graceful).
+      sessionSpeakers = applyPeerDemographics(sessionSpeakers, peerRow as PeerAttributes | null)
     }
   } catch {
     // peer 관계 optional — 실패 시 per-call speaker_relation 그대로(무중단).
