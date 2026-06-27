@@ -80,3 +80,35 @@ describe('mapQueueRow', () => {
     expect(m.gender_source).toBeNull()
   })
 })
+
+import { buildPeerSelfReportUpdate } from './peerConfirm.js'
+
+describe('buildPeerSelfReportUpdate (상대 자가신고 → peers, peer_stated)', () => {
+  const NOW2 = '2026-06-27T00:00:00.000Z'
+  it('전체 자가신고 → peer_stated·override_locked·unverified + age는 voice_age_range', () => {
+    const u = buildPeerSelfReportUpdate(
+      { gender: 'female', age_band: '30대', region_group: '수도권', accent_group: '경상도', primary_language: '한국어(ko-KR)' },
+      NOW2,
+    )!
+    expect(u.gender).toBe('female')
+    expect(u.voice_age_range).toBe('30대')
+    expect(u.region_group).toBe('수도권')
+    expect(u.accent_group).toBe('경상도')
+    expect(u.primary_language).toBe('한국어(ko-KR)')
+    expect(u.gender_source).toBe('peer_stated')
+    expect(u.override_locked).toBe(true)
+    expect(u.attr_state).toBe('peer_stated_unverified')
+  })
+  it('enum 위반 필드는 skip(동의 실패 안 시킴), 유효값만', () => {
+    const u = buildPeerSelfReportUpdate({ gender: '남성', age_band: '30대', region_group: 'xxx' }, NOW2)!
+    expect('gender' in u).toBe(false) // '남성'(한국어)=영문 enum 위반 → skip
+    expect(u.voice_age_range).toBe('30대')
+    expect('region_group' in u).toBe(false)
+    expect(u.override_locked).toBe(true)
+  })
+  it('유효 자가신고 0개 → null (peers write skip, graceful)', () => {
+    expect(buildPeerSelfReportUpdate({}, NOW2)).toBeNull()
+    expect(buildPeerSelfReportUpdate({ gender: '남성', age_band: '60대' }, NOW2)).toBeNull()
+    expect(buildPeerSelfReportUpdate({ gender: null }, NOW2)).toBeNull()
+  })
+})

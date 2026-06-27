@@ -105,3 +105,50 @@ export function mapQueueRow(row: PeerQueueRow): Record<string, unknown> {
     auto_locks_if_confirmed: callCount,
   }
 }
+
+// ── peer 자가신고(동의 시) → peers 빌더 (088, peer_stated) ──────────────────
+// owner enum 카테고리값(한국어). gender 만 영문(peers.gender=male/female/non_binary).
+export const REGION_VALUES = new Set(['수도권', '영남', '호남', '충청', '강원', '제주', '해외'])
+export const ACCENT_VALUES = new Set(['표준', '경상도', '전라도', '충청도', '강원도', '제주도', '혼합'])
+export const LANGUAGE_VALUES = new Set([
+  '한국어(ko-KR)', '영어(en-US)', '중국어(zh-CN)', '일본어(ja-JP)', '기타',
+])
+
+export interface PeerSelfReportInput {
+  gender?: string | null // 영문 male/female/non_binary (peer.html 제출)
+  age_band?: string | null // 20대|30대|40대|50대+
+  region_group?: string | null
+  accent_group?: string | null
+  primary_language?: string | null
+}
+
+/**
+ * 상대 자가신고(동의 시) → peers UPDATE 행.
+ * - override_locked=true(자가신고=권위, 추론·재처리 미덮음), gender_source='peer_stated',
+ *   attr_state='peer_stated_unverified'(GPU cross-check 전 초기상태).
+ * - enum 위반/미입력 필드는 skip(동의 자체는 실패시키지 않음 — consent 우선). 유효 필드 0개 →
+ *   null(peers write skip, graceful). 연령은 voice_age_range 슬롯(source 가 음향 아닌 자가신고 표기).
+ * - 필수(성별·연령)는 peer.html 클라이언트가 강제(서버는 graceful — 롤아웃·구클라 안전).
+ */
+export function buildPeerSelfReportUpdate(
+  body: PeerSelfReportInput,
+  nowIso: string,
+): Record<string, unknown> | null {
+  const fields: Record<string, unknown> = {}
+  if (body.gender != null && GENDER_VALUES.has(body.gender)) fields.gender = body.gender
+  if (body.age_band != null && AGE_RANGE_VALUES.has(body.age_band)) fields.voice_age_range = body.age_band
+  if (body.region_group != null && REGION_VALUES.has(body.region_group)) fields.region_group = body.region_group
+  if (body.accent_group != null && ACCENT_VALUES.has(body.accent_group)) fields.accent_group = body.accent_group
+  if (body.primary_language != null && LANGUAGE_VALUES.has(body.primary_language)) {
+    fields.primary_language = body.primary_language
+  }
+  if (Object.keys(fields).length === 0) return null // 유효 자가신고 없음 → peers write skip
+  return {
+    ...fields,
+    gender_source: 'peer_stated',
+    override_locked: true,
+    attr_state: 'peer_stated_unverified',
+    locked_at: nowIso,
+    updated_at: nowIso,
+  }
+}

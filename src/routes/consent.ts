@@ -9,6 +9,7 @@ import { Hono } from 'hono'
 import { supabaseAdmin } from '../lib/supabase.js'
 import { authMiddleware, getBody } from '../lib/middleware.js'
 import { promoteToBothAgreed, type ConsentScope } from '../lib/consent/promoteToBothAgreed.js'
+import { buildPeerSelfReportUpdate, type PeerSelfReportInput } from '../lib/peers/peerConfirm.js'
 
 const consent = new Hono()
 
@@ -153,7 +154,7 @@ consent.post('/agree/:token', async (c) => {
 
   // 받는 분이 peer.html 에서 고른 동의 범위 (plain body — bodyDecryptMiddleware 가 raw 통과).
   // 미전달/이상값은 'ongoing'(과거+앞으로 모두, 기존 페이지 의미) 로 안전 기본.
-  const body = getBody<{ scope?: string }>(c)
+  const body = getBody<{ scope?: string } & PeerSelfReportInput>(c)
   const consentScope: ConsentScope = body?.scope === 'snapshot' ? 'snapshot' : 'ongoing'
 
   // 현재 상태 조회
@@ -206,6 +207,29 @@ consent.post('/agree/:token', async (c) => {
     shareMethod: invitation.share_method,
     consentScope,
   })
+
+  // ★상대 자가신고 demographics(동의 시 입력) → counterparty peers 잠금 저장(088).
+  //   invitation 세션 → sessions.peer_id 로 counterparty 해석 → 자가신고값(gender_source='peer_stated',
+  //   override_locked=true). 필수(성별·연령)는 peer.html 클라이언트 강제, 서버는 graceful
+  //   (유효값만 write, peer_id 부재·실패해도 동의 정상 완료 — consent 우선).
+  try {
+    const selfReport = buildPeerSelfReportUpdate(body ?? {}, new Date().toISOString())
+    if (selfReport && sessionIds.length > 0) {
+      const { data: srows } = await supabaseAdmin
+        .from('sessions')
+        .select('peer_id')
+        .in('id', sessionIds)
+      const peerId = (srows ?? [])
+        .map((r) => (r as { peer_id?: string | null }).peer_id)
+        .find((p) => typeof p === 'string' && p.length > 0)
+      if (peerId) {
+        await supabaseAdmin.from('peers').update(selfReport).eq('id', peerId)
+      }
+    }
+  } catch (err) {
+    // 자가신고 저장 optional — 실패해도 동의(both_agreed)는 정상(무중단).
+    console.error('[consent.agree.selfReport] error:', err)
+  }
 
   const { data: refreshed } = await supabaseAdmin
     .from('consent_invitations')
