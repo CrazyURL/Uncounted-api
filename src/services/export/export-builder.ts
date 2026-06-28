@@ -25,6 +25,7 @@ import {
   applyPeerDemographics,
   applySelfDeclaredGender,
   buildOwnerDemographics,
+  buildPeerDemographics,
   buildSpeakerLookup,
   type PeerAttributes,
   buildSpeakersSection,
@@ -197,7 +198,7 @@ export async function buildSessionExportZip(
     requestedMode === 'embedded' ? 'embedded' : 'reference_only'
   const includeAudio = audioExportMode === 'embedded'
 
-  const { session, utterances: loadedUtterances, lineageRun, sessionSpeakers, relationFrequency, segments, selfDeclaredDemographics } =
+  const { session, utterances: loadedUtterances, lineageRun, sessionSpeakers, relationFrequency, segments, selfDeclaredDemographics, peerDeclaredDemographics } =
     await loadSessionContext(sessionId)
 
   // 기본은 로드된 전체 발화. 일반 납품 플로우에서는 발화 단위 품질 필터를 적용한다.
@@ -252,6 +253,7 @@ export async function buildSessionExportZip(
       persistentIdCtx,
       segments,
       selfDeclaredDemographics,
+      peerDeclaredDemographics,
     })
 
     // ZIP 빌드 직전 safety scan.
@@ -318,6 +320,8 @@ interface SessionContext {
   segments: SegmentRow[]
   // self(본인) 자기신고 demographics 블록(metadata/owner_demographics.json). 프로필부재 시 null.
   selfDeclaredDemographics: Record<string, unknown> | null
+  // counterparty(상대) 자가신고 demographics 블록(metadata/peer_demographics.json). 미자가신고 시 null.
+  peerDeclaredDemographics: Record<string, unknown> | null
 }
 
 // internal — testability 를 위해 export (외부 API 계약은 buildSessionExportZip 만).
@@ -384,6 +388,8 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
     // session_speakers optional — 미적용 환경에서도 export 정상
   }
 
+  // counterparty(상대) 자가신고 demographics 블록(metadata/peer_demographics.json). 미자가신고 시 null.
+  let peerDeclaredDemographics: Record<string, unknown> | null = null
   // ★관계 정본 = peer 단위(사용자×상대 1개). sessions.peer_id → peers.relationship 을
   //   counterparty(other) 화자의 speaker_relation 에 주입한다(cross-call 누적 관계).
   //   단일 통화에 관계 단서가 없어도 그 상대와의 누적 통화로 특정된 관계를 표시한다.
@@ -394,7 +400,7 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
     if (peerId && sessionSpeakers.length > 0) {
       const pr = await supabaseAdmin
         .from('peers')
-        .select('relationship, gender, gender_source, voice_age_range, speech_age_range, attr_category')
+        .select('relationship, gender, gender_source, voice_age_range, speech_age_range, attr_category, region_group, accent_group, primary_language')
         .eq('id', peerId)
         .maybeSingle()
       const peerRow = pr.error ? null : (pr.data as Record<string, unknown> | null)
@@ -411,6 +417,8 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
       // peer 속성 잠금 레이어(087) → counterparty demographics override(+ gender provenance·acoustic flag).
       //   gender/age 미적재(스코어러 전 또는 업무=성별무가치 null)면 무변경 → librosa 폴백(graceful).
       sessionSpeakers = applyPeerDemographics(sessionSpeakers, peerRow as PeerAttributes | null)
+      // 자가신고(peer_stated) demographics 블록 — owner_demographics.json 대칭(별도 파일).
+      peerDeclaredDemographics = buildPeerDemographics(peerRow as PeerAttributes | null)
     }
   } catch {
     // peer 관계 optional — 실패 시 per-call speaker_relation 그대로(무중단).
@@ -485,10 +493,10 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
           `(utterance_count=${count}, sample_ids=${JSON.stringify(summary.sampleUtteranceIds)})`,
       )
     }
-    return { session, utterances: outcome.kept, lineageRun, sessionSpeakers, relationFrequency, segments, selfDeclaredDemographics }
+    return { session, utterances: outcome.kept, lineageRun, sessionSpeakers, relationFrequency, segments, selfDeclaredDemographics, peerDeclaredDemographics }
   }
 
-  return { session, utterances: allUtterances, lineageRun, sessionSpeakers, relationFrequency, segments, selfDeclaredDemographics }
+  return { session, utterances: allUtterances, lineageRun, sessionSpeakers, relationFrequency, segments, selfDeclaredDemographics, peerDeclaredDemographics }
 }
 
 /**
@@ -567,6 +575,8 @@ interface WriteContext {
   segments?: SegmentRow[]
   /** self(본인) 자기신고 demographics. 있으면 metadata/owner_demographics.json 동봉. */
   selfDeclaredDemographics?: Record<string, unknown> | null
+  /** counterparty(상대) 자가신고 demographics. 있으면 metadata/peer_demographics.json 동봉. */
+  peerDeclaredDemographics?: Record<string, unknown> | null
 }
 
 async function writeAllArtifacts(
@@ -660,6 +670,12 @@ async function writeAllArtifacts(
   // 한국어 카테고리값(강원도/전라도 등)도 fail-closed 위험 없음.
   if (ctx.selfDeclaredDemographics) {
     await writeJson(path.join(metaDir, 'owner_demographics.json'), ctx.selfDeclaredDemographics)
+  }
+
+  // metadata/peer_demographics.json — counterparty(상대) 자가신고 demographics. owner 와 대칭.
+  // 미자가신고(null)면 파일 미생성 → 기존 ZIP 구조 불변. metadata/ 경로(PR-A safety 스윕 비대상).
+  if (ctx.peerDeclaredDemographics) {
+    await writeJson(path.join(metaDir, 'peer_demographics.json'), ctx.peerDeclaredDemographics)
   }
 
   // metadata/segments.jsonl — 세그먼트 단위 주제 라벨(topic 정본) + 화자 역할(packageBuilder 미러).
