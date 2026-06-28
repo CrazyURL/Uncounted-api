@@ -9,9 +9,27 @@ export const RELATIONSHIP_VALUES = new Set([
   '부모', '배우자', '형제자매', '자녀', '친구',
   '직장상사', '직장동료', '거래처', '교사', '고객', '기타',
 ])
-export const GENDER_VALUES = new Set(['male', 'female', 'non_binary'])
+// gender = 앱 정본 한국어(users_profile 와 대칭). 구 영문(male/female/non_binary)은
+// normalizeGenderKo 로 한국어 canonical 로 정규화해 저장(마이그 089 union CHECK 가 둘 다 허용).
+export const GENDER_VALUES = new Set(['남성', '여성', '논바이너리'])
+const GENDER_EN_TO_KO: Record<string, '남성' | '여성' | '논바이너리'> = {
+  male: '남성',
+  female: '여성',
+  non_binary: '논바이너리',
+}
+/** 성별 입력(한국어 또는 구 영문)을 한국어 canonical 로 정규화. 미인정값 → null. */
+export function normalizeGenderKo(
+  g: string | null | undefined,
+): '남성' | '여성' | '논바이너리' | null {
+  if (g == null) return null
+  const t = String(g).trim()
+  if (t === '남성' || t === '여성' || t === '논바이너리') return t
+  return GENDER_EN_TO_KO[t] ?? null
+}
 export const ATTR_CATEGORY_VALUES = new Set(['가족', '업무'])
-export const AGE_RANGE_VALUES = new Set(['20대', '30대', '40대', '50대+'])
+// age = 앱 온보딩 AgeBand 정본(userProfile.ts). 응답안함 제외(skip 의미). 087 '50대+'(음향 추정)는
+// 별도 — 본 validator 는 자기신고/admin 확정용이라 앱 버킷 사용.
+export const AGE_RANGE_VALUES = new Set(['10대', '20대', '30대', '40대', '50대', '60대이상'])
 
 export interface PeerConfirmInput {
   relationship?: string | null
@@ -51,8 +69,9 @@ export function buildPeerConfirmUpdate(
     update.rel_confidence = 1.0
   }
   if (body.gender != null) {
-    if (!GENDER_VALUES.has(body.gender)) return { error: 'invalid gender' }
-    update.gender = body.gender
+    const ko = normalizeGenderKo(body.gender)
+    if (!ko) return { error: 'invalid gender' }
+    update.gender = ko
     update.gender_source = 'human_locked'
   }
   if (body.attr_category != null) {
@@ -107,7 +126,7 @@ export function mapQueueRow(row: PeerQueueRow): Record<string, unknown> {
 }
 
 // ── peer 자가신고(동의 시) → peers 빌더 (088, peer_stated) ──────────────────
-// owner enum 카테고리값(한국어). gender 만 영문(peers.gender=male/female/non_binary).
+// 전 필드 앱 정본 한국어(users_profile 와 대칭). gender 는 normalizeGenderKo 로 한국어 canonical 정규화.
 export const REGION_VALUES = new Set(['수도권', '영남', '호남', '충청', '강원', '제주', '해외'])
 export const ACCENT_VALUES = new Set(['표준', '경상도', '전라도', '충청도', '강원도', '제주도', '혼합'])
 export const LANGUAGE_VALUES = new Set([
@@ -115,8 +134,8 @@ export const LANGUAGE_VALUES = new Set([
 ])
 
 export interface PeerSelfReportInput {
-  gender?: string | null // 영문 male/female/non_binary (peer.html 제출)
-  age_band?: string | null // 20대|30대|40대|50대+
+  gender?: string | null // 앱 정본 한국어 남성/여성/논바이너리 (구 영문도 normalizeGenderKo 로 수용)
+  age_band?: string | null // 앱 AgeBand 10대|20대|30대|40대|50대|60대이상
   region_group?: string | null
   accent_group?: string | null
   primary_language?: string | null
@@ -135,7 +154,8 @@ export function buildPeerSelfReportUpdate(
   nowIso: string,
 ): Record<string, unknown> | null {
   const fields: Record<string, unknown> = {}
-  if (body.gender != null && GENDER_VALUES.has(body.gender)) fields.gender = body.gender
+  const genderKo = normalizeGenderKo(body.gender)
+  if (genderKo) fields.gender = genderKo
   if (body.age_band != null && AGE_RANGE_VALUES.has(body.age_band)) fields.voice_age_range = body.age_band
   if (body.region_group != null && REGION_VALUES.has(body.region_group)) fields.region_group = body.region_group
   if (body.accent_group != null && ACCENT_VALUES.has(body.accent_group)) fields.accent_group = body.accent_group
