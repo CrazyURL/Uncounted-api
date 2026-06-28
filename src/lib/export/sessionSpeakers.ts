@@ -94,6 +94,18 @@ export function declaredGenderToEstimate(
 }
 
 /**
+ * peer.gender(앱 정본 한국어 또는 구 영문)를 estimate 영문 vocab 으로 정규화.
+ * 한국어 → declaredGenderToEstimate(남성→male), 구 영문(male/female/non_binary) → passthrough,
+ * 그 외/응답안함 → null. ★estimate 필드는 librosa 와 동질(영문)이라 한국어값이 새지 않게 함.
+ */
+export function peerGenderToEstimate(
+  g: string | null | undefined,
+): 'male' | 'female' | 'non_binary' | null {
+  if (g === 'male' || g === 'female' || g === 'non_binary') return g
+  return declaredGenderToEstimate(g)
+}
+
+/**
  * self(본인) 화자 gender_estimate 를 자기신고값으로 덮어쓴다(librosa F0 phone-band 오판 역전).
  * 자기신고를 speaker_gender_estimate JSONB(value/confidence/method='self_declared')로 주입 →
  * buildGenderEstimate 가 librosa speaker_gender 보다 이를 우선 채택. other 화자는 무변경.
@@ -116,13 +128,16 @@ export function applySelfDeclaredGender(
   )
 }
 
-/** peers 속성(잠금 레이어 087) — counterparty 화자 override 소스. */
+/** peers 속성(잠금 레이어 087/088) — counterparty 화자 override 소스. */
 export interface PeerAttributes {
   gender?: string | null
-  gender_source?: string | null // stated | relation_derived | human_locked
+  gender_source?: string | null // stated | relation_derived | human_locked | peer_stated
   voice_age_range?: string | null
   speech_age_range?: string | null
   attr_category?: string | null // 가족 | 업무
+  region_group?: string | null // 자가신고(peer_stated, 088) — owner 와 대칭
+  accent_group?: string | null
+  primary_language?: string | null
 }
 
 /**
@@ -150,11 +165,16 @@ export function applyPeerDemographics(
     if (r.speaker_role !== 'other') return r
     const next: SessionSpeakerRow = { ...r }
     if (gender) {
-      next.speaker_gender_estimate = {
-        value: gender,
-        confidence: genderSource === 'human_locked' ? 1 : null,
-        source: genderSource ?? null,
-        ...(genderSource === 'relation_derived' ? { acoustic_reliability: 'low' } : {}),
+      // estimate 필드는 librosa 와 동질(영문 vocab) — peers.gender 가 한국어면 영문으로 정규화.
+      // 매핑 불가(응답안함 등) 시 estimate 미주입(librosa 폴백 유지).
+      const estimateValue = peerGenderToEstimate(gender)
+      if (estimateValue) {
+        next.speaker_gender_estimate = {
+          value: estimateValue,
+          confidence: genderSource === 'human_locked' ? 1 : null,
+          source: genderSource ?? null,
+          ...(genderSource === 'relation_derived' ? { acoustic_reliability: 'low' } : {}),
+        }
       }
     }
     if (voiceAge || speechAge) {
@@ -215,6 +235,43 @@ export function buildOwnerDemographics(
     speaker_role_candidate: 'owner_candidate',
     source: 'self_declared',
     disclaimer: SELF_DECLARED_DEMO_DISCLAIMER,
+    ...block,
+  }
+}
+
+const PEER_DECLARED_DEMO_DISCLAIMER =
+  'Self-declared by the counterparty at consent; not model-inferred.'
+
+/**
+ * peers(자가신고) → counterparty demographics canonical 블록 — buildOwnerDemographics 의 peer 버전.
+ *
+ * ★gender_source='peer_stated'(상대가 동의 시 직접 신고) 인 행만 emit — 추론(relation_derived)·
+ *   스코어러 값은 자기신고 아니므로 declared 블록에서 제외(provenance 정직성). owner 블록과 대칭:
+ *   gender=한국어 원문(남성/여성/논바이너리), region/dialect/language=한국어 카테고리 원문,
+ *   age_band=자가신고 연령대(peers.voice_age_range 슬롯, 088). 전 필드 부재/미자가신고 → null.
+ * - per-speaker `*_estimate`(추정값)와 분리된 '자가신고' 출처 블록(export 단건=peer_demographics.json).
+ */
+export function buildPeerDemographics(
+  peer: PeerAttributes | null | undefined,
+): Record<string, unknown> | null {
+  if (!peer) return null
+  if (nonEmptyStringOrNull(peer.gender_source) !== 'peer_stated') return null // 자가신고분만
+  const block: Record<string, unknown> = {}
+  const gender = declaredGenderKo(peer.gender) // peer_stated 면 한국어
+  if (gender) block.gender = gender
+  const age = nonEmptyStringOrNull(peer.voice_age_range)
+  if (age) block.age_band = age
+  const region = nonEmptyStringOrNull(peer.region_group)
+  if (region) block.region = region
+  const dialect = nonEmptyStringOrNull(peer.accent_group)
+  if (dialect) block.dialect = dialect
+  const language = nonEmptyStringOrNull(peer.primary_language)
+  if (language) block.primary_language = language
+  if (Object.keys(block).length === 0) return null
+  return {
+    speaker_role_candidate: 'counterparty_candidate',
+    source: 'peer_stated',
+    disclaimer: PEER_DECLARED_DEMO_DISCLAIMER,
     ...block,
   }
 }
