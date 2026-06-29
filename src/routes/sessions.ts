@@ -272,6 +272,71 @@ sessions.post('/batch', async (c) => {
 })
 
 /**
+ * POST /sessions/batch-update
+ * 세션 consent 상태 배치 갱신 (소유자 본인 세션만). 앱의 동의 승격
+ * (promoteSessionToBothAgreed / autoConsentNewSessions)이 호출하는 전용 동의 엔드포인트.
+ * /batch(upsert)는 consent_status 를 strip 하므로, 동의 변경은 본 엔드포인트로만 일어난다.
+ *
+ * Body: { updates: [{ id, consent_status, visibility_status?, is_public?, consented_at? }] }
+ * 보안: WHERE user_id=본인 — 타인 세션 동의 위조 차단. consent_status enum 검증.
+ *       both_agreed 의 양측동의 정당성은 호출측(hasAgreedInvitation 가드) 책임 — 본 엔드포인트는
+ *       소유자 본인 데이터에 한정. (프로덕션 강화 시 server-side 초대 검증 추가 가능.)
+ */
+sessions.post('/batch-update', async (c) => {
+  const userId = c.get('userId') as string
+  const { updates } = getBody<{
+    updates: Array<{
+      id: string
+      consent_status?: string
+      visibility_status?: string
+      is_public?: boolean
+      consented_at?: string | null
+    }>
+  }>(c)
+
+  if (!Array.isArray(updates) || updates.length === 0) {
+    return c.json({ error: 'updates array required' }, 400)
+  }
+  if (updates.length > 500) {
+    return c.json({ error: 'Maximum 500 updates per batch' }, 400)
+  }
+
+  const ALLOWED_CONSENT = new Set(['locked', 'user_only', 'both_agreed'])
+
+  try {
+    let updated = 0
+    for (const u of updates) {
+      if (!u || typeof u.id !== 'string' || u.id.length === 0) continue
+      if (u.consent_status != null && !ALLOWED_CONSENT.has(u.consent_status)) continue
+
+      const patch: Record<string, unknown> = {}
+      if (u.consent_status !== undefined) patch.consent_status = u.consent_status
+      if (u.visibility_status !== undefined) patch.visibility_status = u.visibility_status
+      if (u.is_public !== undefined) patch.is_public = u.is_public
+      if (u.consented_at !== undefined) patch.consented_at = u.consented_at
+      if (Object.keys(patch).length === 0) continue
+
+      // 소유자 본인 세션만 — 타인 동의 위조 차단.
+      const { data, error } = await supabaseAdmin
+        .from('sessions')
+        .update(patch)
+        .eq('id', u.id)
+        .eq('user_id', userId)
+        .select('id')
+
+      if (error) {
+        console.error('[sessions.batch-update] update error:', error)
+        continue // best-effort per item — 한 건 실패가 전체를 막지 않음
+      }
+      updated += data?.length ?? 0
+    }
+    return c.json({ data: { updated }, updated })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
  * PATCH /sessions/:id
  * STT 완료 후 audio_metrics + has_diarization + upload_status 업데이트
  * (Android SttProcessingService 호출)
