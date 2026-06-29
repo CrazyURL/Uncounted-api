@@ -64,7 +64,10 @@ sessions.get('/pending-upload', async (c) => {
       .is('raw_audio_url', null)
       .eq('raw_source_lost', false) // 소스 분실(기기 원본 삭제) 세션은 재시도 제외 (mig 084)
       .order('date', { ascending: true })
-      .limit(50)
+      // 동의 그룹 일괄 승격(예: 종일 181건) 후 백로그를 앱이 **한 번의 스캔/포그라운드로 전량**
+      // 네이티브 큐에 넣을 수 있도록 상향(기존 50 → 50건씩만 잡혀 앱을 여러 번 켜야 했음).
+      // 응답은 세션당 5필드라 500행도 수 KB. 네이티브 업로드는 순차라 큐 크기 안전.
+      .limit(500)
 
     if (error) return c.json({ error: error.message }, 500)
 
