@@ -418,17 +418,44 @@ adminReviews.get('/reviews', async (c) => {
       if (peerId) peerIdBySession.set(r.id as string, peerId)
     }
     const peerRelByPid = new Map<string, string>()
+    // 상대(other) 화자 demographics 정본 = peer **자가신고**(동의 시 입력, gender_source='peer_stated').
+    //   self↔users_profile 와 대칭 — per-call librosa(통화마다 흔들림) 대신 peer 단위 1값으로 통일.
+    //   GPU 추론(relation_derived)은 자가신고가 아니므로 **제외**(정직성: 추론값을 자가신고처럼
+    //   보여주지 않음 — 신뢰도 트랙 별도). 자가신고 peer 가 생기면 자동 반영.
+    const peerDemoByPid = new Map<
+      string,
+      {
+        gender: string | null
+        voice_age_range: string | null
+        speech_age_range: string | null
+        accent_group: string | null
+        region_group: string | null
+      }
+    >()
     const uniquePeerIds = [...new Set(peerIdBySession.values())]
     if (uniquePeerIds.length > 0) {
       const { data: peerRows } = await supabaseAdmin
         .from('peers')
-        .select('id, relationship')
+        .select(
+          'id, relationship, gender, voice_age_range, speech_age_range, accent_group, region_group, override_locked',
+        )
         .in('id', uniquePeerIds)
       for (const p of peerRows ?? []) {
         const pr = p as Record<string, unknown>
         const rel = pr.relationship as string | null
         if (typeof rel === 'string' && rel.trim().length > 0 && rel !== 'UNKNOWN') {
           peerRelByPid.set(pr.id as string, rel.trim())
+        }
+        // override_locked=true = 권위 정본(peer 자가신고 'peer_stated' 또는 admin 수동확정
+        //   'human_locked' 둘 다 잠금). GPU 추론(relation_derived, locked=false)은 제외.
+        if (pr.override_locked === true) {
+          peerDemoByPid.set(pr.id as string, {
+            gender: pr.gender as string | null,
+            voice_age_range: pr.voice_age_range as string | null, // 088: 나이=voice_age_range 슬롯
+            speech_age_range: pr.speech_age_range as string | null,
+            accent_group: pr.accent_group as string | null,
+            region_group: pr.region_group as string | null,
+          })
         }
       }
     }
@@ -465,24 +492,39 @@ adminReviews.get('/reviews', async (c) => {
       const speakerKey = `${sid}-${spLabelVal}`
       const sessionPid = sessionPidMap.get(sid)
       const profile = spRoleVal === 'self' && sessionPid ? profileByPid.get(sessionPid) : undefined
+      // other(상대) = peer 자가신고/수동확정(override_locked) 정본. self↔users_profile 와 대칭 —
+      //   per-call librosa(통화마다 흔들림) 대신 peer 단위 1값으로 통일. 미확정 peer 는 audio 폴백.
+      const peerDemo = spRoleVal === 'other' ? peerDemoByPid.get(peerIdBySession.get(sid) ?? '') : undefined
       const audioGender = spRow.speaker_gender as string | null
       const audioVoiceAge = spRow.speaker_voice_age_range as string | null
+      const audioSpeechAge = spRow.speaker_speech_age_range as string | null
       arr.push({
         speaker_label: spLabelVal,
         speaker_role: spRoleVal,
-        // self(본인) = users_profile 확정값 우선(librosa 오판 역전), 없으면 audio 폴백.
-        //   gender 는 영문 포맷 변환. other(상대)는 audio(librosa) — peer 통합/내용교정은 GPU 트랙.
+        // self = users_profile 확정값, other = peer 확정값(override_locked) 우선, 없으면 audio 폴백.
+        //   gender 는 영문 포맷 변환(koGenderToEn). GPU 추론값(미잠금)은 자가신고처럼 쓰지 않음.
         speaker_gender:
-          spRoleVal === 'self' ? (koGenderToEn(profile?.gender) ?? audioGender ?? null) : audioGender,
+          spRoleVal === 'self'
+            ? (koGenderToEn(profile?.gender) ?? audioGender ?? null)
+            : (koGenderToEn(peerDemo?.gender) ?? audioGender ?? null),
         speaker_voice_age_range:
-          spRoleVal === 'self' ? (profile?.age_band ?? audioVoiceAge ?? null) : audioVoiceAge,
-        speaker_speech_age_range: spRow.speaker_speech_age_range as string | null,
-        // other(상대) = peer 통일값 우선, 없으면 per-call 폴백. self = per-call(보통 null).
+          spRoleVal === 'self'
+            ? (profile?.age_band ?? audioVoiceAge ?? null)
+            : (peerDemo?.voice_age_range ?? audioVoiceAge ?? null),
+        // 말투연령: self=프로필 나이(per-call speech_age 모델은 가중치 미로드=랜덤이라 무의미).
+        //   other=peer 확정 speech_age 또는 확정 나이, 미확정이면 per-call. 둘 다 랜덤 폴백 최소화.
+        speaker_speech_age_range:
+          spRoleVal === 'self'
+            ? (profile?.age_band ?? null)
+            : (peerDemo?.speech_age_range ?? peerDemo?.voice_age_range ?? audioSpeechAge ?? null),
+        // other 관계 = peer 통일값 우선, 없으면 per-call 폴백. self = per-call(보통 null).
         speaker_relation:
           (spRoleVal === 'other' ? peerRelByPid.get(peerIdBySession.get(sid) ?? '') : undefined) ??
           (spRow.speaker_relation as string | null),
-        speaker_accent_group: profile?.accent_group ?? null,
-        speaker_region_group: profile?.region_group ?? null,
+        speaker_accent_group:
+          spRoleVal === 'self' ? (profile?.accent_group ?? null) : (peerDemo?.accent_group ?? null),
+        speaker_region_group:
+          spRoleVal === 'self' ? (profile?.region_group ?? null) : (peerDemo?.region_group ?? null),
         utterance_count: utteranceCountBySpeaker.get(speakerKey) ?? 0,
         total_duration_sec: Math.round((durationSecBySpeaker.get(speakerKey) ?? 0) * 10) / 10,
       })
