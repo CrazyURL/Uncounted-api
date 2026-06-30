@@ -647,8 +647,8 @@ describe('export-builder — session_speakers 배선', () => {
   }
 
   const speakerRows = [
-    { speaker_label: 'SPEAKER_00', speaker_role: 'self', speaker_gender: 'female', speaker_voice_age_range: '30대' },
-    { speaker_label: 'SPEAKER_01', speaker_role: 'other', speaker_gender: 'male', speaker_voice_age_range: '40대', speaker_relation: '교사' },
+    { speaker_label: 'SPEAKER_00', speaker_role: 'self', speaker_gender: 'female' },
+    { speaker_label: 'SPEAKER_01', speaker_role: 'other', speaker_gender: 'male', speaker_relation: '교사' },
   ]
 
   async function lookup() {
@@ -694,7 +694,7 @@ describe('export-builder — session_speakers 배선', () => {
     expect(speakers).toHaveLength(2)
     expect((speakers[0].identity_inference as Record<string, unknown>).predicted_role).toBe('owner_candidate')
     expect((speakers[0].gender_estimate as Record<string, unknown>).value).toBe('female')
-    expect((speakers[1].age_group_estimate as Record<string, unknown>).voice_age_range).toBe('40대')
+    expect('age_group_estimate' in speakers[1]).toBe(false) // 연령 폐기
     const json = JSON.stringify(out)
     expect(json.toLowerCase()).not.toMatch(/"self"|"other"/) // 안전선 #1
     // 빈도표 없음 → 관계 게이트 null (보수적). 관계값 미노출.

@@ -47,12 +47,9 @@ export interface SessionSpeakerRow {
   speaker_role?: string | null
   speaker_role_source?: string | null
   speaker_gender?: string | null
-  speaker_voice_age_range?: string | null
-  speaker_speech_age_range?: string | null
   speaker_relation?: string | null
   speaker_identity_inference?: Record<string, unknown> | null
   speaker_gender_estimate?: Record<string, unknown> | null
-  speaker_age_group_estimate?: Record<string, unknown> | null
   [key: string]: unknown
 }
 
@@ -62,8 +59,6 @@ export interface SpeakerLookupEntry {
   role_candidate: ExternalSpeakerRole
   /** male / female / null — 확정 단어. 룩업 내부값(라인엔 미노출, call.json estimate 로만). */
   gender: string | null
-  /** 예: '30대' / null. */
-  voice_age: string | null
   /** 예: '교사' / null. 관계 PII — 기본 미노출(EXPOSE_SPEAKER_RELATION). */
   relation: string | null
 }
@@ -132,8 +127,7 @@ export function applySelfDeclaredGender(
 export interface PeerAttributes {
   gender?: string | null
   gender_source?: string | null // stated | relation_derived | human_locked | peer_stated
-  voice_age_range?: string | null
-  speech_age_range?: string | null
+  age_band?: string | null
   attr_category?: string | null // 가족 | 업무
   region_group?: string | null // 자가신고(peer_stated, 088) — owner 와 대칭
   accent_group?: string | null
@@ -145,7 +139,6 @@ export interface PeerAttributes {
  * applySelfDeclaredGender(self) 의 peer 버전 — 'other' 행에만 주입(self 무관).
  * - gender: speaker_gender_estimate{value, source:gender_source, (relation_derived→acoustic_reliability:'low')}.
  *   ★relation_derived 성별은 음향 성별학습 부적합(순환오염) — buildGenderEstimate 가 disclaimer 표기.
- * - voice/speech_age: speaker_age_group_estimate override(librosa per-call 대신 peer 단위).
  * - attr_category: 화자 객체에 노출.
  * peer 값이 전부 없으면(스코어러 미적재) 무변경 → librosa 폴백 유지(graceful). 불변.
  */
@@ -156,10 +149,8 @@ export function applyPeerDemographics(
   if (!peer) return rows
   const gender = nonEmptyStringOrNull(peer.gender)
   const genderSource = nonEmptyStringOrNull(peer.gender_source)
-  const voiceAge = nonEmptyStringOrNull(peer.voice_age_range)
-  const speechAge = nonEmptyStringOrNull(peer.speech_age_range)
   const attrCategory = nonEmptyStringOrNull(peer.attr_category)
-  if (!gender && !voiceAge && !speechAge && !attrCategory) return rows // graceful: 무변경
+  if (!gender && !attrCategory) return rows // graceful: 무변경
 
   return rows.map((r) => {
     if (r.speaker_role !== 'other') return r
@@ -175,13 +166,6 @@ export function applyPeerDemographics(
           source: genderSource ?? null,
           ...(genderSource === 'relation_derived' ? { acoustic_reliability: 'low' } : {}),
         }
-      }
-    }
-    if (voiceAge || speechAge) {
-      next.speaker_age_group_estimate = {
-        voice_age_range: voiceAge,
-        speech_age_range: speechAge,
-        ...(genderSource ? { source: genderSource } : {}),
       }
     }
     if (attrCategory) next.attr_category = attrCategory
@@ -248,7 +232,7 @@ const PEER_DECLARED_DEMO_DISCLAIMER =
  * ★gender_source='peer_stated'(상대가 동의 시 직접 신고) 인 행만 emit — 추론(relation_derived)·
  *   스코어러 값은 자기신고 아니므로 declared 블록에서 제외(provenance 정직성). owner 블록과 대칭:
  *   gender=한국어 원문(남성/여성/논바이너리), region/dialect/language=한국어 카테고리 원문,
- *   age_band=자가신고 연령대(peers.voice_age_range 슬롯, 088). 전 필드 부재/미자가신고 → null.
+ *   age_band=자가신고 연령대(peers.age_band 슬롯, 090). 전 필드 부재/미자가신고 → null.
  * - per-speaker `*_estimate`(추정값)와 분리된 '자가신고' 출처 블록(export 단건=peer_demographics.json).
  */
 export function buildPeerDemographics(
@@ -259,7 +243,7 @@ export function buildPeerDemographics(
   const block: Record<string, unknown> = {}
   const gender = declaredGenderKo(peer.gender) // peer_stated 면 한국어
   if (gender) block.gender = gender
-  const age = nonEmptyStringOrNull(peer.voice_age_range)
+  const age = nonEmptyStringOrNull(peer.age_band)
   if (age) block.age_band = age
   const region = nonEmptyStringOrNull(peer.region_group)
   if (region) block.region = region
@@ -291,7 +275,6 @@ export function buildSpeakerLookup(rows: SessionSpeakerRow[]): SpeakerLookupMap 
     map.set(label, {
       role_candidate: mapSessionSpeakerRoleToCandidate(row.speaker_role),
       gender: nonEmptyStringOrNull(row.speaker_gender),
-      voice_age: nonEmptyStringOrNull(row.speaker_voice_age_range),
       relation: nonEmptyStringOrNull(row.speaker_relation),
     })
   }
@@ -314,10 +297,10 @@ export function lookupRoleCandidate(
 /**
  * call.json `speakers[]` 객체 1개. SPEC §4.4 / §5.1.2~5.1.3 구조.
  *
- * 노출 정책: identity_inference / gender_estimate / age_group_estimate JSONB 가
- * 채워져 있으면(estimate value 존재) 그 값을 우선 사용하고, 현재처럼 null 스텁이면
- * 확정 컬럼(speaker_role/gender/voice_age)에서 candidate/estimate 형으로 파생한다.
- * 어느 경우든 disclaimer 를 붙여 안전선 #1(확정 단정 금지)을 준수한다.
+ * 노출 정책: identity_inference / gender_estimate JSONB 가 채워져 있으면(estimate value 존재)
+ * 그 값을 우선 사용하고, 현재처럼 null 스텁이면 확정 컬럼(speaker_role/gender)에서 candidate/estimate 형으로 파생한다.
+ * 연령은 폐기(090 통일로 per-speaker 추론 연령 미산출). 어느 경우든 disclaimer 를 붙여
+ * 안전선 #1(확정 단정 금지)을 준수한다.
  */
 /**
  * 화자 영속 가명(speaker_persistent_id) 산출 컨텍스트.
@@ -382,7 +365,6 @@ export function buildSpeakerExternal(
     ),
     identity_inference: buildIdentityInference(row),
     gender_estimate: buildGenderEstimate(row),
-    age_group_estimate: buildAgeGroupEstimate(row),
   }
   if (EXPOSE_SPEAKER_RELATION) {
     // SPEC §4.4(개정): K-익명성(K=5) 게이트 + 일반화 tier. 데이터셋 전체 빈도표 기준.
@@ -459,23 +441,9 @@ function buildGenderEstimate(row: SessionSpeakerRow): Record<string, unknown> {
   return out
 }
 
-function buildAgeGroupEstimate(row: SessionSpeakerRow): Record<string, unknown> {
-  const jsonb = asObject(row.speaker_age_group_estimate)
-  const jsonbVoice = nonEmptyStringOrNull(jsonb?.voice_age_range ?? jsonb?.value)
-  const voiceAge = jsonbVoice ?? nonEmptyStringOrNull(row.speaker_voice_age_range)
-  const speechAge =
-    nonEmptyStringOrNull(jsonb?.speech_age_range) ??
-    nonEmptyStringOrNull(row.speaker_speech_age_range)
-  const out: Record<string, unknown> = {
-    voice_age_range: voiceAge, // null = 미산출(날조 금지).
-    speech_age_range: speechAge,
-    confidence: numOrNull(jsonb?.confidence),
-    method: sanitizeExternalMethod(jsonb?.method),
-    disclaimer: SPEAKER_ESTIMATE_DISCLAIMER,
-  }
-  const source = nonEmptyStringOrNull(jsonb?.source)
-  if (source) out.source = source
-  return out
+function buildAgeGroupEstimate(row: SessionSpeakerRow): Record<string, unknown> | null {
+  // 연령 폐기: per-speaker voice_age_range/speech_age_range 미산출
+  return null
 }
 
 // ── 헬퍼 ──────────────────────────────────────────────────────────────────

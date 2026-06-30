@@ -30,8 +30,7 @@ describe('buildPeerConfirmUpdate', () => {
         relationship: '형제자매',
         attr_category: '가족',
         gender: '남성',
-        voice_age_range: '60대이상',
-        speech_age_range: '40대',
+        age_band: '60대이상',
       },
       ADMIN,
       NOW,
@@ -48,8 +47,7 @@ describe('buildPeerConfirmUpdate', () => {
     expect(u.gender).toBe('남성')
     expect(u.gender_source).toBe('human_locked')
     expect(u.attr_category).toBe('가족')
-    expect(u.voice_age_range).toBe('60대이상')
-    expect(u.speech_age_range).toBe('40대')
+    expect(u.age_band).toBe('60대이상')
   })
 
   it('구 영문 gender 입력 → 한국어 canonical 로 정규화 저장', () => {
@@ -80,8 +78,8 @@ describe('buildPeerConfirmUpdate', () => {
     expect(buildPeerConfirmUpdate({ gender: 'xyz' }, ADMIN, NOW)).toEqual({ error: 'invalid gender' })
     expect(buildPeerConfirmUpdate({ attr_category: '친구' }, ADMIN, NOW)).toEqual({ error: 'invalid attr_category' })
     // 앱 정본은 '60대이상' — '60대'(구 버킷)는 무효
-    expect(buildPeerConfirmUpdate({ voice_age_range: '60대' }, ADMIN, NOW)).toEqual({ error: 'invalid voice_age_range' })
-    expect(buildPeerConfirmUpdate({ voice_age_range: '50대+' }, ADMIN, NOW)).toEqual({ error: 'invalid voice_age_range' })
+    expect(buildPeerConfirmUpdate({ age_band: '60대' }, ADMIN, NOW)).toEqual({ error: 'invalid age_band' })
+    expect(buildPeerConfirmUpdate({ age_band: '50대+' }, ADMIN, NOW)).toEqual({ error: 'invalid age_band' })
   })
 
   it('null 속성은 무시(잠금만), undefined 와 동일', () => {
@@ -113,13 +111,13 @@ import { buildPeerSelfReportUpdate } from './peerConfirm.js'
 
 describe('buildPeerSelfReportUpdate (상대 자가신고 → peers, peer_stated)', () => {
   const NOW2 = '2026-06-27T00:00:00.000Z'
-  it('전체 자가신고 → peer_stated·override_locked·unverified + gender 한국어 + age는 voice_age_range', () => {
+  it('전체 자가신고 → peer_stated·override_locked·unverified + gender 한국어 + age는 age_band', () => {
     const u = buildPeerSelfReportUpdate(
       { gender: '여성', age_band: '60대이상', region_group: '수도권', accent_group: '경상도', primary_language: '한국어(ko-KR)' },
       NOW2,
     )!
     expect(u.gender).toBe('여성')
-    expect(u.voice_age_range).toBe('60대이상')
+    expect(u.age_band).toBe('60대이상')
     expect(u.region_group).toBe('수도권')
     expect(u.accent_group).toBe('경상도')
     expect(u.primary_language).toBe('한국어(ko-KR)')
@@ -130,12 +128,12 @@ describe('buildPeerSelfReportUpdate (상대 자가신고 → peers, peer_stated)
   it('구 영문 gender → 한국어 canonical 정규화 저장', () => {
     const u = buildPeerSelfReportUpdate({ gender: 'male', age_band: '30대' }, NOW2)!
     expect(u.gender).toBe('남성')
-    expect(u.voice_age_range).toBe('30대')
+    expect(u.age_band).toBe('30대')
   })
   it('무효 필드는 skip(동의 실패 안 시킴), 유효값만', () => {
     const u = buildPeerSelfReportUpdate({ gender: '남성', age_band: '30대', region_group: 'xxx' }, NOW2)!
     expect(u.gender).toBe('남성') // 한국어 정본 수용
-    expect(u.voice_age_range).toBe('30대')
+    expect(u.age_band).toBe('30대')
     expect('region_group' in u).toBe(false) // 'xxx' 무효 → skip
     expect(u.override_locked).toBe(true)
   })

@@ -35,8 +35,7 @@ export interface PeerConfirmInput {
   relationship?: string | null
   attr_category?: string | null
   gender?: string | null
-  voice_age_range?: string | null
-  speech_age_range?: string | null
+  age_band?: string | null
 }
 
 export type PeerConfirmResult =
@@ -78,13 +77,9 @@ export function buildPeerConfirmUpdate(
     if (!ATTR_CATEGORY_VALUES.has(body.attr_category)) return { error: 'invalid attr_category' }
     update.attr_category = body.attr_category
   }
-  if (body.voice_age_range != null) {
-    if (!AGE_RANGE_VALUES.has(body.voice_age_range)) return { error: 'invalid voice_age_range' }
-    update.voice_age_range = body.voice_age_range
-  }
-  if (body.speech_age_range != null) {
-    if (!AGE_RANGE_VALUES.has(body.speech_age_range)) return { error: 'invalid speech_age_range' }
-    update.speech_age_range = body.speech_age_range
+  if (body.age_band != null) {
+    if (!AGE_RANGE_VALUES.has(body.age_band)) return { error: 'invalid age_band' }
+    update.age_band = body.age_band
   }
   return { update }
 }
@@ -146,7 +141,7 @@ export interface PeerSelfReportInput {
  * - override_locked=true(자가신고=권위, 추론·재처리 미덮음), gender_source='peer_stated',
  *   attr_state='peer_stated_unverified'(GPU cross-check 전 초기상태).
  * - enum 위반/미입력 필드는 skip(동의 자체는 실패시키지 않음 — consent 우선). 유효 필드 0개 →
- *   null(peers write skip, graceful). 연령은 voice_age_range 슬롯(source 가 음향 아닌 자가신고 표기).
+ *   null(peers write skip, graceful). 연령은 age_band 슬롯(090 통일).
  * - 필수(성별·연령)는 peer.html 클라이언트가 강제(서버는 graceful — 롤아웃·구클라 안전).
  */
 export function buildPeerSelfReportUpdate(
@@ -156,7 +151,7 @@ export function buildPeerSelfReportUpdate(
   const fields: Record<string, unknown> = {}
   const genderKo = normalizeGenderKo(body.gender)
   if (genderKo) fields.gender = genderKo
-  if (body.age_band != null && AGE_RANGE_VALUES.has(body.age_band)) fields.voice_age_range = body.age_band
+  if (body.age_band != null && AGE_RANGE_VALUES.has(body.age_band)) fields.age_band = body.age_band
   if (body.region_group != null && REGION_VALUES.has(body.region_group)) fields.region_group = body.region_group
   if (body.accent_group != null && ACCENT_VALUES.has(body.accent_group)) fields.accent_group = body.accent_group
   if (body.primary_language != null && LANGUAGE_VALUES.has(body.primary_language)) {

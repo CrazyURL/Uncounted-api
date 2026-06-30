@@ -39,7 +39,7 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
   let query = supabaseAdmin
     .from('utterances')
     .select(
-      'id, session_id, speaker_id, session_speaker_id, segment_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at, quality_grade, quality_review_status, quality_exclusion_reason, emotion, emotion_confidence, dialog_act, dialog_act_confidence, label_source, auto_label_model_version, utterance_form, honorific_level, confidence_tier, review_flags, review_priority_score, sessions(session_seq, date, duration, review_status, consent_status), session_speakers!session_speaker_id(speaker_role, speaker_gender, speaker_voice_age_range), session_segments!segment_id(topic)',
+      'id, session_id, speaker_id, session_speaker_id, segment_id, start_ms, end_ms, transcript_text, duration_seconds, unit_price_krw, settled_at, review_status, exclude_reason, reviewed_at, quality_grade, quality_review_status, quality_exclusion_reason, emotion, emotion_confidence, dialog_act, dialog_act_confidence, label_source, auto_label_model_version, utterance_form, honorific_level, confidence_tier, review_flags, review_priority_score, sessions(session_seq, date, duration, review_status, consent_status), session_speakers!session_speaker_id(speaker_role, speaker_gender), session_segments!segment_id(topic)',
       { count: 'exact' },
     )
 
@@ -114,7 +114,7 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
       | { session_seq?: number | null; date?: string | null; duration?: number | null; review_status?: string | null; consent_status?: string | null }
       | null
     const spk = row.session_speakers as
-      | { speaker_role?: string | null; speaker_gender?: string | null; speaker_voice_age_range?: string | null }
+      | { speaker_role?: string | null; speaker_gender?: string | null }
       | null
     const seg = row.session_segments as { topic?: string | null } | null
     // STAGE 6 — raw title 응답 금지. 합성 display_title 만 반환.
@@ -130,7 +130,6 @@ adminUtterancesV2.get('/utterances-v2', async (c) => {
       session_speaker_id: (row.session_speaker_id as string) ?? null,
       speaker_role: spk?.speaker_role ?? null,
       speaker_gender: spk?.speaker_gender ?? null,
-      speaker_voice_age_range: spk?.speaker_voice_age_range ?? null,
       segment_id: (row.segment_id as string) ?? null,
       segment_topic: seg?.topic ?? null,
       start_ms: startMs,

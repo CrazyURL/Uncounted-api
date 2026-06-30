@@ -312,8 +312,7 @@ adminReviews.get('/reviews', async (c) => {
     speaker_label: string
     speaker_role: string | null
     speaker_gender: string | null
-    speaker_voice_age_range: string | null
-    speaker_speech_age_range: string | null
+    speaker_age_band: string | null
     speaker_relation: string | null
     speaker_accent_group: string | null
     speaker_region_group: string | null
@@ -426,8 +425,7 @@ adminReviews.get('/reviews', async (c) => {
       string,
       {
         gender: string | null
-        voice_age_range: string | null
-        speech_age_range: string | null
+        age_band: string | null
         accent_group: string | null
         region_group: string | null
       }
@@ -437,7 +435,7 @@ adminReviews.get('/reviews', async (c) => {
       const { data: peerRows } = await supabaseAdmin
         .from('peers')
         .select(
-          'id, relationship, gender, voice_age_range, speech_age_range, accent_group, region_group, override_locked',
+          'id, relationship, gender, age_band, accent_group, region_group, override_locked',
         )
         .in('id', uniquePeerIds)
       for (const p of peerRows ?? []) {
@@ -451,8 +449,7 @@ adminReviews.get('/reviews', async (c) => {
         if (pr.override_locked === true) {
           peerDemoByPid.set(pr.id as string, {
             gender: pr.gender as string | null,
-            voice_age_range: pr.voice_age_range as string | null, // 088: 나이=voice_age_range 슬롯
-            speech_age_range: pr.speech_age_range as string | null,
+            age_band: pr.age_band as string | null, // 090: 나이=age_band 슬롯
             accent_group: pr.accent_group as string | null,
             region_group: pr.region_group as string | null,
           })
@@ -480,7 +477,7 @@ adminReviews.get('/reviews', async (c) => {
 
     const { data: spRows, error: spError } = await supabaseAdmin
       .from('session_speakers')
-      .select('session_id, speaker_label, speaker_role, speaker_gender, speaker_voice_age_range, speaker_speech_age_range, speaker_relation')
+      .select('session_id, speaker_label, speaker_role, speaker_gender, speaker_relation')
       .in('session_id', sessionIds)
     if (spError) console.error('[admin-reviews] session_speakers query error:', spError)
     for (const sp of spRows ?? []) {
@@ -496,27 +493,21 @@ adminReviews.get('/reviews', async (c) => {
       //   per-call librosa(통화마다 흔들림) 대신 peer 단위 1값으로 통일. 미확정 peer 는 audio 폴백.
       const peerDemo = spRoleVal === 'other' ? peerDemoByPid.get(peerIdBySession.get(sid) ?? '') : undefined
       const audioGender = spRow.speaker_gender as string | null
-      const audioVoiceAge = spRow.speaker_voice_age_range as string | null
-      const audioSpeechAge = spRow.speaker_speech_age_range as string | null
       arr.push({
         speaker_label: spLabelVal,
         speaker_role: spRoleVal,
-        // self = users_profile 확정값, other = peer 확정값(override_locked) 우선, 없으면 audio 폴백.
+        // self = users_profile 확정값, other = peer 확정값(override_locked).
         //   gender 는 영문 포맷 변환(koGenderToEn). GPU 추론값(미잠금)은 자가신고처럼 쓰지 않음.
         speaker_gender:
           spRoleVal === 'self'
             ? (koGenderToEn(profile?.gender) ?? audioGender ?? null)
             : (koGenderToEn(peerDemo?.gender) ?? audioGender ?? null),
-        speaker_voice_age_range:
-          spRoleVal === 'self'
-            ? (profile?.age_band ?? audioVoiceAge ?? null)
-            : (peerDemo?.voice_age_range ?? audioVoiceAge ?? null),
-        // 말투연령: self=프로필 나이(per-call speech_age 모델은 가중치 미로드=랜덤이라 무의미).
-        //   other=peer 확정 speech_age 또는 확정 나이, 미확정이면 per-call. 둘 다 랜덤 폴백 최소화.
-        speaker_speech_age_range:
+        // 연령 = 연락처 단위 단일 필드(090 통일). self = users_profile.age_band, other = peer.age_band.
+        //   per-call 추론 연령(음향/텍스트) 폐기.
+        speaker_age_band:
           spRoleVal === 'self'
             ? (profile?.age_band ?? null)
-            : (peerDemo?.speech_age_range ?? peerDemo?.voice_age_range ?? audioSpeechAge ?? null),
+            : (peerDemo?.age_band ?? null),
         // other 관계 = peer 통일값 우선, 없으면 per-call 폴백. self = per-call(보통 null).
         speaker_relation:
           (spRoleVal === 'other' ? peerRelByPid.get(peerIdBySession.get(sid) ?? '') : undefined) ??
