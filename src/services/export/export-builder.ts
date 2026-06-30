@@ -377,8 +377,8 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
       .from('session_speakers')
       .select(
         'speaker_label,speaker_role,speaker_role_source,speaker_gender,' +
-          'speaker_voice_age_range,speaker_speech_age_range,speaker_relation,' +
-          'speaker_identity_inference,speaker_gender_estimate,speaker_age_group_estimate',
+          'speaker_relation,' +
+          'speaker_identity_inference,speaker_gender_estimate',
       )
       .eq('session_id', sessionId)
     if (!ss.error && Array.isArray(ss.data)) {
@@ -400,7 +400,7 @@ export async function loadSessionContext(sessionId: string): Promise<SessionCont
     if (peerId && sessionSpeakers.length > 0) {
       const pr = await supabaseAdmin
         .from('peers')
-        .select('relationship, gender, gender_source, voice_age_range, speech_age_range, attr_category, region_group, accent_group, primary_language')
+        .select('relationship, gender, gender_source, age_band, attr_category, region_group, accent_group, primary_language')
         .eq('id', peerId)
         .maybeSingle()
       const peerRow = pr.error ? null : (pr.data as Record<string, unknown> | null)

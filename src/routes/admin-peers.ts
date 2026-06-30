@@ -67,7 +67,7 @@ adminPeers.post('/peers/:peerId/confirm', async (c) => {
     .update(built.update)
     .eq('id', peerId)
     .select(
-      'id, relationship, rel_source, rel_confidence, attr_category, attr_state, gender, gender_source, voice_age_range, speech_age_range, override_locked, locked_by, locked_at',
+      'id, relationship, rel_source, rel_confidence, attr_category, attr_state, gender, gender_source, age_band, override_locked, locked_by, locked_at',
     )
     .single()
   if (error) return c.json({ error: error.message }, 500)
